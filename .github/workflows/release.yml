@@ -34,7 +34,10 @@ jobs:
       - name: Create release PR or publish
         uses: changesets/action@v1
         with:
-          version: pnpm version
+          # `pnpm run version`, not `pnpm version` — the latter is pnpm's builtin
+          # version command (it requires a semver argument and never runs the
+          # package.json script of the same name).
+          version: pnpm run version
           publish: pnpm changeset publish
           title: 'chore: version packages'
           commit: 'chore: version packages'

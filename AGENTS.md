@@ -4,7 +4,7 @@ Monorepo of Nick Nisi's pi extensions. Each `packages/<name>/` is an independent
 
 ## Hard rules
 
-- **Conventional commits are required** (`feat:`, `fix:`, `chore:`, `docs:`, `refactor:` …). PR titles must be conventional — CI enforces it (`lint-pr-title`), and squash-merge titles become the main-branch history.
+- **Conventional commits are required** (`feat:`, `fix:`, `chore:`, `docs:`, `refactor:` …). PR titles must be conventional — CI enforces it (`lint-pr-title`), and the PR title becomes the main-branch commit. Squash is the only merge method enabled and `main` requires linear history, so every PR lands as exactly one conventional commit; branch commits are free-form working history.
 - **Add a changeset for any user-facing change** to a package: run `pnpm changeset`, pick the packages + bump, and commit the generated file with your change. No changeset = no release. (Docs/config/CI-only changes don't need one.)
 - Never edit a package's behavior during a structural move or rename.
 

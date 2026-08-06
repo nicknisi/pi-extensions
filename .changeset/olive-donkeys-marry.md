@@ -1,6 +1,6 @@
 ---
 '@nicknisi/pi-artifacts': patch
-'@nicknisi/pi-chat-input': minor
+'@nicknisi/pi-chat-input': patch
 '@nicknisi/pi-llm-council': patch
 ---
 
