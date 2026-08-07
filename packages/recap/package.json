@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-recap",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Auto-recap card injected into the transcript after idle minutes",
   "keywords": [
     "pi",
