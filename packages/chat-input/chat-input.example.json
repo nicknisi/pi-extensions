@@ -9,5 +9,13 @@
   "prefixColor": "accent",
   "corners": "rounded",
   "focusIndicator": true,
-  "focusedBorderColor": "accent"
+  "focusedBorderColor": "accent",
+  "spinner": true,
+  "spinnerStyle": "dots",
+  "spinnerColor": "accent",
+  "glow": true,
+  "glowStyle": "pulse",
+  "glowColor": "accent",
+  "glowPeriodMs": 2000,
+  "rainbowPeriodMs": 1200
 }

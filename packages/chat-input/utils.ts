@@ -20,6 +20,55 @@ function hexToAnsi(hex: string): string {
   return `\x1b[38;2;${r};${g};${b}m`;
 }
 
+export type Rgb = [number, number, number];
+
+function hexToRgb(hex: string): Rgb | null {
+  const h = hex.replace('#', '');
+  if (!/^[0-9a-fA-F]{6}$/.test(h)) return null;
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+
+/** Resolve a theme token or hex colour to RGB. Returns null when the theme
+ * doesn't emit a truecolor sequence for the token (e.g. 256-colour themes). */
+export function resolveRgb(theme: Theme, color: string): Rgb | null {
+  if (isHexColor(color)) return hexToRgb(color);
+  try {
+    const painted = theme.fg(color as ThemeColor, 'x');
+    const m = painted.match(/\x1b\[38;2;(\d+);(\d+);(\d+)m/);
+    if (m) return [Number(m[1]), Number(m[2]), Number(m[3])];
+  } catch {
+    /* unknown token */
+  }
+  return null;
+}
+
+/** Linear mix of two RGB colours; t=0 gives `a`, t=1 gives `b`. */
+export function mixRgb(a: Rgb, b: Rgb, t: number): Rgb {
+  return [
+    Math.round(a[0] + (b[0] - a[0]) * t),
+    Math.round(a[1] + (b[1] - a[1]) * t),
+    Math.round(a[2] + (b[2] - a[2]) * t),
+  ];
+}
+
+/** Fully saturated rainbow colour, hue-rotating once per `periodMs`. */
+export function rainbowRgb(periodMs: number): Rgb {
+  const h = ((Date.now() % periodMs) / periodMs) * 6; // hue in [0,6)
+  const x = Math.round(255 * (1 - Math.abs((h % 2) - 1)));
+  const sector = Math.floor(h);
+  if (sector === 0) return [255, x, 0];
+  if (sector === 1) return [x, 255, 0];
+  if (sector === 2) return [0, 255, x];
+  if (sector === 3) return [0, x, 255];
+  if (sector === 4) return [x, 0, 255];
+  return [255, 0, x];
+}
+
+/** Paint text with a truecolor foreground. */
+export function rgbColor(rgb: Rgb, text: string): string {
+  return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${text}\x1b[0m`;
+}
+
 /** Apply a colour by theme token or hex value. Hex takes precedence. */
 export function applyColor(theme: Theme, color: string, text: string): string {
   if (isHexColor(color)) {

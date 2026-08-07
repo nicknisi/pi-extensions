@@ -10,7 +10,8 @@
  * Evolved from the earlier `box-editor.ts`: the rendering is now
  * config-driven (~/.pi/agent/configs/chat-input.json) and supports a
  * prefix glyph, boxed/unboxed modes, configurable padding, menu gap,
- * and rounded vs square corners. The rounded ╭╮│╰╯ corners remain the
+ * rounded vs square corners, and working-state animations (spinner prefix
+ * and border glow between agent_start and agent_settled). The rounded ╭╮│╰╯ corners remain the
  * default to preserve the original look. Paste-expand behavior was merged
  * in from the former standalone `paste-expand.ts` so the two features don't
  * fight over `setEditorComponent` (last-call-wins).
@@ -72,7 +73,7 @@ import type { TUI, EditorTheme } from '@earendil-works/pi-tui';
 import type { KeybindingsManager } from '@earendil-works/pi-coding-agent';
 import { visibleWidth } from '@earendil-works/pi-tui';
 import { CONFIG } from './config.js';
-import { applyColor, plainText } from './utils.js';
+import { applyColor, mixRgb, plainText, rainbowRgb, resolveRgb, rgbColor } from './utils.js';
 
 // Corner glyphs per style.
 const CORNERS = {
@@ -99,8 +100,49 @@ function isBorderLike(line: string): boolean {
   return isSolidBorder(line) || getScrollText(line) !== null;
 }
 
-/** Prefix width in terminal cells — layout math supports multi-cell prefixes. */
-const PREFIX_W = Math.max(1, visibleWidth(CONFIG.PREFIX));
+/** Prefix width in terminal cells — layout math supports multi-cell prefixes.
+ * When the spinner is enabled the slot is sized to the widest frame so the
+ * layout doesn't shift while animating. */
+const PREFIX_W = Math.max(
+  1,
+  visibleWidth(CONFIG.PREFIX),
+  ...(CONFIG.SPINNER ? CONFIG.SPINNER_FRAMES.map((f) => visibleWidth(f)) : []),
+);
+
+// ─── Working-state animation (spinner prefix + border glow) ───────────────
+// Busy between agent_start and agent_settled. A single timer drives both
+// animations by requesting renders; frames/phases derive from Date.now() so
+// they stay smooth regardless of tick jitter. pi-tui's invalidate() is a
+// no-op — requestRender() is the only way to repaint from a timer.
+
+let agentBusy = false;
+let busySince = 0;
+let animTimer: ReturnType<typeof setInterval> | undefined;
+let animTui: TUI | undefined;
+
+const ANIMATED = CONFIG.SPINNER || CONFIG.GLOW;
+const ANIM_TICK_MS = Math.min(CONFIG.SPINNER ? CONFIG.SPINNER_INTERVAL_MS : Infinity, CONFIG.GLOW ? 80 : Infinity);
+
+function startAnimation(): void {
+  if (!ANIMATED || animTimer || !animTui) return;
+  animTimer = setInterval(() => animTui?.requestRender(), ANIM_TICK_MS);
+  animTimer.unref?.();
+}
+
+function stopAnimation(): void {
+  if (animTimer) clearInterval(animTimer);
+  animTimer = undefined;
+}
+
+function spinnerFrame(): string {
+  const frames = CONFIG.SPINNER_FRAMES;
+  return frames[Math.floor((Date.now() - busySince) / CONFIG.SPINNER_INTERVAL_MS) % frames.length]!;
+}
+
+/** 0..1 breathing intensity for the pulse glow. */
+function pulsePhase(): number {
+  return (1 - Math.cos((2 * Math.PI * (Date.now() % CONFIG.GLOW_PERIOD_MS)) / CONFIG.GLOW_PERIOD_MS)) / 2;
+}
 
 /** Locate pi's stock top/bottom borders and their scroll indicators in a render. */
 function scanBorders(stock: string[]): {
@@ -137,6 +179,13 @@ function menuLines(stock: string[], lastIdx: number, width: number): string[] {
 
 // ─── Component ────────────────────────────────────────────────────────────
 
+interface Palette {
+  border: (s: string) => string;
+  accent: (s: string) => string;
+  spin: (s: string) => string;
+  glow: (s: string) => string;
+}
+
 // @ts-expect-error TS2415 — handlePaste is a prototype method typed `private` in
 // pi-tui's Editor; overriding it is legal at runtime (dynamic dispatch) and is the
 // only interception point for paste handling. If this stops erroring, pi-tui made
@@ -144,18 +193,16 @@ function menuLines(stock: string[], lastIdx: number, width: number): string[] {
 class ChatInput extends CustomEditor {
   private border: (s: string) => string;
   private accent: (s: string) => string;
+  private spin: (s: string) => string;
+  private glow: (s: string) => string;
   private corners = CORNERS[CONFIG.CORNERS];
 
-  constructor(
-    tui: TUI,
-    theme: EditorTheme,
-    keybindings: KeybindingsManager,
-    borderFn: (s: string) => string,
-    accentFn: (s: string) => string,
-  ) {
+  constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager, palette: Palette) {
     super(tui, theme, keybindings, { paddingX: 0 });
-    this.border = borderFn;
-    this.accent = accentFn;
+    this.border = palette.border;
+    this.accent = palette.accent;
+    this.spin = palette.spin;
+    this.glow = palette.glow;
   }
 
   // ── Paste-again-to-expand ───────────────────────────────────────────────
@@ -246,9 +293,32 @@ class ChatInput extends CustomEditor {
 
   /** A horizontal rule of `width` cells, with the scroll indicator inlaid when present. */
   private rule(scroll: string | null, width: number): string {
-    if (!scroll) return this.border('─'.repeat(width));
+    if (!scroll) {
+      if (agentBusy && CONFIG.GLOW && CONFIG.GLOW_STYLE === 'shimmer') return this.shimmerRule(width);
+      return this.border('─'.repeat(width));
+    }
     const label = `── ${scroll} `;
     return this.border(label) + this.border('─'.repeat(Math.max(0, width - visibleWidth(label))));
+  }
+
+  /** A rule with a glowing highlight sweeping left → right. */
+  private shimmerRule(width: number): string {
+    const win = Math.max(3, Math.min(10, Math.floor(width / 6)));
+    const cycle = width + win;
+    const head = Math.floor(((Date.now() % CONFIG.GLOW_PERIOD_MS) / CONFIG.GLOW_PERIOD_MS) * cycle);
+    const left = Math.max(0, head - win);
+    const right = Math.min(width, head);
+    if (right <= left) return this.border('─'.repeat(width));
+    return this.border('─'.repeat(left)) + this.glow('─'.repeat(right - left)) + this.border('─'.repeat(width - right));
+  }
+
+  /** First-line prefix: spinner frame while the agent works, glyph otherwise. */
+  private prefixGlyph(): string {
+    if (agentBusy && CONFIG.SPINNER) {
+      const frame = spinnerFrame();
+      return this.spin(frame) + ' '.repeat(Math.max(0, PREFIX_W - visibleWidth(frame)));
+    }
+    return this.accent(CONFIG.PREFIX) + ' '.repeat(Math.max(0, PREFIX_W - visibleWidth(CONFIG.PREFIX)));
   }
 
   /** Body lines (between the stock borders): pad + prefix + content, then `wrap`. */
@@ -267,7 +337,7 @@ class ChatInput extends CustomEditor {
       if (lastIdx !== -1 && i > lastIdx) continue;
       const vw = visibleWidth(stock[i]!);
       const fill = vw < contentWidth ? ' '.repeat(contentWidth - vw) : '';
-      const prefixStr = isFirst ? this.accent(CONFIG.PREFIX) : ' '.repeat(PREFIX_W);
+      const prefixStr = isFirst ? this.prefixGlyph() : ' '.repeat(PREFIX_W);
       body.push(wrap(pad + prefixStr + pad + stock[i]! + fill));
       isFirst = false;
     }
@@ -363,18 +433,59 @@ export default function chatInput(pi: ExtensionAPI) {
     ctx.ui.setEditorComponent((tui, theme, kb) => {
       const baseBorder = (s: string) => applyColor(ctx.ui.theme, CONFIG.BORDER_COLOR, s);
       const focusBorder = (s: string) => applyColor(ctx.ui.theme, CONFIG.FOCUSED_BORDER_COLOR, s);
-      const borderFn = CONFIG.FOCUS_INDICATOR
-        ? (s: string) => (paneFocused ? focusBorder(s) : baseBorder(s))
-        : baseBorder;
-      const accentFn = (s: string) => applyColor(ctx.ui.theme, CONFIG.PREFIX_COLOR, s);
+      const restingBorder = (s: string) => (CONFIG.FOCUS_INDICATOR && paneFocused ? focusBorder(s) : baseBorder(s));
+
+      // Paint with a colour name that may be a theme token, hex, or the
+      // special "rainbow" value (hue rotates once per rainbowPeriodMs).
+      const paint = (color: string) => (s: string) =>
+        color === 'rainbow' ? rgbColor(rainbowRgb(CONFIG.RAINBOW_PERIOD_MS), s) : applyColor(ctx.ui.theme, color, s);
+
+      // Pulse glow: interpolate the resting border colour toward the glow
+      // colour. Falls back to a steady glow colour when either endpoint
+      // can't be resolved to RGB (non-truecolor theme tokens).
+      const staticGlowRgb = CONFIG.GLOW_COLOR === 'rainbow' ? null : resolveRgb(ctx.ui.theme, CONFIG.GLOW_COLOR);
+      const pulseBorder = (s: string): string => {
+        const glowRgb = CONFIG.GLOW_COLOR === 'rainbow' ? rainbowRgb(CONFIG.RAINBOW_PERIOD_MS) : staticGlowRgb;
+        const baseName = CONFIG.FOCUS_INDICATOR && paneFocused ? CONFIG.FOCUSED_BORDER_COLOR : CONFIG.BORDER_COLOR;
+        const baseRgb = resolveRgb(ctx.ui.theme, baseName);
+        if (!baseRgb || !glowRgb) return paint(CONFIG.GLOW_COLOR)(s);
+        return rgbColor(mixRgb(baseRgb, glowRgb, pulsePhase()), s);
+      };
+
+      const borderFn = (s: string) =>
+        agentBusy && CONFIG.GLOW && CONFIG.GLOW_STYLE === 'pulse' ? pulseBorder(s) : restingBorder(s);
+
       if (CONFIG.FOCUS_INDICATOR) enableFocusTracking(tui);
-      return new ChatInput(tui, theme, kb, borderFn, accentFn);
+      animTui = tui;
+      return new ChatInput(tui, theme, kb, {
+        border: borderFn,
+        accent: (s: string) => applyColor(ctx.ui.theme, CONFIG.PREFIX_COLOR, s),
+        spin: paint(CONFIG.SPINNER_COLOR),
+        glow: paint(CONFIG.GLOW_COLOR),
+      });
     });
+  });
+
+  pi.on('agent_start', (_event, ctx: ExtensionContext) => {
+    if (ctx.mode !== 'tui') return;
+    agentBusy = true;
+    busySince = Date.now();
+    startAnimation();
+  });
+
+  pi.on('agent_settled', (_event, ctx: ExtensionContext) => {
+    if (ctx.mode !== 'tui') return;
+    agentBusy = false;
+    stopAnimation();
+    animTui?.requestRender();
   });
 
   pi.on('session_shutdown', (_event, ctx: ExtensionContext) => {
     if (ctx.mode !== 'tui') return;
     if (CONFIG.FOCUS_INDICATOR) disableFocusTracking();
+    agentBusy = false;
+    stopAnimation();
+    animTui = undefined;
     ctx.ui.setEditorComponent(undefined);
   });
 }
