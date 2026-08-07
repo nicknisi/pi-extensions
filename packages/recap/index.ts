@@ -1,9 +1,8 @@
 import { uuidv7 } from '@earendil-works/pi-ai';
 import { complete, getModel } from '@earendil-works/pi-ai/compat';
-import { getMarkdownTheme, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { getAgentDir, getMarkdownTheme, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Box, Markdown, Text } from '@earendil-works/pi-tui';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 
 // Auto-recap: after N idle minutes, inject a dimmed recap card into the transcript.
@@ -11,7 +10,13 @@ import * as path from 'node:path';
 type Config = { idleMinutes: number; model?: { provider: string; id: string } };
 
 const DEFAULT_CONFIG: Config = { idleMinutes: 3 };
-const CONFIG_PATH = path.join(os.homedir(), '.pi', 'agent', 'configs', 'recap.json');
+// Resolved per call, not at module load: `getAgentDir()` honours the agent-dir
+// env var, so hardcoding ~/.pi/agent would read (and write) the wrong file for
+// anyone running a non-default agent dir. Per-call also means a config written
+// by `saveConfig` is visible to the next read.
+function configPath(): string {
+  return path.join(getAgentDir(), 'configs', 'recap.json');
+}
 const ENTRY_TYPE = 'recap';
 const TICK_MS = 30_000;
 const MIN_BRANCH_LEN = 4;
@@ -24,7 +29,7 @@ let piRef: ExtensionAPI | null = null;
 
 function readConfig(): Config {
   try {
-    const parsed = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+    const parsed = JSON.parse(fs.readFileSync(configPath(), 'utf8'));
     return {
       idleMinutes: typeof parsed.idleMinutes === 'number' ? parsed.idleMinutes : DEFAULT_CONFIG.idleMinutes,
       model: parsed.model && typeof parsed.model === 'object' ? parsed.model : undefined,
@@ -35,8 +40,8 @@ function readConfig(): Config {
 }
 
 function writeConfig(c: Config) {
-  fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(c, null, 2));
+  fs.mkdirSync(path.dirname(configPath()), { recursive: true });
+  fs.writeFileSync(configPath(), JSON.stringify(c, null, 2));
 }
 
 type Entry = { type: string; message?: { role?: string; content?: unknown } };

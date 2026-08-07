@@ -280,6 +280,22 @@ interface ExecConfig {
 
 // ── Subprocess ───────────────────────────────────────────────────────────
 
+// Council `extensions`/`skills` entries are bare resource names resolved under
+// the user's own agent dir. Project-local config (<cwd>/.pi/configs/llm-council.json)
+// is untrusted repository input, so a name must never contain path separators or
+// `..` segments: otherwise `path.join` collapses a crafted name into an arbitrary
+// filesystem path passed to pi as `-e`/`--skill`, loading repo-controlled code
+// outside pi's project-trust gate. Reject anything that isn't a contained bare name.
+function resolveContainedResourcePath(kind: 'extensions' | 'skills', name: string, leaf: string): string | null {
+  if (typeof name !== 'string' || name.length === 0) return null;
+  if (name.includes('/') || name.includes('\\') || name === '..' || name === '.') return null;
+  const baseDir = path.join(getAgentDir(), kind);
+  const resolved = path.resolve(baseDir, name, leaf);
+  const containmentRoot = path.resolve(baseDir) + path.sep;
+  if (!resolved.startsWith(containmentRoot)) return null;
+  return resolved;
+}
+
 function buildExecArgs(exec: ExecConfig): string[] {
   const args: string[] = [];
 
@@ -303,7 +319,14 @@ function buildExecArgs(exec: ExecConfig): string[] {
   } else {
     args.push('--no-extensions');
     for (const name of exec.extensions) {
-      args.push('-e', path.join(getAgentDir(), 'extensions', name, 'src', 'index.ts'));
+      const extPath = resolveContainedResourcePath('extensions', name, path.join('src', 'index.ts'));
+      if (extPath === null) {
+        console.error(
+          `[llm-council] ignoring extension ${JSON.stringify(name)}: names must be bare (no path separators or "..")`,
+        );
+        continue;
+      }
+      args.push('-e', extPath);
     }
   }
 
@@ -315,7 +338,14 @@ function buildExecArgs(exec: ExecConfig): string[] {
   } else {
     args.push('--no-skills');
     for (const name of exec.skills) {
-      args.push('--skill', path.join(getAgentDir(), 'skills', name, 'SKILL.md'));
+      const skillPath = resolveContainedResourcePath('skills', name, 'SKILL.md');
+      if (skillPath === null) {
+        console.error(
+          `[llm-council] ignoring skill ${JSON.stringify(name)}: names must be bare (no path separators or "..")`,
+        );
+        continue;
+      }
+      args.push('--skill', skillPath);
     }
   }
 

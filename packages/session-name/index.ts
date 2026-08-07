@@ -40,6 +40,7 @@
 import type { Message } from '@earendil-works/pi-ai';
 import { getModelProvider } from '@nicknisi/pi-shared';
 import {
+  getAgentDir,
   SessionManager,
   type ExtensionAPI,
   type ExtensionContext,
@@ -47,7 +48,6 @@ import {
   type SessionInfo,
 } from '@earendil-works/pi-coding-agent';
 import { readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 
 // ── Config ────────────────────────────────────────────────────────────────
@@ -81,7 +81,9 @@ const DEFAULT_CONFIG: SessionNameConfig = {
 
 function loadConfig(): SessionNameConfig {
   try {
-    const path = join(homedir(), '.pi', 'agent', 'configs', 'session-name.json');
+    // `getAgentDir()`, not a hardcoded ~/.pi/agent: the agent dir is
+    // configurable, and reading the wrong one silently ignores the user's config.
+    const path = join(getAgentDir(), 'configs', 'session-name.json');
     const raw = readFileSync(path, 'utf8');
     const parsed = JSON.parse(raw) as Partial<SessionNameConfig>;
     return { ...DEFAULT_CONFIG, ...parsed };
