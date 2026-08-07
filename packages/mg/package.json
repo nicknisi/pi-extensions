@@ -1,0 +1,35 @@
+{
+  "name": "@nicknisi/pi-mg",
+  "version": "0.1.0",
+  "description": "WorkOS 100% File Completion Animation — a Severance-inspired animation starring Michael Grinich",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-package"
+  ],
+  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/mg#readme",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicknisi/pi-extensions.git",
+    "directory": "packages/mg"
+  },
+  "files": [
+    "index.ts",
+    "sound.ts",
+    "sprite.ts"
+  ],
+  "type": "module",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
