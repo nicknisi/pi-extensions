@@ -15,13 +15,17 @@
     "directory": "packages/claude-compat"
   },
   "files": [
+    "dist",
     "index.ts",
     "dynamic-skills.ts",
     "README.md"
   ],
   "type": "module",
   "exports": {
-    ".": "./index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"

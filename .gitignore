@@ -1,4 +1,5 @@
 node_modules/
 dist/
+.tsconfig.build.json
 *.log
 .DS_Store

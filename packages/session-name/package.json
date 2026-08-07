@@ -15,12 +15,16 @@
     "directory": "packages/session-name"
   },
   "files": [
+    "dist",
     "index.ts",
     "session-name.example.json"
   ],
   "type": "module",
   "exports": {
-    ".": "./index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
   "dependencies": {
     "@nicknisi/pi-shared": "workspace:*"

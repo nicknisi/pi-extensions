@@ -15,11 +15,15 @@
     "directory": "packages/recap"
   },
   "files": [
+    "dist",
     "index.ts"
   ],
   "type": "module",
   "exports": {
-    ".": "./index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

@@ -15,6 +15,7 @@
     "directory": "packages/llm-council"
   },
   "files": [
+    "dist",
     "index.ts",
     "config.ts",
     "utils.ts",
@@ -25,7 +26,10 @@
   ],
   "type": "module",
   "exports": {
-    ".": "./index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
   "dependencies": {
     "typebox": "^1.1.0"

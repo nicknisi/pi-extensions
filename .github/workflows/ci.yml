@@ -36,6 +36,13 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
+      # Emit is a separate failure surface from `--noEmit`: it resolves
+      # workspace siblings through their published `exports` instead of the
+      # root tsconfig's source `paths`, so it is what catches a package whose
+      # declaration output is unusable by a real consumer.
+      - name: Build
+        run: pnpm run build
+
       # Skipped on the release PR: `chore: version packages` bumps every
       # package.json and deletes the changesets it consumed, so it always
       # looks like "packages changed, no changesets" and would never pass.

@@ -63,11 +63,29 @@ Local paths are added to pi's settings without copying — edits in the repo are
 ```bash
 pnpm install
 pnpm typecheck   # tsgo (TypeScript 7 native preview)
+pnpm build       # compile each package to packages/<name>/dist/
 pnpm lint        # oxlint
 pnpm fmt         # oxfmt
 ```
 
-Layout: one directory per package in `packages/`, each with `index.ts` + `package.json` carrying a `pi` manifest (`"pi": { "extensions": ["./index.ts"] }`). Extensions ship TypeScript source directly — pi's loader handles it; there is no build step. `@earendil-works/*` packages are peer dependencies: pi's runtime aliases them to its own modules at load time, and the root devDependencies provide one canonical copy for typechecking (`autoInstallPeers: false` keeps it that way).
+Layout: one directory per package in `packages/`, each with `index.ts` + `package.json` carrying a `pi` manifest (`"pi": { "extensions": ["./index.ts"] }`). `@earendil-works/*` packages are peer dependencies: pi's runtime aliases them to its own modules at load time, and the root devDependencies provide one canonical copy for typechecking (`autoInstallPeers: false` keeps it that way).
+
+### Two entry points per package
+
+Each package publishes its TypeScript sources _and_ compiled JS, and they are used by different consumers:
+
+| Field           | Points at                               | Used by                                            |
+| --------------- | --------------------------------------- | -------------------------------------------------- |
+| `pi.extensions` | `./index.ts`                            | pi, which transpiles extensions through jiti       |
+| `exports`       | `./dist/index.js` + `./dist/index.d.ts` | everyone else — bundlers, and anything `tsc`-built |
+
+The split exists because Node refuses to strip types inside `node_modules` (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), so a `tsc`-built consumer importing raw `.ts` from a package crashes at runtime. Keeping `pi.extensions` on the sources means local path installs (`pi install ../pi-extensions/packages/statusline`) still need no build step, which is the point of the rapid-testing loop.
+
+Consequences worth knowing:
+
+- **`dist/` is git-ignored**, so `pnpm build` runs in CI before publish (see `release.yml`) and from the root `prepare` script after `pnpm install`. That hook is load-bearing for local path installs: six packages depend on `@nicknisi/pi-shared`, which now resolves through its own `exports` into `dist/`, so a fresh clone with no build would fail to load them in pi. If you ever delete `dist/` by hand, run `pnpm build` — a no-op `pnpm install` will not re-run `prepare`.
+- **Relative imports use `.js`, never `.ts`** (`import { x } from './config.js'`), the normal NodeNext convention — `allowImportingTsExtensions` is deliberately off so the typecheck catches any regression.
+- **`paths` in the root tsconfig** maps `@nicknisi/pi-shared` to its source, so a fresh clone typechecks without building first. The build turns that off (`paths: {}`) and resolves siblings through their real `exports` instead, which is what proves the declaration output is actually usable.
 
 Cross-package helpers go in `packages/shared`, consumed as `"@nicknisi/pi-shared": "workspace:*"`.
 

@@ -35,12 +35,12 @@ import {
   type Theme,
 } from '@earendil-works/pi-coding-agent';
 import type { Component } from '@earendil-works/pi-tui';
-import * as blinkDataLarge from './frames-blink-large.ts';
-import * as blinkDataSmall from './frames-blink-small.ts';
-import * as blinkData from './frames-blink.ts';
-import * as waitingDataLarge from './frames-waiting-large.ts';
-import * as waitingDataSmall from './frames-waiting-small.ts';
-import * as waitingData from './frames-waiting.ts';
+import * as blinkDataLarge from './frames-blink-large.js';
+import * as blinkDataSmall from './frames-blink-small.js';
+import * as blinkData from './frames-blink.js';
+import * as waitingDataLarge from './frames-waiting-large.js';
+import * as waitingDataSmall from './frames-waiting-small.js';
+import * as waitingData from './frames-waiting.js';
 
 const ANSI_RESET = '\x1b[0m';
 const ANSI_RE = /\u001b\[[0-9;]*m/g; // eslint-disable-line no-control-regex -- intentional: matches ANSI color escapes

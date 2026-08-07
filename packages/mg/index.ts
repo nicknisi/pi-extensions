@@ -12,9 +12,9 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { matchesKey } from '@earendil-works/pi-tui';
 import type { ChildProcess } from 'node:child_process';
-import type { RGB } from './sprite.ts';
-import { getSpriteGrid, stampFlyer, stampWalker, MG_TRANSPARENT, MG_PALETTE } from './sprite.ts';
-import { playTone, playNoise, playFanfare, playWhoosh, playClick, speak, killProc } from './sound.ts';
+import type { RGB } from './sprite.js';
+import { getSpriteGrid, stampFlyer, stampWalker, MG_TRANSPARENT, MG_PALETTE } from './sprite.js';
+import { playTone, playNoise, playFanfare, playWhoosh, playClick, speak, killProc } from './sound.js';
 
 // === Constants ===
 

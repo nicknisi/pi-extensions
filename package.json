@@ -5,6 +5,8 @@
   "description": "Nick Nisi's pi extensions — monorepo of independently installable pi packages",
   "type": "module",
   "scripts": {
+    "build": "node scripts/build.ts",
+    "prepare": "pnpm build",
     "typecheck": "tsgo --noEmit",
     "lint": "oxlint .",
     "format": "oxfmt .",
@@ -13,7 +15,7 @@
     "fmt:check": "oxfmt --check .",
     "changeset": "changeset",
     "version": "changeset version",
-    "release": "pnpm typecheck && changeset publish"
+    "release": "pnpm typecheck && pnpm build && changeset publish"
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.1",

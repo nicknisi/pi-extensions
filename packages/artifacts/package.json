@@ -15,6 +15,7 @@
     "directory": "packages/artifacts"
   },
   "files": [
+    "dist",
     "index.ts",
     "config.ts",
     "server.ts",
@@ -26,7 +27,10 @@
   ],
   "type": "module",
   "exports": {
-    ".": "./index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
   "dependencies": {
     "diff2html": "^3.4.52",

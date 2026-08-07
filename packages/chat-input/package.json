@@ -15,6 +15,7 @@
     "directory": "packages/chat-input"
   },
   "files": [
+    "dist",
     "index.ts",
     "config.ts",
     "utils.ts",
@@ -23,7 +24,10 @@
   ],
   "type": "module",
   "exports": {
-    ".": "./index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

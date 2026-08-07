@@ -15,13 +15,17 @@
     "directory": "packages/mg"
   },
   "files": [
+    "dist",
     "index.ts",
     "sound.ts",
     "sprite.ts"
   ],
   "type": "module",
   "exports": {
-    ".": "./index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

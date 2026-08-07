@@ -38,7 +38,10 @@ jobs:
           # version command (it requires a semver argument and never runs the
           # package.json script of the same name).
           version: pnpm run version
-          publish: pnpm changeset publish
+          # `pnpm run release`, not a bare `changeset publish` — packages ship
+          # compiled JS from dist/, which is git-ignored, so it must be built
+          # in CI before anything is published.
+          publish: pnpm run release
           title: 'chore: version packages'
           commit: 'chore: version packages'
         env:

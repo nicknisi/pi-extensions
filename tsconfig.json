@@ -10,10 +10,15 @@
     "exactOptionalPropertyTypes": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+    // Intra-repo imports resolve to source, not to emitted output. Without
+    // this, `exports` pointing at ./dist/index.d.ts would make both the
+    // typecheck and the build depend on a prior build of pi-shared.
+    "paths": {
+      "@nicknisi/pi-shared": ["./packages/shared/index.ts"]
+    }
   },
   "include": ["packages/**/*.ts"],
   "exclude": ["**/node_modules"]
