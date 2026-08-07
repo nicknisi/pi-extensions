@@ -36,6 +36,9 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
+      # Skipped on the release PR: `chore: version packages` bumps every
+      # package.json and deletes the changesets it consumed, so it always
+      # looks like "packages changed, no changesets" and would never pass.
       - name: Changeset Status
         run: pnpm changeset status --since=origin/main
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && github.head_ref != 'changeset-release/main'
