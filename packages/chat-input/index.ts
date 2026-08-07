@@ -11,7 +11,7 @@
  * config-driven (~/.pi/agent/configs/chat-input.json) and supports a
  * prefix glyph, boxed/unboxed modes, configurable padding, menu gap,
  * rounded vs square corners, and working-state animations (spinner prefix
- * and border glow between agent_start and agent_settled). The rounded ╭╮│╰╯ corners remain the
+ * and border glow while the agent works). The rounded ╭╮│╰╯ corners remain the
  * default to preserve the original look. Paste-expand behavior was merged
  * in from the former standalone `paste-expand.ts` so the two features don't
  * fight over `setEditorComponent` (last-call-wins).
@@ -72,7 +72,7 @@ import { CustomEditor, type ExtensionAPI, type ExtensionContext } from '@earendi
 import type { TUI, EditorTheme } from '@earendil-works/pi-tui';
 import type { KeybindingsManager } from '@earendil-works/pi-coding-agent';
 import { visibleWidth } from '@earendil-works/pi-tui';
-import { CONFIG } from './config.js';
+import { CONFIG, configLoadError, reloadConfig } from './config.js';
 import { applyColor, mixRgb, plainText, rainbowRgb, resolveRgb, rgbColor } from './utils.js';
 
 // Corner glyphs per style.
@@ -102,36 +102,59 @@ function isBorderLike(line: string): boolean {
 
 /** Prefix width in terminal cells — layout math supports multi-cell prefixes.
  * When the spinner is enabled the slot is sized to the widest frame so the
- * layout doesn't shift while animating. */
-const PREFIX_W = Math.max(
-  1,
-  visibleWidth(CONFIG.PREFIX),
-  ...(CONFIG.SPINNER ? CONFIG.SPINNER_FRAMES.map((f) => visibleWidth(f)) : []),
-);
+ * layout doesn't shift while animating. Recomputed on config reload. */
+let PREFIX_W = prefixWidth();
+
+function prefixWidth(): number {
+  return Math.max(
+    1,
+    visibleWidth(CONFIG.PREFIX),
+    ...(CONFIG.SPINNER ? CONFIG.SPINNER_FRAMES.map((f) => visibleWidth(f)) : []),
+  );
+}
 
 // ─── Working-state animation (spinner prefix + border glow) ───────────────
-// Busy between agent_start and agent_settled. A single timer drives both
-// animations by requesting renders; frames/phases derive from Date.now() so
-// they stay smooth regardless of tick jitter. pi-tui's invalidate() is a
-// no-op — requestRender() is the only way to repaint from a timer.
+// Busy between agent_start and agent_settled (or during a /chat-input
+// preview). A single timer drives both animations by requesting renders;
+// frames/phases derive from Date.now() so they stay smooth regardless of
+// tick jitter. pi-tui's invalidate() is a no-op — requestRender() is the
+// only way to repaint from a timer.
 
 let agentBusy = false;
+let agentRunning = false; // real agent run in flight (vs. preview-only busy)
 let busySince = 0;
 let animTimer: ReturnType<typeof setInterval> | undefined;
+let previewTimer: ReturnType<typeof setTimeout> | undefined;
 let animTui: TUI | undefined;
 
-const ANIMATED = CONFIG.SPINNER || CONFIG.GLOW;
-const ANIM_TICK_MS = Math.min(CONFIG.SPINNER ? CONFIG.SPINNER_INTERVAL_MS : Infinity, CONFIG.GLOW ? 80 : Infinity);
-
 function startAnimation(): void {
-  if (!ANIMATED || animTimer || !animTui) return;
-  animTimer = setInterval(() => animTui?.requestRender(), ANIM_TICK_MS);
+  if (animTimer || !animTui) return;
+  if (!CONFIG.SPINNER && !CONFIG.GLOW) return;
+  const tickMs = Math.min(CONFIG.SPINNER ? CONFIG.SPINNER_INTERVAL_MS : Infinity, CONFIG.GLOW ? 80 : Infinity);
+  animTimer = setInterval(() => animTui?.requestRender(), tickMs);
   animTimer.unref?.();
 }
 
 function stopAnimation(): void {
   if (animTimer) clearInterval(animTimer);
   animTimer = undefined;
+}
+
+function beginBusy(): void {
+  agentBusy = true;
+  busySince = Date.now();
+  startAnimation();
+}
+
+function endBusy(): void {
+  agentBusy = false;
+  stopAnimation();
+  animTui?.requestRender();
+}
+
+function cancelPreview(): void {
+  if (previewTimer) clearTimeout(previewTimer);
+  previewTimer = undefined;
 }
 
 function spinnerFrame(): string {
@@ -195,7 +218,11 @@ class ChatInput extends CustomEditor {
   private accent: (s: string) => string;
   private spin: (s: string) => string;
   private glow: (s: string) => string;
-  private corners = CORNERS[CONFIG.CORNERS];
+
+  // Read from CONFIG at render time so a config reload takes effect live.
+  private get corners() {
+    return CORNERS[CONFIG.CORNERS];
+  }
 
   constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager, palette: Palette) {
     super(tui, theme, keybindings, { paddingX: 0 });
@@ -312,13 +339,13 @@ class ChatInput extends CustomEditor {
     return this.border('─'.repeat(left)) + this.glow('─'.repeat(right - left)) + this.border('─'.repeat(width - right));
   }
 
-  /** First-line prefix: spinner frame while the agent works, glyph otherwise. */
+  /** First-line prefix: spinner frame while the agent works, glyph otherwise.
+   * Always padded to PREFIX_W so the layout never shifts. */
   private prefixGlyph(): string {
-    if (agentBusy && CONFIG.SPINNER) {
-      const frame = spinnerFrame();
-      return this.spin(frame) + ' '.repeat(Math.max(0, PREFIX_W - visibleWidth(frame)));
-    }
-    return this.accent(CONFIG.PREFIX) + ' '.repeat(Math.max(0, PREFIX_W - visibleWidth(CONFIG.PREFIX)));
+    const spinning = agentBusy && CONFIG.SPINNER;
+    const glyph = spinning ? spinnerFrame() : CONFIG.PREFIX;
+    const painted = spinning ? this.spin(glyph) : this.accent(glyph);
+    return painted + ' '.repeat(Math.max(0, PREFIX_W - visibleWidth(glyph)));
   }
 
   /** Body lines (between the stock borders): pad + prefix + content, then `wrap`. */
@@ -431,24 +458,33 @@ export default function chatInput(pi: ExtensionAPI) {
   pi.on('session_start', (_event, ctx: ExtensionContext) => {
     if (ctx.mode !== 'tui') return;
     ctx.ui.setEditorComponent((tui, theme, kb) => {
-      const baseBorder = (s: string) => applyColor(ctx.ui.theme, CONFIG.BORDER_COLOR, s);
-      const focusBorder = (s: string) => applyColor(ctx.ui.theme, CONFIG.FOCUSED_BORDER_COLOR, s);
-      const restingBorder = (s: string) => (CONFIG.FOCUS_INDICATOR && paneFocused ? focusBorder(s) : baseBorder(s));
+      // All palette fns read CONFIG.* at call time so /chat-input reloads
+      // take effect without rebuilding the editor component.
+      const restingBorder = (s: string) =>
+        applyColor(
+          ctx.ui.theme,
+          CONFIG.FOCUS_INDICATOR && paneFocused ? CONFIG.FOCUSED_BORDER_COLOR : CONFIG.BORDER_COLOR,
+          s,
+        );
 
       // Paint with a colour name that may be a theme token, hex, or the
       // special "rainbow" value (hue rotates once per rainbowPeriodMs).
-      const paint = (color: string) => (s: string) =>
+      const paint = (color: string, s: string): string =>
         color === 'rainbow' ? rgbColor(rainbowRgb(CONFIG.RAINBOW_PERIOD_MS), s) : applyColor(ctx.ui.theme, color, s);
 
-      // Pulse glow: interpolate the resting border colour toward the glow
-      // colour. Falls back to a steady glow colour when either endpoint
-      // can't be resolved to RGB (non-truecolor theme tokens).
-      const staticGlowRgb = CONFIG.GLOW_COLOR === 'rainbow' ? null : resolveRgb(ctx.ui.theme, CONFIG.GLOW_COLOR);
+      // Pulse glow: interpolate borderColor toward the glow colour. Anchoring
+      // on borderColor (not the focus-adjusted resting colour) keeps the
+      // default visible: with focusIndicator on, the focused resting border
+      // is accent, and an accent→accent pulse would be a no-op. Falls back to
+      // a steady glow colour when either endpoint can't be resolved to RGB
+      // (non-truecolor theme tokens).
       const pulseBorder = (s: string): string => {
-        const glowRgb = CONFIG.GLOW_COLOR === 'rainbow' ? rainbowRgb(CONFIG.RAINBOW_PERIOD_MS) : staticGlowRgb;
-        const baseName = CONFIG.FOCUS_INDICATOR && paneFocused ? CONFIG.FOCUSED_BORDER_COLOR : CONFIG.BORDER_COLOR;
-        const baseRgb = resolveRgb(ctx.ui.theme, baseName);
-        if (!baseRgb || !glowRgb) return paint(CONFIG.GLOW_COLOR)(s);
+        const glowRgb =
+          CONFIG.GLOW_COLOR === 'rainbow'
+            ? rainbowRgb(CONFIG.RAINBOW_PERIOD_MS)
+            : resolveRgb(ctx.ui.theme, CONFIG.GLOW_COLOR);
+        const baseRgb = resolveRgb(ctx.ui.theme, CONFIG.BORDER_COLOR);
+        if (!baseRgb || !glowRgb) return paint(CONFIG.GLOW_COLOR, s);
         return rgbColor(mixRgb(baseRgb, glowRgb, pulsePhase()), s);
       };
 
@@ -460,29 +496,68 @@ export default function chatInput(pi: ExtensionAPI) {
       return new ChatInput(tui, theme, kb, {
         border: borderFn,
         accent: (s: string) => applyColor(ctx.ui.theme, CONFIG.PREFIX_COLOR, s),
-        spin: paint(CONFIG.SPINNER_COLOR),
-        glow: paint(CONFIG.GLOW_COLOR),
+        spin: (s: string) => paint(CONFIG.SPINNER_COLOR, s),
+        glow: (s: string) => paint(CONFIG.GLOW_COLOR, s),
       });
     });
+
+    const loadError = configLoadError();
+    if (loadError) ctx.ui.notify(`chat-input.json ignored (using defaults): ${loadError}`, 'warning');
+  });
+
+  pi.registerCommand('chat-input', {
+    description: 'Reload chat-input.json and preview the working animation',
+    handler: async (_args, ctx) => {
+      const error = reloadConfig();
+      if (error) {
+        ctx.ui.notify(`chat-input.json not applied (kept previous config): ${error}`, 'error');
+        return;
+      }
+      PREFIX_W = prefixWidth();
+      if (animTui) {
+        if (CONFIG.FOCUS_INDICATOR) enableFocusTracking(animTui);
+        else disableFocusTracking();
+      }
+      if (agentBusy) {
+        // Restart the timer so a changed spinner interval takes effect.
+        stopAnimation();
+        startAnimation();
+      }
+      ctx.ui.notify('chat-input config reloaded', 'info');
+      animTui?.requestRender();
+
+      // Fake a short busy window so the spinner/glow can be seen without
+      // sending a prompt. A real agent run takes over seamlessly.
+      if (!agentRunning && (CONFIG.SPINNER || CONFIG.GLOW)) {
+        cancelPreview();
+        beginBusy();
+        previewTimer = setTimeout(() => {
+          previewTimer = undefined;
+          if (!agentRunning) endBusy();
+        }, 3000);
+        previewTimer.unref?.();
+      }
+    },
   });
 
   pi.on('agent_start', (_event, ctx: ExtensionContext) => {
     if (ctx.mode !== 'tui') return;
-    agentBusy = true;
-    busySince = Date.now();
-    startAnimation();
+    agentRunning = true;
+    cancelPreview();
+    beginBusy();
   });
 
   pi.on('agent_settled', (_event, ctx: ExtensionContext) => {
     if (ctx.mode !== 'tui') return;
-    agentBusy = false;
-    stopAnimation();
-    animTui?.requestRender();
+    agentRunning = false;
+    endBusy();
   });
 
   pi.on('session_shutdown', (_event, ctx: ExtensionContext) => {
     if (ctx.mode !== 'tui') return;
     if (CONFIG.FOCUS_INDICATOR) disableFocusTracking();
+    cancelPreview();
+    agentRunning = false;
     agentBusy = false;
     stopAnimation();
     animTui = undefined;

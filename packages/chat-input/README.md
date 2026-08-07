@@ -13,8 +13,10 @@ standalone `paste-expand.ts` so the two features don't fight over
 
 ## What it adds
 
-- **Custom editor component** via `ctx.ui.setEditorComponent` (no slash
-  commands, no tools, no keybindings, no custom entry types).
+- **Custom editor component** via `ctx.ui.setEditorComponent` (no tools, no
+  keybindings, no custom entry types).
+- **`/chat-input` command**: reloads `chat-input.json` without restarting pi
+  and previews the working animation for ~3 seconds.
 - **Events hooked**: `session_start` (installs the editor component),
   `agent_start` / `agent_settled` (drive the working-state animations), and
   `session_shutdown` (removes it and tears down focus tracking and animation
@@ -45,9 +47,10 @@ pi install /path/to/pi-extensions/packages/chat-input
 
 ## Usage
 
-Once installed, there is nothing to invoke — the editor component is installed
-automatically at session start. Editing, history, autocomplete, and paste
-behave as usual inside the box.
+Once installed, the editor component is installed automatically at session
+start. Editing, history, autocomplete, and paste behave as usual inside the
+box. Run `/chat-input` after editing the config to reload it in place and
+preview the spinner/glow without sending a prompt.
 
 Paste-again-to-expand works automatically too: pi collapses large pastes
 (>10 lines or >1000 chars) into `[paste #N +X lines]` markers; paste the same
@@ -68,10 +71,12 @@ Layout (boxed):
 
 ## Configuration
 
-Config is read once at extension load from
-`~/.pi/agent/configs/chat-input.json` — restart pi to apply changes. The path
-follows pi's agent dir, so it moves with `PI_CODING_AGENT_DIR` if you set it.
-Missing file or invalid JSON falls back to all defaults silently. Copy
+Config is read at extension load from
+`~/.pi/agent/configs/chat-input.json`; run `/chat-input` to reload it without
+restarting pi (it also previews the working animation). The path follows pi's
+agent dir, so it moves with `PI_CODING_AGENT_DIR` if you set it. A missing
+file means all defaults; invalid JSON is reported (at startup via a warning,
+on `/chat-input` via an error) and the previous/default config is kept. Copy
 `chat-input.example.json` from this package as a starting point.
 
 ```json
@@ -160,10 +165,11 @@ hue rotation completing one full spectrum lap per `rainbowPeriodMs`. A rainbow
 `glowColor` makes the pulse breathe toward a continuously rotating hue (and
 the shimmer highlight cycle colours).
 
-> **Tip — pulse looks invisible?** With `focusIndicator` on (the default), the
-> focused border colour is `accent`; a `glowColor` of `"accent"` then pulses
-> accent→accent, which is a no-op. Pick a `glowColor` that differs from the
-> resting border colour, or set `focusedBorderColor` to `"border"`.
+The pulse anchors on `borderColor` (not the focus-adjusted border), so the
+default `border`→`accent` pulse is visible even while the pane is focused and
+the resting border is already `accent`. If you set `glowColor` equal to
+`borderColor`, the pulse has nothing to breathe toward and is invisible —
+pick two colours that differ.
 
 No environment variables are used.
 
@@ -206,14 +212,17 @@ No npm runtime dependencies; `node:fs` / `node:os` / `node:path` only.
 - **tmux**: the focus indicator only changes state if tmux has
   `focus-events on` (and the outer terminal passes focus events through).
   Outside tmux it works only if the terminal itself emits CSI I / CSI O.
-- **Config is load-time**: `chat-input.json` is read once at module load; edits
-  require a pi restart. There is no validation or error reporting — bad JSON or
-  wrong types fall back to defaults (or may throw at render time for wildly
-  wrong types).
+- **Config validation is shallow**: bad JSON is reported and numeric/enum
+  fields are range-checked, but wildly wrong types for unchecked string fields
+  (e.g. a number for `prefix`) may throw at render time.
+- **Reload doesn't rebuild the editor**: `/chat-input` mutates the live config
+  that render code reads, which covers every documented key. A key that only
+  takes effect at component construction would need a restart (none currently
+  do).
 - **setEditorComponent conflicts**: any other extension calling
   `setEditorComponent` after this one will replace the editor (last call wins).
-- **Pulse needs truecolor**: the pulse glow interpolates RGB between the
-  resting border colour and `glowColor`. Both endpoints must resolve to RGB —
+- **Pulse needs truecolor**: the pulse glow interpolates RGB between
+  `borderColor` and `glowColor`. Both endpoints must resolve to RGB —
   hex values always do; theme tokens only if the theme emits truecolor
   (`38;2;r;g;b`) sequences. If either endpoint can't be resolved, the border
   falls back to a steady `glowColor` while working. Shimmer has no such
