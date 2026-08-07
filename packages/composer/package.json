@@ -1,5 +1,5 @@
 {
-  "name": "@nicknisi/pi-chat-input",
+  "name": "@nicknisi/pi-composer",
   "version": "0.2.0",
   "description": "Configurable boxed input editor for pi, with paste-again-to-expand",
   "keywords": [
@@ -7,12 +7,12 @@
     "pi-coding-agent",
     "pi-package"
   ],
-  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/chat-input#readme",
+  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/composer#readme",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nicknisi/pi-extensions.git",
-    "directory": "packages/chat-input"
+    "directory": "packages/composer"
   },
   "files": [
     "dist",
@@ -20,7 +20,7 @@
     "config.ts",
     "utils.ts",
     "README.md",
-    "chat-input.example.json"
+    "composer.example.json"
   ],
   "type": "module",
   "exports": {

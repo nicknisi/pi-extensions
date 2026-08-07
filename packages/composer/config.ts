@@ -1,4 +1,4 @@
-/** Config for chat-input — loaded once at extension load from <agent-dir>/configs/chat-input.json. */
+/** Config for composer — loaded once at extension load from <agent-dir>/configs/composer.json. */
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -93,7 +93,7 @@ function positiveNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && value > 0 ? value : fallback;
 }
 
-interface ChatInputUserConfig {
+interface ComposerUserConfig {
   boxedView?: boolean;
   boxPadX?: number;
   menuGap?: number;
@@ -116,11 +116,11 @@ interface ChatInputUserConfig {
   rainbowPeriodMs?: number;
 }
 
-const CONFIG_PATH = join(getAgentDir(), 'configs', 'chat-input.json');
+const CONFIG_PATH = join(getAgentDir(), 'configs', 'composer.json');
 
 /** Read the user config. `error` is set only for real problems (bad JSON,
  * unreadable file) — a missing file is the normal "all defaults" case. */
-function loadUserConfig(): { user: ChatInputUserConfig; error: string | null } {
+function loadUserConfig(): { user: ComposerUserConfig; error: string | null } {
   try {
     return { user: JSON.parse(readFileSync(CONFIG_PATH, 'utf8')), error: null };
   } catch (e) {
@@ -129,7 +129,7 @@ function loadUserConfig(): { user: ChatInputUserConfig; error: string | null } {
   }
 }
 
-function buildConfig(u: ChatInputUserConfig) {
+function buildConfig(u: ComposerUserConfig) {
   // Spinner resolution: explicit spinnerFrames win, then the named preset,
   // then the default preset. The preset also supplies the default interval.
   const preset = SPINNERS[isSpinnerStyle(u.spinnerStyle) ? u.spinnerStyle : DEFAULT_CONFIG.SPINNER_STYLE];
@@ -175,7 +175,7 @@ export function configLoadError(): string | null {
   return lastError;
 }
 
-/** Re-read chat-input.json into CONFIG. On error the previous config is
+/** Re-read composer.json into CONFIG. On error the previous config is
  * kept. Returns the error message, or null on success. */
 export function reloadConfig(): string | null {
   const { user, error } = loadUserConfig();

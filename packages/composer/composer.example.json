@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to ~/.pi/agent/configs/chat-input.json to customize. All keys optional.",
+  "_comment": "Copy to ~/.pi/agent/configs/composer.json to customize. All keys optional.",
   "boxedView": true,
   "boxPadX": 1,
   "menuGap": 0,

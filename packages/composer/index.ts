@@ -8,7 +8,7 @@
  * again expands it inline so you can see and edit the actual text.
  *
  * Evolved from the earlier `box-editor.ts`: the rendering is now
- * config-driven (~/.pi/agent/configs/chat-input.json) and supports a
+ * config-driven (~/.pi/agent/configs/composer.json) and supports a
  * prefix glyph, boxed/unboxed modes, configurable padding, menu gap,
  * rounded vs square corners, and working-state animations (spinner prefix
  * and border glow while the agent works). The rounded ╭╮│╰╯ corners remain the
@@ -114,7 +114,7 @@ function prefixWidth(): number {
 }
 
 // ─── Working-state animation (spinner prefix + border glow) ───────────────
-// Busy between agent_start and agent_settled (or during a /chat-input
+// Busy between agent_start and agent_settled (or during a /composer
 // preview). A single timer drives both animations by requesting renders;
 // frames/phases derive from Date.now() so they stay smooth regardless of
 // tick jitter. pi-tui's invalidate() is a no-op — requestRender() is the
@@ -213,7 +213,7 @@ interface Palette {
 // pi-tui's Editor; overriding it is legal at runtime (dynamic dispatch) and is the
 // only interception point for paste handling. If this stops erroring, pi-tui made
 // it protected/public — delete both expect-error pragmas in this file.
-class ChatInput extends CustomEditor {
+class Composer extends CustomEditor {
   private border: (s: string) => string;
   private accent: (s: string) => string;
   private spin: (s: string) => string;
@@ -454,11 +454,11 @@ function disableFocusTracking(): void {
   paneFocused = true;
 }
 
-export default function chatInput(pi: ExtensionAPI) {
+export default function composer(pi: ExtensionAPI) {
   pi.on('session_start', (_event, ctx: ExtensionContext) => {
     if (ctx.mode !== 'tui') return;
     ctx.ui.setEditorComponent((tui, theme, kb) => {
-      // All palette fns read CONFIG.* at call time so /chat-input reloads
+      // All palette fns read CONFIG.* at call time so /composer reloads
       // take effect without rebuilding the editor component.
       const restingBorder = (s: string) =>
         applyColor(
@@ -493,7 +493,7 @@ export default function chatInput(pi: ExtensionAPI) {
 
       if (CONFIG.FOCUS_INDICATOR) enableFocusTracking(tui);
       animTui = tui;
-      return new ChatInput(tui, theme, kb, {
+      return new Composer(tui, theme, kb, {
         border: borderFn,
         accent: (s: string) => applyColor(ctx.ui.theme, CONFIG.PREFIX_COLOR, s),
         spin: (s: string) => paint(CONFIG.SPINNER_COLOR, s),
@@ -502,15 +502,15 @@ export default function chatInput(pi: ExtensionAPI) {
     });
 
     const loadError = configLoadError();
-    if (loadError) ctx.ui.notify(`chat-input.json ignored (using defaults): ${loadError}`, 'warning');
+    if (loadError) ctx.ui.notify(`composer.json ignored (using defaults): ${loadError}`, 'warning');
   });
 
-  pi.registerCommand('chat-input', {
-    description: 'Reload chat-input.json and preview the working animation',
+  pi.registerCommand('composer', {
+    description: 'Reload composer.json and preview the working animation',
     handler: async (_args, ctx) => {
       const error = reloadConfig();
       if (error) {
-        ctx.ui.notify(`chat-input.json not applied (kept previous config): ${error}`, 'error');
+        ctx.ui.notify(`composer.json not applied (kept previous config): ${error}`, 'error');
         return;
       }
       PREFIX_W = prefixWidth();
@@ -523,7 +523,7 @@ export default function chatInput(pi: ExtensionAPI) {
         stopAnimation();
         startAnimation();
       }
-      ctx.ui.notify('chat-input config reloaded', 'info');
+      ctx.ui.notify('composer config reloaded', 'info');
       animTui?.requestRender();
 
       // Fake a short busy window so the spinner/glow can be seen without

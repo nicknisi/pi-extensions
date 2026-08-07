@@ -31,7 +31,7 @@ Local paths are added to pi's settings without copying — edits in the repo are
 
 | Package                                      | What it does                                                                                                 | Adds                                        |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------- |
-| [chat-input](packages/chat-input/)           | Config-driven boxed input editor; paste-again-to-expand for collapsed paste markers; tmux focus-aware border | custom editor component                     |
+| [composer](packages/composer/)               | Config-driven boxed input editor; paste-again-to-expand for collapsed paste markers; tmux focus-aware border | custom editor component                     |
 | [header](packages/header/)                   | Animated dashboard header (GIF-compiled truecolor frames or ASCII art) with session info, on fresh sessions  | `/nicknisi-header`, custom header           |
 | [mg](packages/mg/)                           | Severance-style "100% File Completion" animation starring a pixelated Michael Grinich, with macOS audio      | `/mg [name]`                                |
 | [pin-last-prompt](packages/pin-last-prompt/) | Sticky bar pinning the owning user prompt while scrolled back in fullscreen (pi ≥ 0.84)                      | scrollback overlay bar                      |

@@ -1,4 +1,4 @@
-# @nicknisi/pi-chat-input
+# @nicknisi/pi-composer
 
 ## 0.2.0
 

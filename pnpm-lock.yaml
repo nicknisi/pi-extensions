@@ -64,11 +64,11 @@ importers:
         specifier: workspace:*
         version: link:../shared
 
-  packages/chat-input: {}
-
   packages/claude-compat: {}
 
   packages/cloak: {}
+
+  packages/composer: {}
 
   packages/handoff:
     dependencies:

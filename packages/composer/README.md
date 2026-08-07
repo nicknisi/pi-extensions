@@ -1,4 +1,4 @@
-# @nicknisi/pi-chat-input
+# @nicknisi/pi-composer
 
 Replaces pi's input editor with a configurable boxed input rendered inside pi's
 TUI. All native editor features — cursor movement, history, autocomplete,
@@ -15,7 +15,7 @@ standalone `paste-expand.ts` so the two features don't fight over
 
 - **Custom editor component** via `ctx.ui.setEditorComponent` (no tools, no
   keybindings, no custom entry types).
-- **`/chat-input` command**: reloads `chat-input.json` without restarting pi
+- **`/composer` command**: reloads `composer.json` without restarting pi
   and previews the working animation for ~3 seconds.
 - **Events hooked**: `session_start` (installs the editor component),
   `agent_start` / `agent_settled` (drive the working-state animations), and
@@ -42,14 +42,14 @@ standalone `paste-expand.ts` so the two features don't fight over
 ## Install
 
 ```sh
-pi install /path/to/pi-extensions/packages/chat-input
+pi install /path/to/pi-extensions/packages/composer
 ```
 
 ## Usage
 
 Once installed, the editor component is installed automatically at session
 start. Editing, history, autocomplete, and paste behave as usual inside the
-box. Run `/chat-input` after editing the config to reload it in place and
+box. Run `/composer` after editing the config to reload it in place and
 preview the spinner/glow without sending a prompt.
 
 Paste-again-to-expand works automatically too: pi collapses large pastes
@@ -72,12 +72,12 @@ Layout (boxed):
 ## Configuration
 
 Config is read at extension load from
-`~/.pi/agent/configs/chat-input.json`; run `/chat-input` to reload it without
+`~/.pi/agent/configs/composer.json`; run `/composer` to reload it without
 restarting pi (it also previews the working animation). The path follows pi's
 agent dir, so it moves with `PI_CODING_AGENT_DIR` if you set it. A missing
 file means all defaults; invalid JSON is reported (at startup via a warning,
-on `/chat-input` via an error) and the previous/default config is kept. Copy
-`chat-input.example.json` from this package as a starting point.
+on `/composer` via an error) and the previous/default config is kept. Copy
+`composer.example.json` from this package as a starting point.
 
 ```json
 {
@@ -215,7 +215,7 @@ No npm runtime dependencies; `node:fs` / `node:os` / `node:path` only.
 - **Config validation is shallow**: bad JSON is reported and numeric/enum
   fields are range-checked, but wildly wrong types for unchecked string fields
   (e.g. a number for `prefix`) may throw at render time.
-- **Reload doesn't rebuild the editor**: `/chat-input` mutates the live config
+- **Reload doesn't rebuild the editor**: `/composer` mutates the live config
   that render code reads, which covers every documented key. A key that only
   takes effect at component construction would need a restart (none currently
   do).
