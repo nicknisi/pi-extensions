@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-chat-input",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Configurable boxed input editor for pi, with paste-again-to-expand",
   "keywords": [
     "pi",

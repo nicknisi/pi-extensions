@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-claude-compat",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Claude Code compatibility for pi: CLAUDE_PLUGIN_ROOT shimming and !`command` dynamic skill placeholders",
   "keywords": [
     "pi",
