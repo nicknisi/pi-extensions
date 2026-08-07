@@ -126,8 +126,10 @@ async function generateSummary(ctx: import('@earendil-works/pi-coding-agent').Ex
     },
     {
       apiKey: auth.apiKey,
-      headers: auth.headers,
-      env: auth.env,
+      // Spread conditionally: optional in ProviderStreamOptions, and
+      // exactOptionalPropertyTypes rejects an explicit undefined.
+      ...(auth.headers !== undefined && { headers: auth.headers }),
+      ...(auth.env !== undefined && { env: auth.env }),
       reasoningEffort: 'low',
       cacheRetention: 'none',
       sessionId: uuidv7(),

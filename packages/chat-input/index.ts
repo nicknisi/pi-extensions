@@ -92,7 +92,7 @@ function getScrollText(line: string): string | null {
   const plain = plainText(line);
   if (!plain.startsWith('─')) return null;
   const m = plain.match(/((?:↑|↓)\s*\d+\s*more)/);
-  return m ? m[1] : null;
+  return m?.[1] ?? null;
 }
 
 function isBorderLike(line: string): boolean {
@@ -137,8 +137,10 @@ function menuLines(stock: string[], lastIdx: number, width: number): string[] {
 
 // ─── Component ────────────────────────────────────────────────────────────
 
-// @ts-expect-error — handlePaste is private in pi-tui's Editor types but must be
-// overridden to intercept paste; TS-private is compile-time-only, so this is safe at runtime.
+// @ts-expect-error TS2415 — handlePaste is a prototype method typed `private` in
+// pi-tui's Editor; overriding it is legal at runtime (dynamic dispatch) and is the
+// only interception point for paste handling. If this stops erroring, pi-tui made
+// it protected/public — delete both expect-error pragmas in this file.
 class ChatInput extends CustomEditor {
   private border: (s: string) => string;
   private accent: (s: string) => string;
@@ -170,7 +172,7 @@ class ChatInput extends CustomEditor {
         return;
       }
     }
-    // @ts-expect-error — see class declaration; super call into a private method works at runtime.
+    // @ts-expect-error TS2855 — see class-level note: parent method is typed private.
     super.handlePaste(pastedText);
   }
 

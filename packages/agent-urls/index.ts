@@ -13,30 +13,32 @@ const DEFAULT_MAX_LINES = 500;
 
 type RunSource = 'session' | 'async' | 'artifact' | 'chain';
 
+// Optionals are widened with `| undefined`: these are parsed out of on-disk
+// JSON, where a field may be absent or explicitly undefined.
 interface ChildRef {
-  index?: number;
-  agent?: string;
-  sessionFile?: string;
-  outputFile?: string;
-  logFile?: string;
-  inputFile?: string;
-  metadataFile?: string;
-  jsonlFile?: string;
-  status?: string;
-  task?: string;
+  index?: number | undefined;
+  agent?: string | undefined;
+  sessionFile?: string | undefined;
+  outputFile?: string | undefined;
+  logFile?: string | undefined;
+  inputFile?: string | undefined;
+  metadataFile?: string | undefined;
+  jsonlFile?: string | undefined;
+  status?: string | undefined;
+  task?: string | undefined;
   updatedAt: number;
 }
 
 interface RunRef {
   runId: string;
   source: RunSource;
-  mode?: string;
-  state?: string;
-  cwd?: string;
-  asyncDir?: string;
-  chainDir?: string;
-  statusFile?: string;
-  eventsFile?: string;
+  mode?: string | undefined;
+  state?: string | undefined;
+  cwd?: string | undefined;
+  asyncDir?: string | undefined;
+  chainDir?: string | undefined;
+  statusFile?: string | undefined;
+  eventsFile?: string | undefined;
   updatedAt: number;
   children: ChildRef[];
 }
@@ -131,9 +133,9 @@ function textFromBlocks(blocks: any): string {
 }
 
 function sessionInfo(file: string): {
-  cwd?: string;
-  task?: string;
-  lastAssistant?: string;
+  cwd?: string | undefined;
+  task?: string | undefined;
+  lastAssistant?: string | undefined;
   updatedAt: number;
 } {
   let cwd: string | undefined;
@@ -178,7 +180,9 @@ function discoverSessionRuns(map: Map<string, RunRef>) {
     const normalized = file.split(path.sep).join('/');
     const match = normalized.match(/\/([0-9a-f]{8})\/run-(\d+)\/[^/]+\.jsonl$/);
     if (!match) continue;
-    const [, runId, indexText] = match;
+    // Groups 1 and 2 are non-optional in the pattern, so a match guarantees them.
+    const runId = match[1]!;
+    const indexText = match[2]!;
     const info = sessionInfo(file);
     upsertRun(map, {
       runId,
@@ -274,9 +278,10 @@ function discoverArtifactRuns(map: Map<string, RunRef>) {
     const m = base.match(/^([0-9a-f]{8})_(.+?)(?:_(\d+))?$/);
     if (!m) continue;
     const key = base;
-    const child = byBase.get(key) ?? {
-      runId: m[1],
-      agent: m[2],
+    const child: Partial<ChildRef> & { runId: string; updatedAt: number } = byBase.get(key) ?? {
+      // Groups 1 and 2 are non-optional in the pattern; group 3 is genuinely optional.
+      runId: m[1]!,
+      agent: m[2]!,
       index: m[3] ? Number(m[3]) : undefined,
       updatedAt: 0,
     };
@@ -409,7 +414,8 @@ function resolveRun(uriHostOrId: string, runs: RunRef[]): RunRef {
   if (matches.length === 0) throw new Error(`No subagent run matched '${uriHostOrId}'. Try /agent list.`);
   if (matches.length > 1)
     throw new Error(`Ambiguous run id '${uriHostOrId}' matched: ${matches.map((r) => r.runId).join(', ')}`);
-  return matches[0];
+  // Exactly one match remains after the guards above.
+  return matches[0]!;
 }
 
 function selectChild(run: RunRef, selector?: string): ChildRef[] {
@@ -485,14 +491,14 @@ function formatRunSummary(run: RunRef): string {
 
 function parseAgentUri(uri: string): {
   scheme: 'agent' | 'history';
-  id?: string;
-  selector?: string;
-  leaf?: string;
+  id?: string | undefined;
+  selector?: string | undefined;
+  leaf?: string | undefined;
 } {
   const match = uri.match(/^(agent|history):\/\/(.*)$/);
   if (!match) throw new Error(`Unsupported URI '${uri}'. Use agent://<runId> or history://<runId>.`);
   const scheme = match[1] as 'agent' | 'history';
-  const parts = match[2].split('/').filter(Boolean);
+  const parts = match[2]!.split('/').filter(Boolean);
   return { scheme, id: parts[0], selector: parts[1], leaf: parts[2] };
 }
 

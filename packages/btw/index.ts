@@ -137,7 +137,7 @@ class BtwWindow implements Component, Focusable {
   private scroll = 0;
   private lastMaxScroll = 0;
   private readonly editor: Editor;
-  private doneCache?: { width: number; upTo: number; lines: string[] };
+  private doneCache?: { width: number; upTo: number; lines: string[] } | undefined;
 
   constructor(
     private readonly tui: TUI,
@@ -490,7 +490,14 @@ export default function (pi: ExtensionAPI) {
             const stream = getModelProvider(ctx, model).streamSimple(
               model,
               { systemPrompt: SYSTEM_PROMPT, messages: requestMessages },
-              { apiKey, headers, reasoning, signal },
+              // Spread conditionally: these are optional in SimpleStreamOptions,
+              // and exactOptionalPropertyTypes rejects an explicit undefined.
+              {
+                ...(apiKey !== undefined && { apiKey }),
+                ...(headers !== undefined && { headers }),
+                ...(reasoning !== undefined && { reasoning }),
+                ...(signal !== undefined && { signal }),
+              },
             );
 
             let final = '';

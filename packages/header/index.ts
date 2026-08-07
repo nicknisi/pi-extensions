@@ -63,10 +63,12 @@ function makeGifDecoder(data: FrameData) {
   const decodedFrames = new Map<number, string[]>();
   let width: number | undefined;
 
+  // Palette/cell/frame indices all come from the encoded animation data and are
+  // in range by construction, so the indexed reads below are non-null asserted.
   const fgEscape = (idx: number): string => {
     let esc = fgEscapes.get(idx);
     if (!esc) {
-      const [r, g, b] = data.COLORS[idx];
+      const [r, g, b] = data.COLORS[idx]!;
       esc = `\x1b[38;2;${r};${g};${b}m`;
       fgEscapes.set(idx, esc);
     }
@@ -75,7 +77,7 @@ function makeGifDecoder(data: FrameData) {
   const bgEscape = (idx: number): string => {
     let esc = bgEscapes.get(idx);
     if (!esc) {
-      const [r, g, b] = data.COLORS[idx];
+      const [r, g, b] = data.COLORS[idx]!;
       esc = `\x1b[48;2;${r};${g};${b}m`;
       bgEscapes.set(idx, esc);
     }
@@ -85,7 +87,7 @@ function makeGifDecoder(data: FrameData) {
     if (idx === 0) return ' ';
     let str = cellStrings.get(idx);
     if (!str) {
-      const [top, bottom] = data.CELLS[idx];
+      const [top, bottom] = data.CELLS[idx]!;
       if (top && bottom) str = `${fgEscape(top)}${bgEscape(bottom)}▀${ANSI_RESET}`;
       else if (top) str = `${fgEscape(top)}▀${ANSI_RESET}`;
       else str = `${fgEscape(bottom)}▄${ANSI_RESET}`;
@@ -96,11 +98,11 @@ function makeGifDecoder(data: FrameData) {
 
   return {
     count: data.FRAMES.length,
-    delay: (i: number) => data.FRAMES[i].delay,
+    delay: (i: number) => data.FRAMES[i]!.delay,
     frame(index: number): string[] {
       let lines = decodedFrames.get(index);
       if (!lines) {
-        lines = data.FRAMES[index].lines.map((tokens) =>
+        lines = data.FRAMES[index]!.lines.map((tokens) =>
           tokens
             .map((token) => {
               const star = token.indexOf('*');
@@ -360,7 +362,8 @@ export default function (pi: ExtensionAPI) {
   const showDashboard = (ctx: ExtensionContext) => {
     const gif = mode === 'blink' || mode === 'waiting' ? GIFS[mode][size] : undefined;
     const pool = mode === 'waiting' ? WAITING_QUOTES : mode === 'blink' ? BLINK_QUOTES : QUOTES;
-    const quote = pool[Math.floor(Math.random() * pool.length)];
+    // pool is a non-empty literal list, so the random index is always in range.
+    const quote = pool[Math.floor(Math.random() * pool.length)]!;
     let typed = 0;
     let blink = false;
     let nextBlinkAt = Date.now() + 2000 + Math.random() * 3000;
@@ -482,7 +485,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand('nicknisi-header', {
     description: 'Cycle nicknisi header style (blink → waiting → full → compact)',
     handler: async (_args, ctx) => {
-      mode = MODES[(MODES.indexOf(mode) + 1) % MODES.length];
+      mode = MODES[(MODES.indexOf(mode) + 1) % MODES.length]!;
       if (shown && ctx.mode === 'tui') {
         stopAnimation();
         showDashboard(ctx);
@@ -497,7 +500,7 @@ export default function (pi: ExtensionAPI) {
     description: 'Set nicknisi header size (small|medium|large, no arg cycles)',
     handler: async (args, ctx) => {
       const requested = args.trim() as Size;
-      size = SIZES.includes(requested) ? requested : SIZES[(SIZES.indexOf(size) + 1) % SIZES.length];
+      size = SIZES.includes(requested) ? requested : SIZES[(SIZES.indexOf(size) + 1) % SIZES.length]!;
       saveConfig({ ...loadConfig(), size });
       if (shown && ctx.mode === 'tui') {
         stopAnimation();

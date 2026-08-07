@@ -186,7 +186,7 @@ export default function (pi: ExtensionAPI) {
 
       // Create new session with parent tracking
       const newSessionResult = await ctx.newSession({
-        parentSession: currentSessionFile,
+        ...(currentSessionFile !== undefined && { parentSession: currentSessionFile }),
       });
 
       if (newSessionResult.cancelled) {

@@ -63,7 +63,7 @@ function statusIcon(status: MemberResult['status'], theme: Theme, spinnerFrame: 
     case 'error':
       return applyColor(theme, CONFIG.shared.status.errorColor, CONFIG.shared.errorPrefix.prefix);
     case 'working':
-      return applyColor(theme, CONFIG.shared.spinner.color, SPINNER_FRAMES[spinnerFrame % SPINNER_FRAMES.length]);
+      return applyColor(theme, CONFIG.shared.spinner.color, SPINNER_FRAMES[spinnerFrame % SPINNER_FRAMES.length]!);
     default:
       return applyColor(theme, CONFIG.shared.status.waitingIconColor, CONFIG.shared.status.waitingIcon);
   }
@@ -77,7 +77,7 @@ function memberHeader(icon: string, m: Pick<MemberResult, 'label' | 'model' | 'd
 }
 
 /** `<icon> [badge] Chairman <model>` row. */
-function chairmanHeader(icon: string, c: { model: string; displayName?: string }, theme: Theme): string {
+function chairmanHeader(icon: string, c: { model: string; displayName?: string | undefined }, theme: Theme): string {
   const badge = CONFIG.chairman.display.icon ? `${CONFIG.chairman.display.icon} ` : '';
   return indentLine(
     `${icon} ${badge}${applyColor(theme, CONFIG.chairman.display.labelColor, 'Chairman')} ${applyColor(theme, CONFIG.chairman.display.modelColor, c.displayName ?? c.model)}`,
@@ -159,7 +159,7 @@ function clearSpinner(ctx: any) {
 }
 
 function spinnerDot(theme: Theme, frame: number): string {
-  return `${applyColor(theme, CONFIG.shared.spinner.color, SPINNER_FRAMES[frame % SPINNER_FRAMES.length])} `;
+  return `${applyColor(theme, CONFIG.shared.spinner.color, SPINNER_FRAMES[frame % SPINNER_FRAMES.length]!)} `;
 }
 
 function createExpandedView(details: CouncilDetails, theme: Theme, markdownTheme: any) {
@@ -240,7 +240,7 @@ function createExpandedView(details: CouncilDetails, theme: Theme, markdownTheme
 interface MemberResult {
   label: string;
   model: string;
-  displayName?: string;
+  displayName?: string | undefined;
   systemPrompt: string;
   status: 'pending' | 'working' | 'done' | 'error';
   text: string;
@@ -254,7 +254,7 @@ interface CouncilDetails {
   members: MemberResult[];
   chairman?: {
     model: string;
-    displayName?: string;
+    displayName?: string | undefined;
     status: 'pending' | 'working' | 'done' | 'error';
     text: string;
     error?: string;
@@ -529,13 +529,16 @@ async function runCouncil(
   }
 
   // Phase 2: Run chairman
-  details.chairman = {
+  // Held in a local so the mutations below don't each have to re-narrow
+  // the optional `details.chairman`; both reference the same object.
+  const chairman: NonNullable<CouncilDetails['chairman']> = {
     model: council.chairman.model,
     displayName: council.chairman.displayName,
     status: 'working',
     text: '',
     startedAt: Date.now(),
   };
+  details.chairman = chairman;
   details.stage = 'chairman';
   emit();
 
@@ -567,20 +570,20 @@ async function runCouncil(
   );
 
   if (chairmanResult.exitCode === 0 && chairmanResult.text) {
-    details.chairman.status = 'done';
-    details.chairman.doneAt = Date.now();
-    details.chairman.text = chairmanResult.text;
+    chairman.status = 'done';
+    chairman.doneAt = Date.now();
+    chairman.text = chairmanResult.text;
   } else {
-    details.chairman.status = 'error';
-    details.chairman.doneAt = Date.now();
-    details.chairman.error = chairmanResult.error || 'Chairman failed';
-    details.chairman.text = chairmanResult.text || '';
+    chairman.status = 'error';
+    chairman.doneAt = Date.now();
+    chairman.error = chairmanResult.error || 'Chairman failed';
+    chairman.text = chairmanResult.text || '';
   }
 
   details.stage = 'complete';
   emit();
 
-  const finalText = details.chairman.text || details.chairman.error || 'No output from chairman';
+  const finalText = chairman.text || chairman.error || 'No output from chairman';
   return {
     content: [{ type: 'text', text: finalText }],
     details,

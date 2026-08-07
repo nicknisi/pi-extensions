@@ -202,7 +202,7 @@ export const CONFIG = {
 
 export interface ResolvedCouncil {
   member: {
-    council: { model: string; displayName?: string; label: string; systemPrompt: string }[];
+    council: { model: string; displayName?: string | undefined; label: string; systemPrompt: string }[];
     tools: string[] | null;
     thinking: string | null;
     extensions: string[] | null;
@@ -211,7 +211,7 @@ export interface ResolvedCouncil {
   };
   chairman: {
     model: string;
-    displayName?: string;
+    displayName?: string | undefined;
     systemPrompt: string;
     exposePersonas: boolean;
     tools: string[] | null;

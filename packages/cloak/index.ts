@@ -29,7 +29,7 @@ interface CloakConfig {
 interface CompiledCloakPattern {
   source: string;
   regex: RegExp;
-  replace?: string;
+  replace?: string | undefined;
 }
 
 interface CompiledCloakRule {

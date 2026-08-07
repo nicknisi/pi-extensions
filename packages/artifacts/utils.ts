@@ -97,7 +97,7 @@ export function listArtifacts(): ArtifactEntry[] {
           : 'html';
     entries.push({
       slug,
-      title: titleMatch ? titleMatch[1].trim() : slug,
+      title: titleMatch ? titleMatch[1]!.trim() : slug,
       kind,
       mtime: extractMtime(content) ?? statSync(absPath).mtimeMs,
       absPath,
@@ -109,7 +109,7 @@ export function listArtifacts(): ArtifactEntry[] {
 /** Parse the generated-at timestamp embedded by the shell template. */
 function extractMtime(html: string): number | null {
   const m = html.match(/<meta name="artifact-generated" content="(\d+)"/);
-  return m ? parseInt(m[1], 10) : null;
+  return m ? parseInt(m[1]!, 10) : null;
 }
 
 /** Normalize a request path and confirm it resolves inside the artifacts dir. Returns null if unsafe. */

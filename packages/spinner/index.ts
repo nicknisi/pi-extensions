@@ -1140,7 +1140,8 @@ const VERBS = [
 ];
 
 function randomVerb(): string {
-  return VERBS[Math.floor(Math.random() * VERBS.length)];
+  // VERBS is a non-empty literal array and the index is always in range.
+  return VERBS[Math.floor(Math.random() * VERBS.length)]!;
 }
 
 export default function (pi: ExtensionAPI) {

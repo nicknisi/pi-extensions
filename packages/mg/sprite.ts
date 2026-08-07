@@ -106,13 +106,13 @@ export function getSpriteGrid(mouthOpen: boolean): string[] {
 /** Stamp the sprite onto an RGB background grid at position (ox, oy) */
 export function stampSprite(bg: RGB[][], grid: string[], ox: number, oy: number): void {
   for (let y = 0; y < grid.length; y++) {
-    for (let x = 0; x < grid[y].length; x++) {
-      const idx = decodeChar(grid[y][x]);
+    for (let x = 0; x < grid[y]!.length; x++) {
+      const idx = decodeChar(grid[y]![x]!);
       if (MG_TRANSPARENT.has(idx)) continue;
       const bx = ox + x;
       const by = oy + y;
-      if (by >= 0 && by < bg.length && bx >= 0 && bx < bg[0].length) {
-        bg[by][bx] = MG_PALETTE[idx];
+      if (by >= 0 && by < bg.length && bx >= 0 && bx < bg[0]!.length) {
+        bg[by]![bx] = MG_PALETTE[idx]!;
       }
     }
   }
@@ -186,8 +186,8 @@ const WALK_FRAMES = [WALK_FRAME1, WALK_FRAME2, WALK_FRAME3, WALK_FRAME2];
 
 /** Draw the walking figure at position (px, py) with given scale and frame */
 export function stampWalker(bg: RGB[][], px: number, py: number, scale: number, frame: number): void {
-  const sprite = WALK_FRAMES[frame % WALK_FRAMES.length];
-  const spriteW = sprite[0].length;
+  const sprite = WALK_FRAMES[frame % WALK_FRAMES.length]!;
+  const spriteW = sprite[0]!.length;
   const spriteH = sprite.length;
 
   for (let y = 0; y < spriteH; y++) {
@@ -204,8 +204,8 @@ export function stampWalker(bg: RGB[][], px: number, py: number, scale: number, 
         for (let dx = 0; dx < sw; dx++) {
           const bx = sx + dx;
           const by = sy + dy;
-          if (by >= 0 && by < bg.length && bx >= 0 && bx < bg[0].length) {
-            bg[by][bx] = FLY_PALETTE[idx];
+          if (by >= 0 && by < bg.length && bx >= 0 && bx < bg[0]!.length) {
+            bg[by]![bx] = FLY_PALETTE[idx]!;
           }
         }
       }
@@ -284,8 +284,8 @@ const FLY_FRAMES = [FLY_FRAME1, FLY_FRAME2, FLY_FRAME3, FLY_FRAME1];
 /** Draw the flying figure at position (px, py) with given scale and frame.
  *  Uses the actual MG face sprite scaled down so Michael is recognizable as he flies. */
 export function stampFlyer(bg: RGB[][], px: number, py: number, scale: number, frame: number): void {
-  const sprite = FLY_FRAMES[frame % FLY_FRAMES.length];
-  const spriteW = sprite[0].length;
+  const sprite = FLY_FRAMES[frame % FLY_FRAMES.length]!;
+  const spriteW = sprite[0]!.length;
   const spriteH = sprite.length;
 
   for (let y = 0; y < spriteH; y++) {
@@ -302,8 +302,8 @@ export function stampFlyer(bg: RGB[][], px: number, py: number, scale: number, f
         for (let dx = 0; dx < sw; dx++) {
           const bx = sx + dx;
           const by = sy + dy;
-          if (by >= 0 && by < bg.length && bx >= 0 && bx < bg[0].length) {
-            bg[by][bx] = FLY_PALETTE[idx];
+          if (by >= 0 && by < bg.length && bx >= 0 && bx < bg[0]!.length) {
+            bg[by]![bx] = FLY_PALETTE[idx]!;
           }
         }
       }
@@ -334,8 +334,8 @@ export function stampFlyingMG(bg: RGB[][], px: number, py: number, scale: number
     const rx = px + offsetX + Math.floor(SPRITE_W * scale) + i;
     for (let dy = 0; dy < Math.max(1, Math.floor(2 * scale)); dy++) {
       if (armY + dy >= 0 && armY + dy < bg.length) {
-        if (lx >= 0 && lx < bg[0].length) bg[armY + dy][lx] = coatColor;
-        if (rx >= 0 && rx < bg[0].length) bg[armY + dy][rx] = coatColor;
+        if (lx >= 0 && lx < bg[0]!.length) bg[armY + dy]![lx] = coatColor;
+        if (rx >= 0 && rx < bg[0]!.length) bg[armY + dy]![rx] = coatColor;
       }
     }
   }
@@ -343,7 +343,7 @@ export function stampFlyingMG(bg: RGB[][], px: number, py: number, scale: number
   // Draw the face sprite scaled
   for (let y = 0; y < SPRITE_H; y++) {
     for (let x = 0; x < SPRITE_W; x++) {
-      const ch = grid[y][x];
+      const ch = grid[y]![x];
       if (!ch) continue;
       const idx = decodeChar(ch);
       if (MG_TRANSPARENT.has(idx)) continue;
@@ -354,8 +354,8 @@ export function stampFlyingMG(bg: RGB[][], px: number, py: number, scale: number
         for (let dx = 0; dx < sw; dx++) {
           const bx = sx + dx;
           const by = sy + dy;
-          if (by >= 0 && by < bg.length && bx >= 0 && bx < bg[0].length) {
-            bg[by][bx] = MG_PALETTE[idx];
+          if (by >= 0 && by < bg.length && bx >= 0 && bx < bg[0]!.length) {
+            bg[by]![bx] = MG_PALETTE[idx]!;
           }
         }
       }
@@ -370,8 +370,8 @@ export function stampFlyingMG(bg: RGB[][], px: number, py: number, scale: number
     for (let dx = 0; dx < coatW; dx++) {
       const bx = coatStartX + dx;
       const by = coatY + dy;
-      if (by >= 0 && by < bg.length && bx >= 0 && bx < bg[0].length) {
-        bg[by][bx] = coatColor;
+      if (by >= 0 && by < bg.length && bx >= 0 && bx < bg[0]!.length) {
+        bg[by]![bx] = coatColor;
       }
     }
   }

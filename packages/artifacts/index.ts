@@ -22,7 +22,7 @@ interface ArtifactDetails {
   slug: string;
   title: string;
   kind: 'markdown' | 'html';
-  url?: string;
+  url?: string | undefined;
   absPath: string;
 }
 

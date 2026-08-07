@@ -52,9 +52,12 @@ function renderColorGrid(grid: RGB[][]): string[] {
   const lines: string[] = [];
   for (let y = 0; y < grid.length; y += 2) {
     let line = '';
-    for (let x = 0; x < grid[0].length; x++) {
-      const top = grid[y][x];
-      const bot = y + 1 < grid.length ? grid[y + 1][x] : null;
+    // Rows hoisted once: y and x are bounded by the grid dimensions.
+    const rowTop = grid[y]!;
+    const rowBot = y + 1 < grid.length ? grid[y + 1]! : null;
+    for (let x = 0; x < grid[0]!.length; x++) {
+      const top = rowTop[x]!;
+      const bot = rowBot ? rowBot[x]! : null;
       if (!bot) {
         line += `\x1b[38;2;${top[0]};${top[1]};${top[2]}m▀`;
       } else if (top[0] === bot[0] && top[1] === bot[1] && top[2] === bot[2]) {
@@ -213,7 +216,7 @@ function renderBigText(text: string, r: number, g: number, b: number): string[] 
   for (let row = 0; row < 7; row++) {
     let line = '';
     for (const ch of chars) {
-      const glyph = FONT[ch] || FONT['0'];
+      const glyph = FONT[ch] || FONT['0']!;
       line += color + glyph[row] + reset;
     }
     lines.push(line);
@@ -254,7 +257,7 @@ function createExplosion(pw: number, ph: number): Particle[] {
       y: cy,
       vx: Math.cos(angle) * speed,
       vy: Math.sin(angle) * speed * 0.6,
-      color: colors[i % colors.length],
+      color: colors[i % colors.length]!,
       life: 1.0,
     });
   }
@@ -278,7 +281,7 @@ function renderExplosion(particles: Particle[], pw: number, ph: number, progress
     const px = Math.floor(p.x);
     const py = Math.floor(p.y);
     if (px >= 0 && px < pw && py >= 0 && py < ph && p.life > 0) {
-      grid[py][px] = [
+      grid[py]![px] = [
         Math.floor(p.color[0] * p.life),
         Math.floor(p.color[1] * p.life),
         Math.floor(p.color[2] * p.life),
@@ -469,7 +472,7 @@ class HundredPercentComponent {
         const row: RGB[] = [];
         for (let x = 0; x < pw; x++) {
           if (y < cutoff) {
-            row.push(landscape[y][x]);
+            row.push(landscape[y]![x]!);
           } else {
             row.push([8, 8, 16]);
           }
@@ -550,9 +553,9 @@ class HundredPercentComponent {
       // Stamp sprite with fade
       const palette = MG_PALETTE;
       for (let y = 0; y < sprite.length; y++) {
-        for (let x = 0; x < sprite[y].length; x++) {
+        for (let x = 0; x < sprite[y]!.length; x++) {
           const idx = (() => {
-            const code = sprite[y][x].charCodeAt(0);
+            const code = sprite[y]![x]!.charCodeAt(0);
             if (code >= 48 && code <= 57) return code - 48;
             if (code >= 97 && code <= 122) return code - 97 + 10;
             return 0;
@@ -560,10 +563,10 @@ class HundredPercentComponent {
           if (MG_TRANSPARENT.has(idx)) continue;
           const bx = ox + x;
           const by = oy + y;
-          if (by >= 0 && by < grid.length && bx >= 0 && bx < grid[0].length) {
-            const spriteColor = palette[idx];
-            const bgColor = grid[by][bx];
-            grid[by][bx] = lerpRGB(bgColor, spriteColor, fadeIn);
+          if (by >= 0 && by < grid.length && bx >= 0 && bx < grid[0]!.length) {
+            const spriteColor = palette[idx]!;
+            const bgColor = grid[by]![bx]!;
+            grid[by]![bx] = lerpRGB(bgColor, spriteColor, fadeIn);
           }
         }
       }
@@ -582,7 +585,7 @@ class HundredPercentComponent {
       const reset = '\x1b[0m';
       const subLine = `${subColor}${subtitle}${reset}`;
       gridLines.push('');
-      gridLines.push(centerLines([subLine], contentWidth)[0]);
+      gridLines.push(centerLines([subLine], contentWidth)[0]!);
     }
 
     return centerLines(gridLines, contentWidth);
@@ -626,11 +629,11 @@ class HundredPercentComponent {
         const trailT = Math.max(0, tt - i * 0.025);
         const tx = Math.floor(lerp(startX, endX, trailT));
         const ty = Math.floor(lerp(startY, endY, trailT) - Math.sin(trailT * Math.PI * 2) * ph * 0.1);
-        if (ty >= 0 && ty < grid.length && tx >= 0 && tx < grid[0].length) {
+        if (ty >= 0 && ty < grid.length && tx >= 0 && tx < grid[0]!.length) {
           // Fade trail by distance
           const alpha = 1 - i / 5;
-          const orig = grid[ty][tx];
-          grid[ty][tx] = [
+          const orig = grid[ty]![tx]!;
+          grid[ty]![tx] = [
             Math.round(lerp(orig[0], trailColor[0], alpha * 0.5)),
             Math.round(lerp(orig[1], trailColor[1], alpha * 0.5)),
             Math.round(lerp(orig[2], trailColor[2], alpha * 0.5)),
@@ -661,7 +664,7 @@ class HundredPercentComponent {
 
     // Add "COMPLETE" below the big "100%"
     for (let i = 0; i < text.length; i++) {
-      lines.push(text[i]);
+      lines.push(text[i]!);
     }
     lines.push('');
     const completeLine = `${completeColor}     C O M P L E T E${reset}`;

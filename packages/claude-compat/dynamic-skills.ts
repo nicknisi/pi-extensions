@@ -67,14 +67,16 @@ async function expandCommands(text: string, cwd: string): Promise<string> {
 
   // Run all commands in parallel. Matches come from the original text and are
   // replaced by index, so command output is never re-scanned for placeholders.
-  const outputs = await Promise.all(matches.map((m) => runCommand(m[1] ?? m[2], cwd)));
+  const outputs = await Promise.all(matches.map((m) => runCommand(m[1] ?? m[2] ?? '', cwd)));
 
   // Replace in reverse to preserve indices
   let result = text;
   for (let i = matches.length - 1; i >= 0; i--) {
-    const start = matches[i].index!;
-    const end = start + matches[i][0].length;
-    result = result.slice(0, start) + outputs[i] + result.slice(end);
+    // i is bounded by matches.length, and outputs is built from matches.
+    const match = matches[i]!;
+    const start = match.index!;
+    const end = start + match[0].length;
+    result = result.slice(0, start) + (outputs[i] ?? '') + result.slice(end);
   }
   return result;
 }

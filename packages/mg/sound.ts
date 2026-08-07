@@ -28,7 +28,7 @@ function generateWav(samples: Float32Array): Buffer {
   buf.write('data', 36);
   buf.writeUInt32LE(dataLen, 40);
   for (let i = 0; i < samples.length; i++) {
-    const v = Math.max(-1, Math.min(1, samples[i]));
+    const v = Math.max(-1, Math.min(1, samples[i]!));
     buf.writeInt16LE(Math.floor(v * 32767), 44 + i * 2);
   }
   return buf;
@@ -86,7 +86,7 @@ export function playFanfare(): ChildProcess | null {
   const samples = new Float32Array(n);
   const noteLen = Math.floor((noteMs / 1000) * SAMPLE_RATE);
   for (let ni = 0; ni < notes.length; ni++) {
-    const freq = notes[ni];
+    const freq = notes[ni]!;
     const offset = ni * noteLen;
     for (let i = 0; i < noteLen && offset + i < n; i++) {
       const t = i / SAMPLE_RATE;

@@ -92,7 +92,8 @@ const MIME: Record<string, string> = {
 };
 
 function handle(req: IncomingMessage, res: ServerResponse, clients: Set<ServerResponse>): void {
-  const url = (req.url ?? '/').split('?')[0];
+  // split always yields at least one element.
+  const url = (req.url ?? '/').split('?')[0]!;
 
   // SSE endpoint
   if (url === '/events') {

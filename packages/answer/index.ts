@@ -16,7 +16,7 @@ import {
 
 interface ExtractedQuestion {
   question: string;
-  context?: string;
+  context?: string | undefined;
 }
 
 interface ExtractionResult {
@@ -239,8 +239,8 @@ class AnswerComponent implements Component, Focusable {
   private readonly editor: Editor;
   private currentIndex = 0;
   private showingConfirmation = false;
-  private cachedWidth?: number;
-  private cachedLines?: string[];
+  private cachedWidth?: number | undefined;
+  private cachedLines?: string[] | undefined;
 
   constructor(
     private readonly questions: ExtractedQuestion[],
@@ -527,8 +527,8 @@ export default function (pi: ExtensionAPI) {
             extractionModel,
             { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
             {
-              apiKey: auth.apiKey,
-              headers: auth.headers,
+              ...(auth.apiKey !== undefined && { apiKey: auth.apiKey }),
+              ...(auth.headers !== undefined && { headers: auth.headers }),
               signal: loader.signal,
               // (no provider-specific reasoning override; both fallback models are Anthropic)
             },

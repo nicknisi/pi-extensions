@@ -295,7 +295,7 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
         .trim();
       if (!raw) return null;
       let title = raw
-        .split(/\n/)[0]
+        .split(/\n/)[0]!
         .trim()
         .replace(/^["'`]+|["'`]+$/g, '')
         .replace(/[.!?]+$/, '')
@@ -408,7 +408,8 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
 
       const idx = lines.indexOf(choice);
       if (idx < 0) return;
-      const target = list[idx];
+      // lines is mapped 1:1 from list, so a valid index into one indexes the other.
+      const target = list[idx]!;
 
       const result = await ctx.switchSession(target.path, {
         withSession: async (rctx) => {
