@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-artifacts",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "artifact tool: render markdown/html to a styled browser page served from a lazy localhost server.",
   "keywords": [
     "pi",
