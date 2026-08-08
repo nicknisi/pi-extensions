@@ -11,13 +11,11 @@
  * ~/.pi/agent/configs/llm-council.json
  */
 
-import { spawn } from 'node:child_process';
-import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ExtensionAPI, Theme } from '@earendil-works/pi-coding-agent';
-import { getAgentDir, getMarkdownTheme } from '@earendil-works/pi-coding-agent';
+import { getMarkdownTheme } from '@earendil-works/pi-coding-agent';
 import { Markdown, Text } from '@earendil-works/pi-tui';
+import { createSubagentRuntime, resolveContainedAgentResource, type SubagentRuntime } from '@nicknisi/pi-shared';
 import { Type } from 'typebox';
 import { CONFIG, loadCouncil, type ResolvedCouncil } from './config.js';
 import { applyColor, formatElapsed, getExpandToggleKey, getVisibleWidth } from './utils.js';
@@ -263,246 +261,41 @@ interface CouncilDetails {
   };
 }
 
-interface SubagentResult {
-  text: string;
-  exitCode: number;
-  stderr: string;
-  error?: string;
-}
-
-interface ExecConfig {
-  tools: string[] | null;
-  thinking: string | null;
-  extensions: string[] | null;
-  skills: string[] | null;
-  contextFiles: boolean;
-}
-
-// ── Subprocess ───────────────────────────────────────────────────────────
-
 // Council `extensions`/`skills` entries are bare resource names resolved under
 // the user's own agent dir. Project-local config (<cwd>/.pi/configs/llm-council.json)
-// is untrusted repository input, so a name must never contain path separators or
-// `..` segments: otherwise `path.join` collapses a crafted name into an arbitrary
-// filesystem path passed to pi as `-e`/`--skill`, loading repo-controlled code
-// outside pi's project-trust gate. Reject anything that isn't a contained bare name.
-function resolveContainedResourcePath(kind: 'extensions' | 'skills', name: string, leaf: string): string | null {
-  if (typeof name !== 'string' || name.length === 0) return null;
-  if (name.includes('/') || name.includes('\\') || name === '..' || name === '.') return null;
-  const baseDir = path.join(getAgentDir(), kind);
-  const resolved = path.resolve(baseDir, name, leaf);
-  const containmentRoot = path.resolve(baseDir) + path.sep;
-  if (!resolved.startsWith(containmentRoot)) return null;
-  return resolved;
-}
-
-function buildExecArgs(exec: ExecConfig): string[] {
-  const args: string[] = [];
-
-  // tools: null/[] → --no-tools, [items] → --tools <comma-separated>
-  if (!exec.tools || exec.tools.length === 0) {
-    args.push('--no-tools');
-  } else {
-    args.push('--tools', exec.tools.join(','));
-  }
-
-  // thinking: null → omit, string → --thinking <level>
-  if (exec.thinking) {
-    args.push('--thinking', exec.thinking);
-  }
-
-  // extensions: null → no flags, [] → --no-extensions, [items] → --no-extensions -e <path>...
-  if (exec.extensions === null) {
-    // keep defaults, no flags
-  } else if (exec.extensions.length === 0) {
-    args.push('--no-extensions');
-  } else {
-    args.push('--no-extensions');
-    for (const name of exec.extensions) {
-      const extPath = resolveContainedResourcePath('extensions', name, path.join('src', 'index.ts'));
-      if (extPath === null) {
-        console.error(
-          `[llm-council] ignoring extension ${JSON.stringify(name)}: names must be bare (no path separators or "..")`,
-        );
-        continue;
-      }
-      args.push('-e', extPath);
+// is untrusted repository input, so names are containment-checked by the shared
+// resolver before reaching the child's resource loader.
+function resolveResourceNames(kind: 'extensions' | 'skills', names: string[] | null, leaf: string): string[] {
+  if (!names?.length) return [];
+  const out: string[] = [];
+  for (const name of names) {
+    const resolved = resolveContainedAgentResource(kind, name, leaf);
+    if (resolved === null) {
+      console.error(
+        `[llm-council] ignoring ${kind} ${JSON.stringify(name)}: names must be bare (no path separators or "..")`,
+      );
+      continue;
     }
+    out.push(resolved);
   }
-
-  // skills: null → no flags, [] → --no-skills, [items] → --no-skills --skill <path>...
-  if (exec.skills === null) {
-    // keep defaults, no flags
-  } else if (exec.skills.length === 0) {
-    args.push('--no-skills');
-  } else {
-    args.push('--no-skills');
-    for (const name of exec.skills) {
-      const skillPath = resolveContainedResourcePath('skills', name, 'SKILL.md');
-      if (skillPath === null) {
-        console.error(
-          `[llm-council] ignoring skill ${JSON.stringify(name)}: names must be bare (no path separators or "..")`,
-        );
-        continue;
-      }
-      args.push('--skill', skillPath);
-    }
-  }
-
-  // contextFiles: false → --no-context-files, true → omit flag
-  if (exec.contextFiles === false) {
-    args.push('--no-context-files');
-  }
-
-  return args;
-}
-
-function getPiInvocation(args: string[]): { command: string; args: string[] } {
-  const currentScript = process.argv[1];
-  const isBunVirtualScript = currentScript?.startsWith('/$bunfs/root/');
-  if (currentScript && !isBunVirtualScript && fs.existsSync(currentScript)) {
-    return { command: process.execPath, args: [currentScript, ...args] };
-  }
-  const execName = path.basename(process.execPath).toLowerCase();
-  const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
-  if (!isGenericRuntime) {
-    return { command: process.execPath, args };
-  }
-  return { command: 'pi', args };
-}
-
-async function runSubagent(
-  model: string,
-  prompt: string,
-  systemPrompt: string | undefined,
-  cwd: string,
-  execConfig: ExecConfig,
-  signal?: AbortSignal,
-): Promise<SubagentResult> {
-  const baseArgs: string[] = ['--mode', 'json', '-p', '--no-session', '--model', model];
-  const execArgs = buildExecArgs(execConfig);
-  const args: string[] = [...baseArgs, ...execArgs];
-
-  let tmpDir: string | null = null;
-  let tmpFile: string | null = null;
-
-  try {
-    if (systemPrompt) {
-      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-council-'));
-      tmpFile = path.join(tmpDir, 'system-prompt.md');
-      fs.writeFileSync(tmpFile, systemPrompt, { mode: 0o600 });
-      args.push('--append-system-prompt', tmpFile);
-    }
-
-    if (process.env.PI_SUBAGENT_DEPTH) {
-      throw new Error('Subagents cannot spawn further subprocesses');
-    }
-
-    args.push(prompt);
-
-    const result: SubagentResult = { text: '', exitCode: 0, stderr: '' };
-
-    result.exitCode = await new Promise<number>((resolve) => {
-      const invocation = getPiInvocation(args);
-      const proc = spawn(invocation.command, invocation.args, {
-        cwd,
-        shell: false,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, PI_SUBAGENT_DEPTH: '1' },
-      });
-
-      let buffer = '';
-
-      const processLine = (line: string) => {
-        if (!line.trim()) return;
-        let event: any;
-        try {
-          event = JSON.parse(line);
-        } catch {
-          return;
-        }
-        if (event.type === 'message_end' && event.message) {
-          const msg = event.message;
-          if (msg.role === 'assistant') {
-            for (const part of msg.content) {
-              if (part.type === 'text') {
-                result.text += part.text;
-              }
-            }
-          }
-        }
-      };
-
-      proc.stdout.on('data', (data: Buffer) => {
-        buffer += data.toString();
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-        for (const line of lines) processLine(line);
-      });
-
-      proc.stderr.on('data', (data: Buffer) => {
-        result.stderr += data.toString();
-      });
-
-      proc.on('close', (code) => {
-        if (buffer.trim()) processLine(buffer);
-        resolve(code ?? 0);
-      });
-
-      proc.on('error', () => {
-        resolve(1);
-      });
-
-      if (signal) {
-        const killProc = () => {
-          proc.kill('SIGTERM');
-          setTimeout(() => {
-            if (!proc.killed) proc.kill('SIGKILL');
-          }, 5000);
-        };
-        if (signal.aborted) killProc();
-        else signal.addEventListener('abort', killProc, { once: true });
-      }
-    });
-
-    if (result.exitCode !== 0 && !result.text && result.stderr) {
-      result.error = result.stderr.split('\n').filter(Boolean).pop() || 'Process failed';
-    }
-
-    return result;
-  } finally {
-    if (tmpFile) {
-      try {
-        fs.unlinkSync(tmpFile);
-      } catch {
-        /* ignore */
-      }
-    }
-    if (tmpDir) {
-      try {
-        fs.rmdirSync(tmpDir);
-      } catch {
-        /* ignore */
-      }
-    }
-  }
+  return out;
 }
 
 // ── Council logic ─────────────────────────────────────────────────────────
 
 async function runCouncil(
+  subagents: SubagentRuntime,
   question: string,
   cwd: string,
   council: ResolvedCouncil,
   signal: AbortSignal | undefined,
   onUpdate: (details: CouncilDetails) => void,
 ): Promise<{ content: { type: 'text'; text: string }[]; details: CouncilDetails }> {
-  const memberExecConfig: ExecConfig = {
-    tools: council.member.tools,
-    thinking: council.member.thinking,
-    extensions: council.member.extensions,
-    skills: council.member.skills,
-    contextFiles: council.member.contextFiles,
+  const memberSpawn = {
+    tools: council.member.tools ?? [],
+    extensionPaths: resolveResourceNames('extensions', council.member.extensions, path.join('src', 'index.ts')),
+    skillPaths: resolveResourceNames('skills', council.member.skills, 'SKILL.md'),
+    includeContextFiles: council.member.contextFiles,
   };
 
   const details: CouncilDetails = {
@@ -532,8 +325,17 @@ async function runCouncil(
     m.status = 'working';
     m.startedAt = Date.now();
     emit();
-    const result = await runSubagent(m.model, question, m.systemPrompt, cwd, memberExecConfig, signal);
-    if (result.exitCode === 0 && result.text) {
+    const result = await subagents.spawn({
+      agent: `member-${m.label}`,
+      model: m.model,
+      prompt: question,
+      systemPrompt: m.systemPrompt,
+      cwd,
+      ...(signal ? { signal } : {}),
+      ...(council.member.thinking ? { thinkingLevel: council.member.thinking } : {}),
+      ...memberSpawn,
+    });
+    if (result.ok) {
       m.status = 'done';
       m.doneAt = Date.now();
       m.text = result.text;
@@ -582,24 +384,21 @@ async function runCouncil(
   }
   chairmanPrompt += '\n---\nSynthesize a unified answer incorporating the best points from each response.';
 
-  const chairmanExecConfig: ExecConfig = {
-    tools: council.chairman.tools,
-    thinking: council.chairman.thinking,
-    extensions: council.chairman.extensions,
-    skills: council.chairman.skills,
-    contextFiles: council.chairman.contextFiles,
-  };
-
-  const chairmanResult = await runSubagent(
-    council.chairman.model,
-    chairmanPrompt,
-    council.chairman.systemPrompt,
+  const chairmanResult = await subagents.spawn({
+    agent: 'chairman',
+    model: council.chairman.model,
+    prompt: chairmanPrompt,
+    systemPrompt: council.chairman.systemPrompt,
     cwd,
-    chairmanExecConfig,
-    signal,
-  );
+    ...(signal ? { signal } : {}),
+    ...(council.chairman.thinking ? { thinkingLevel: council.chairman.thinking } : {}),
+    tools: council.chairman.tools ?? [],
+    extensionPaths: resolveResourceNames('extensions', council.chairman.extensions, path.join('src', 'index.ts')),
+    skillPaths: resolveResourceNames('skills', council.chairman.skills, 'SKILL.md'),
+    includeContextFiles: council.chairman.contextFiles,
+  });
 
-  if (chairmanResult.exitCode === 0 && chairmanResult.text) {
+  if (chairmanResult.ok) {
     chairman.status = 'done';
     chairman.doneAt = Date.now();
     chairman.text = chairmanResult.text;
@@ -626,6 +425,7 @@ let liveDetails: CouncilDetails | null = null;
 // ── Tool registration ────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+  const subagents = createSubagentRuntime({ namespace: 'llm-council' });
   pi.registerTool({
     name: 'llm_council',
     label: 'LLM Council',
@@ -646,7 +446,7 @@ export default function (pi: ExtensionAPI) {
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const council = loadCouncil(ctx.cwd);
-      return runCouncil(params.question, ctx.cwd, council, signal, (details) => {
+      return runCouncil(subagents, params.question, ctx.cwd, council, signal, (details) => {
         liveDetails = details;
         const stageLabels: Record<string, string> = {
           members: CONFIG.shared.status.waitingLabel,

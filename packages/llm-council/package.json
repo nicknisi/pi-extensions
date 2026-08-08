@@ -32,6 +32,7 @@
     }
   },
   "dependencies": {
+    "@nicknisi/pi-shared": "workspace:*",
     "typebox": "^1.1.0"
   },
   "peerDependencies": {
