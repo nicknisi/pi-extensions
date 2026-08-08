@@ -1,0 +1,42 @@
+{
+  "name": "@nicknisi/pi-codemode",
+  "version": "0.0.0",
+  "description": "Execute model-written TypeScript that orchestrates subagents compositionally — one codemode tool over the first-party in-process runtime",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-package"
+  ],
+  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/codemode#readme",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicknisi/pi-extensions.git",
+    "directory": "packages/codemode"
+  },
+  "files": [
+    "dist",
+    "index.ts"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@nicknisi/pi-shared": "workspace:*",
+    "bundle-require": "^5.1.0",
+    "esbuild": "^0.25.0",
+    "typebox": "^1.1.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

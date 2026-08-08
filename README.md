@@ -18,15 +18,16 @@ Local paths are added to pi's settings without copying — edits in the repo are
 
 ### Productivity
 
-| Package                              | What it does                                                                                                                             | Adds                                         |
-| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| [answer](packages/answer/)           | Extracts questions from the last assistant message via a side LLM call, answers them in a tab-through overlay, sends one formatted reply | `/answer`, `ctrl+.`, Q&A overlay             |
-| [btw](packages/btw/)                 | Side-channel LLM chat in a floating window — sees branch context, never touches the main agent's context; promote or fork the thread     | `/btw`, overlay, `btw-answer` entry type     |
-| [handoff](packages/handoff/)         | Transfers context to a new linked session with a model-generated, editable prompt instead of compacting                                  | `/handoff <goal>`                            |
-| [llm-council](packages/llm-council/) | Multiple models answer in parallel as in-process child sessions; a chairman synthesizes                                                  | `llm_council` tool with live inline progress |
-| [subagents](packages/subagents/)     | First-party subagent dispatch + fleet: fan out parallel hermetic child agents, inspect live/persisted runs — no pi-subagents dependency  | `dispatch` and `fleet` tools, `/fleet`       |
-| [orchestrate](packages/orchestrate/) | `/goal` keeps working until a condition holds; `/loop` re-runs a prompt on a timer                                                       | `/goal`, `/loop`                             |
-| [save-md](packages/save-md/)         | Export the latest assistant response to a markdown file                                                                                  | `/save-md <name>`                            |
+| Package                              | What it does                                                                                                                                      | Adds                                         |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| [answer](packages/answer/)           | Extracts questions from the last assistant message via a side LLM call, answers them in a tab-through overlay, sends one formatted reply          | `/answer`, `ctrl+.`, Q&A overlay             |
+| [btw](packages/btw/)                 | Side-channel LLM chat in a floating window — sees branch context, never touches the main agent's context; promote or fork the thread              | `/btw`, overlay, `btw-answer` entry type     |
+| [codemode](packages/codemode/)       | Model-written TypeScript orchestrates subagents compositionally (Promise.all fan-out, pipelines) — executed in-process, returns the module result | `codemode` tool                              |
+| [handoff](packages/handoff/)         | Transfers context to a new linked session with a model-generated, editable prompt instead of compacting                                           | `/handoff <goal>`                            |
+| [llm-council](packages/llm-council/) | Multiple models answer in parallel as in-process child sessions; a chairman synthesizes                                                           | `llm_council` tool with live inline progress |
+| [subagents](packages/subagents/)     | First-party subagent dispatch + fleet: fan out parallel hermetic child agents, inspect live/persisted runs — no pi-subagents dependency           | `dispatch` and `fleet` tools, `/fleet`       |
+| [orchestrate](packages/orchestrate/) | `/goal` keeps working until a condition holds; `/loop` re-runs a prompt on a timer                                                                | `/goal`, `/loop`                             |
+| [save-md](packages/save-md/)         | Export the latest assistant response to a markdown file                                                                                           | `/save-md <name>`                            |
 
 ### UI & appearance
 
