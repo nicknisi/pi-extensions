@@ -2,11 +2,11 @@
 
 Shared helper library for the extensions in this monorepo. It is not a pi extension itself — it exports no default extension entry, adds no commands, tools, keybindings, widgets, or events, and installing it into pi directly does nothing. Other packages depend on it via `"@nicknisi/pi-shared": "workspace:*"` and import from it like any library.
 
-It exists to centralize two things that several extensions were duplicating: one-off LLM calls on pi-ai's modern provider API (no `/compat` imports), and a set of TUI utilities (gradient text, renderable-tree surgery, two-column layout, escape-sequence sanitization, render dispatch) plus a composable searchable select component.
+It exists to centralize things that several extensions were duplicating: one-off LLM calls on pi-ai's modern provider API (no `/compat` imports), a set of TUI utilities (gradient text, renderable-tree surgery, two-column layout, escape-sequence sanitization, render dispatch) plus a composable searchable select component, and an in-process subagent runtime for spawning focused child agent sessions.
 
 ## Exports
 
-`index.ts` re-exports everything from `llm.ts`, `tui-utils.ts`, and `searchable-select-list.ts`.
+`index.ts` re-exports everything from `llm.ts`, `tui-utils.ts`, `searchable-select-list.ts`, and `subagents.ts`.
 
 ### LLM (`llm.ts`)
 
@@ -82,6 +82,49 @@ list.onCancel = () => {
 
 `selectList` is exposed as a readonly field for direct list manipulation.
 
+### Subagents (`subagents.ts`)
+
+```ts
+import { createSubagentRuntime } from '@nicknisi/pi-shared';
+```
+
+In-process subagent runtime: spawn focused child agent sessions through pi's SDK (`createAgentSession`) — no subprocesses, no dependency on pi-subagents. Because pi's extension loader aliases `@earendil-works/*` imports to the running host, children are always version-matched to the pi that loaded the extension.
+
+```ts
+const subagents = createSubagentRuntime({ namespace: 'my-extension' });
+
+const result = await subagents.spawn({
+  model: 'anthropic/claude-haiku-4-5', // optional; pi default resolution when omitted
+  prompt: 'Review src/auth.ts for …',
+  tools: ['read', 'grep'], // allowlist; [] = none; omit = pi defaults
+  systemPrompt: 'You are a security reviewer.', // appended to pi's default prompt
+  outputSchema: MySchema, // optional TypeBox schema for the final message
+  onSupervisorRequest: async ({ message }) => 'supervisor reply',
+});
+
+if (result.ok) {
+  result.text; // final assistant message (last message only, never a concatenation)
+  result.data; // parsed + validated output, when outputSchema was given
+  result.usage; // { inputTokens, outputTokens, totalTokens, cost? }
+} else {
+  result.kind; // 'crashed' | 'empty' | 'schema_invalid' | 'aborted'
+}
+```
+
+Design rules baked in:
+
+- **Hermetic children.** No user extensions, skills, prompt templates, themes, or context files load into a child unless explicitly requested (`extensionPaths`, `skillPaths`, `includeContextFiles`). A configured pi-subagents install never leaks in.
+- **Tool scoping by construction.** A child gets exactly the allowlisted built-ins plus the supervisor tool when requested. No spawn capability exists as a tool, so children cannot spawn children.
+- **Never rejects.** `spawn()` resolves a discriminated union. `schema_invalid` (unparseable/invalid JSON) is deliberately distinct from a schema-valid answer whose _content_ reports failure — engines with retry loops key off that distinction.
+- **The supervisor channel is a closure.** `onSupervisorRequest` registers a `<namespace>_contact_supervisor` tool in the child wired straight to the parent handler — no filesystem protocol, no polling.
+- **Ecosystem recursion guard, honored not namespaced.** Spawning is refused when `PI_SUBAGENT_DEPTH` / `PI_SUBAGENT_CHILD` are set (i.e. your extension is itself running inside a pi-subagents child).
+- **Run registry.** `listRuns()` returns recent runs (newest first, capped at 200); `activeCount()` reports in-flight spawns. Concurrency is capped per runtime (`maxConcurrent`, default 4). pi's loader gives every extension its own evaluated copy of this module, so a _cross-extension_ limiter is impossible — size each runtime accordingly.
+- **Timeout/abort.** `timeoutMs` (default 15 min, `0` disables) and `signal` both map to `session.abort()`; both produce `kind: 'aborted'`.
+
+Also exported: `resolveContainedAgentResource(kind, name, leaf)` — containment-checked resolution of a bare name under the agent dir (`~/.pi/agent/extensions/<name>/<leaf>` etc.) for untrusted config input; returns `null` for anything with path separators or `..`.
+
+Non-goals for now: background/detached runs, persisted run artifacts, worktree isolation, and orchestration (chains/workflows) are deliberately out of this module — the registry is in-memory and children share the parent's event loop and memory (no crash isolation; a pathological child can hurt the host session).
+
 ## Usage
 
 Consumers in this monorepo add the workspace dependency:
@@ -94,7 +137,7 @@ Consumers in this monorepo add the workspace dependency:
 }
 ```
 
-and import individual functions as shown above. Known consumers: `answer`, `btw`, `handoff`, `header`, `session-name`, `statusline`.
+and import individual functions as shown above. Known consumers: `answer`, `btw`, `handoff`, `header`, `llm-council`, `session-name`, `statusline`.
 
 ## Configuration
 
@@ -118,7 +161,9 @@ Peer dependencies (all `*`, provided by the pi runtime):
 - `@earendil-works/pi-coding-agent` — `ExtensionContext` type; the `RenderableNode` shape targets its component tree.
 - `@earendil-works/pi-tui` — `truncateToWidth`, `visibleWidth` (layout), and `Container`, `Input`, `SelectList`, `getKeybindings` (searchable select).
 
-No runtime npm dependencies; Node builtins only (`node:os`, `node:path`).
+Runtime npm dependencies:
+
+- `typebox` — `outputSchema` validation in `subagents.ts` (`Value.Check`/`Clean`/`Convert`/`Errors`). At pi-load time the import is aliased to pi's bundled copy; the declared dependency covers non-pi consumers of the published package.
 
 ## Caveats
 
@@ -126,5 +171,5 @@ No runtime npm dependencies; Node builtins only (`node:os`, `node:path`).
 - `hideLabeledSection` relies on rendering children to a throwaway buffer to compare visible text — it depends on `render(width)` being side-effect-free enough to call speculatively, and on target sections having a stable first visible line (pi's `[Themes]` widget label is a pi internal that could change).
 - `scheduleHideLabeledSection` is a timing heuristic (`[0, 50, 250, 1000]` ms) for asynchronously injected nodes; a sufficiently slow injection can slip past the last poll.
 - `SearchableSelectList` hardcodes the `tui.select.*` keybinding IDs from pi-tui. If those IDs are renamed, navigation silently stops routing.
-- `package.json` `files` lists `index.ts`, `llm.ts`, `tui-utils.ts` but not `searchable-select-list.ts`. Harmless for workspace use (nothing is packed), but `pnpm pack`/publish would produce a broken tarball.
+- `package.json` `files` lists every shipped source plus `dist`; `pnpm pack`/publish produces a working tarball.
 - The package is marked `private: true` and ships TypeScript sources (`exports: { ".": "./index.ts" }`); consumers must run in pi's TS-loading extension environment, not plain Node.
