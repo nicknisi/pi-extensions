@@ -2,13 +2,14 @@
 
 Codemode for the first-party subagent platform: the model writes TypeScript that orchestrates subagents **compositionally** — `Promise.all` fan-out, sequential pipelines, map/reduce over files — and the `codemode` tool compiles and runs it in-process, returning the module's default export as the result. Rebuilt on `@nicknisi/pi-shared`'s in-process runtime; no pi-subagents dependency, no pi-mcp-adapter.
 
-It also ships a **console**: an `=` editor prefix that runs the same runtime inline (devtools-console style), with returned values bound to `$1`, `$2`, … for later snippets. See [Console](#console).
+It also ships a **console**: an `=` editor prefix and `/cx` named snippets that run the same runtime inline (devtools-console style), with returned values bound to `$1`, `$2`, … for later snippets. See [Console](#console).
 
 ## What it adds
 
 - **`codemode` tool** (model-facing) — params: `{ code: string; label?: string; timeoutMs?: number }` (default 10 min, capped at 30 min). The snippet gets two injected bindings and must `export default` its result.
 - **Runscope orchestration ledger** (parent-session side effect) — every `spawn`/`runWorkflow` lifecycle event is appended to the _parent_ session as a typed custom entry (`customType: 'codemode-runscope'`). See [Runscope ledger](#runscope-ledger).
 - **`=` console prefix** (TUI editor) — `=<snippet>` runs a snippet inline and renders the result as a collapsible block. See [Console](#console).
+- **`/cx` named snippets** (slash command) — run named snippet files from `~/.pi/agent/snippets/` or `.pi/snippets/`. See [`/cx` named snippets](#cx-named-snippets).
 
 ## The snippet API
 
@@ -86,6 +87,37 @@ Reference a previous console result with `$1`, `$2`, …:
 =export default `previous had ${($1 as string[]).length} items`
 ```
 
+### `/cx` named snippets
+
+Named codemode snippets as plain TS/JS files discovered from:
+
+- Global: `~/.pi/agent/snippets/*.{ts,js}`
+- Project: `.pi/snippets/*.{ts,js}` (only after the project is trusted)
+
+mirroring pi's prompt-template discovery conventions. Files carry optional frontmatter (`description`) for the autocomplete dropdown:
+
+```ts
+---
+description: Summarize a file's public API
+---
+const file = await spawn({ prompt: `Summarize the public API of {{1}}.`, tools: ['read'], text: true });
+export default file.ok ? file.text : file.error
+```
+
+`/cx <name> [args...]` expands `{{args}}`-style substitution then runs the snippet via codemode:
+
+- `{{args}}` or `{{@}}` — all args joined
+- `{{N}}` — positional arg (1-indexed); empty string when missing
+- `{{N:-default}}` — positional with a default
+- unknown `{{...}}` is left intact so typos are visible
+
+```
+/cx summarize src/index.ts
+/cx review src/auth.ts src/session.ts
+```
+
+This is a **directory convention ONLY** — no registry, no index, no config keys. The registry is `ls`; the package manager is `git`; the search engine is `grep`. Snippets are read on demand each invocation, so discovery rides `/reload` with no snippet-specific wiring. Completion for the first token lists global snippet names on demand; project snippets (untrusted) are not in the completion list but still run.
+
 ## Runscope ledger
 
 Every `spawn` and `runWorkflow` lifecycle event is appended to the **parent** session as a custom entry via `pi.appendEntry('codemode-runscope', entry)`. Custom entries persist to the session JSONL but **do not enter LLM context**, so the ledger is durable and free of context-window cost. Dependency-free — no OpenTelemetry.
@@ -124,7 +156,7 @@ None.
 ## Caveats
 
 - **No crash isolation.** A pathological snippet (memory bomb, infinite sync loop) hurts the host. The timeout cannot preempt CPU-bound synchronous code — it aborts in-flight subagents and stops awaiting, but JS can't be killed mid-`while(true)`. Never write busy-wait or long synchronous loops: they block the host event loop and can freeze the session.
-- **Executions are serialized.** Runs queue behind each other because snippet bindings are passed through a single global; concurrent `codemode` calls do not run in parallel. The `=` console shares this same queue and the same runtime as the tool.
+- **Executions are serialized.** Runs queue behind each other because snippet bindings are passed through a single global; concurrent `codemode` calls do not run in parallel. The `=` console and `/cx` share this same queue and the same runtime as the tool.
 - **`$N` binding is JSON on reload.** Within a live session, `$1`… hold the raw default export (no serialization). On reload, `$N` are rebuilt from the persisted `codemode-console` entries, which are JSON — so non-JSON values (functions, symbols, class instances) are lost or simplified. Errored console runs are not bound to a `$N`.
 - **Timeout semantics:** on expiry, in-flight `spawn` calls (including every stage of an in-flight `runWorkflow`) are aborted (children stop quickly) and the tool returns a timeout error with captured logs; the detached snippet promise settles later and is discarded.
 - **`export default` is required.** A missing/undefined default export returns a notice, not an error.

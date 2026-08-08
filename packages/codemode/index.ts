@@ -28,7 +28,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ExtensionAPI, Theme, ThemeColor } from '@earendil-works/pi-coding-agent';
-import { getAgentDir } from '@earendil-works/pi-coding-agent';
+import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from '@earendil-works/pi-coding-agent';
 import { getKeybindings, Text } from '@earendil-works/pi-tui';
 import {
   createSubagentRuntime,
@@ -692,6 +692,131 @@ export default function codemode(pi: ExtensionAPI) {
       ts: Date.now(),
     });
     return { action: 'handled' };
+  });
+
+  // ── `/cx` named snippets ──────────────────────────────────────────
+  // Named codemode snippets as plain TS/JS files in
+  // ~/.pi/agent/snippets/ (global) and .pi/snippets/ (project, trusted
+  // only), mirroring pi's prompt-template discovery. This is a directory
+  // convention ONLY — no registry, no index, no config keys. The registry is
+  // `ls`; the package manager is git; the search engine is grep. Files are
+  // read on demand, so /reload needs no snippet-specific wiring.
+  function snippetDirs(cwd: string, trusted: boolean): string[] {
+    const dirs = [path.join(getAgentDir(), 'snippets')];
+    if (trusted) dirs.push(path.join(cwd, CONFIG_DIR_NAME, 'snippets'));
+    return dirs;
+  }
+
+  function findSnippet(name: string, cwd: string, trusted: boolean): string | undefined {
+    for (const dir of snippetDirs(cwd, trusted)) {
+      for (const ext of ['.ts', '.js'] as const) {
+        const f = path.join(dir, `${name}${ext}`);
+        try {
+          if (fs.statSync(f).isFile()) return f;
+        } catch {
+          // not present — try next candidate
+        }
+      }
+    }
+    return undefined;
+  }
+
+  function listGlobalSnippets(): { name: string; description?: string }[] {
+    const dir = path.join(getAgentDir(), 'snippets');
+    let files: string[] = [];
+    try {
+      files = fs.readdirSync(dir).filter((f) => f.endsWith('.ts') || f.endsWith('.js'));
+    } catch {
+      return [];
+    }
+    return files.map((f) => {
+      const name = f.replace(/\.(ts|js)$/, '');
+      const item: { name: string; description?: string } = { name };
+      try {
+        const { frontmatter } = parseFrontmatter<{ description?: string }>(fs.readFileSync(path.join(dir, f), 'utf8'));
+        if (frontmatter.description) item.description = frontmatter.description;
+      } catch {
+        // best-effort description
+      }
+      return item;
+    });
+  }
+
+  // `{{args}}` (all args), `{{@}}` (alias), `{{N}}` (positional, 1-indexed),
+  // `{{N:-default}}` (positional with default). Unknown `{{...}}` is left
+  // intact so authors can see typos.
+  function substituteArgs(body: string, args: string[]): string {
+    return body.replace(/\{\{([^}]+)\}\}/g, (whole, expr: string) => {
+      const e = expr.trim();
+      if (e === 'args' || e === '@') return args.join(' ');
+      const m = /^(\d+)(?::-([\s\S]*))?$/.exec(e);
+      if (m) {
+        const idx = Number(m[1]) - 1;
+        const val = args[idx];
+        if (val !== undefined && val !== '') return val;
+        return m[2] ?? '';
+      }
+      return whole;
+    });
+  }
+
+  pi.registerCommand('cx', {
+    description: 'Run a named codemode snippet (from ~/.pi/agent/snippets or .pi/snippets)',
+    getArgumentCompletions: (argumentPrefix) => {
+      // First token = snippet name; complete from the global snippets dir on
+      // demand (the registry is `ls`). Once a name is chosen, offer no arg
+      // completion — snippet authors define their own arg shapes.
+      if (argumentPrefix.includes(' ')) return null;
+      const prefix = argumentPrefix.trim();
+      const all = listGlobalSnippets().filter((s) => s.name.startsWith(prefix));
+      if (all.length === 0) return null;
+      return all.map((s) => ({
+        value: s.name,
+        label: s.name,
+        ...(s.description ? { description: s.description } : {}),
+      }));
+    },
+    handler: async (args, ctx) => {
+      const parts = args.trim().split(/\s+/).filter(Boolean);
+      const name = parts[0];
+      if (!name) {
+        ctx.ui.notify('Usage: /cx <name> [args...]', 'warning');
+        return;
+      }
+      const argList = parts.slice(1);
+      const file = findSnippet(name, ctx.cwd, ctx.isProjectTrusted());
+      if (!file) {
+        ctx.ui.notify(`No codemode snippet '${name}' in ~/.pi/agent/snippets or ${CONFIG_DIR_NAME}/snippets`, 'error');
+        return;
+      }
+      let body: string;
+      try {
+        body = parseFrontmatter<{ description?: string }>(fs.readFileSync(file, 'utf8')).body;
+      } catch (err) {
+        ctx.ui.notify(`Failed to read snippet: ${err instanceof Error ? err.message : String(err)}`, 'error');
+        return;
+      }
+      const code = substituteArgs(body, argList);
+      const n = sessionResults.length + 1;
+      ctx.ui.setStatus('codemode', `running ${name}…`);
+      const outcome = await runCodemode({
+        code,
+        label: name,
+        timeoutMs: DEFAULT_TIMEOUT_MS,
+        cwd: ctx.cwd,
+        bindResult: true,
+      });
+      ctx.ui.setStatus('codemode', undefined);
+      pi.appendEntry<ConsoleEntryData>(CONSOLE_TYPE, {
+        n,
+        label: name,
+        code,
+        text: outcome.text,
+        details: outcome.details,
+        value: outcome.value,
+        ts: Date.now(),
+      });
+    },
   });
 
   // ── Console entry renderer (collapsible) ─────────────────────────
