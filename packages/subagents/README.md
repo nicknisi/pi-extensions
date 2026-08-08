@@ -72,6 +72,19 @@ The one residual exposure is a hard `SIGKILL` of the host: in-process children d
 
 Every run persists a record to `~/.pi/agent/subagent-runs/subagents/<runId>.json` (status, timing, usage, bounded output). Because pi isolates module state per extension, this directory is the cross-extension fleet view: any extension using `@nicknisi/pi-shared` with the same artifacts root shows up in `/fleet`.
 
+### Standard pi session mirror
+
+Every dispatch run is **also** dual-written as a standard pi session JSONL via pi's real `SessionManager` (from `@earendil-works/pi-coding-agent`), into the default sessions dir (`~/.pi/agent/sessions/<encoded-cwd>/`), with the session header's `parentSession` set to the owning pi session's file path (read from `ctx.sessionManager.getSessionFile()` inside the `dispatch` tool). This means a subagent run shows up in pi's native `/resume` list, can be inspected with `/tree`, and can be branched/forked with `--fork` — exactly like a session you drove yourself. The `fleet` tool's `result` view prints the mirror path (`session: <path> (pi /resume, /tree, --fork)`).
+
+This is **additive dual-write**, not a replacement: the bespoke `.json` run store above is unchanged, and the fleet/registry still read it (it carries bounded output, transcripts, worktree/patch info, and the cross-extension fleet view that the sessions dir doesn't encode). The session mirror carries the full message transcript instead.
+
+Compat caveats:
+
+- The mirror is written only when the owning pi session is persisted (i.e. `getSessionFile()` returns a path). In `pi -p` print mode or other in-memory hosts there is no owning session file, so no mirror is written — the bespoke `.json` record is still the source of truth.
+- `SessionManager` creates the JSONL lazily — only once the first assistant message is appended. A run that crashed before producing any assistant turn (kind `crashed`/`empty` with no assistant message) leaves no session file on disk; `record.sessionFile` is left undefined in that case rather than advertising a path to nothing.
+- The mirror reflects the child's messages as pi sees them (user prompt → assistant turns → tool results). It does **not** carry the subagent-specific metadata (runId, namespace, transcript summary, worktree/patch paths) — that lives only on the bespoke `.json` artifact, which is why both are kept.
+- Worktree-isolated runs mirror with the **worktree's** cwd (where the child actually ran), not the caller's cwd. The session header's `cwd` is honest about where the work happened.
+
 Children are **hermetic by construction**: no user extensions, skills, prompt templates, themes, or `AGENTS.md` context load unless explicitly requested. Tool scoping is likewise by construction — a child receives exactly its allowlist, and no spawn capability exists as a tool, so children cannot recurse. The ecosystem recursion guard (`PI_SUBAGENT_DEPTH` / `PI_SUBAGENT_CHILD`) is honored: inside a pi-subagents child, spawns are refused.
 
 `spawn()` never rejects; results are a discriminated union (`ok | crashed | empty | schema_invalid | aborted`). See `packages/shared/README.md` for the full runtime API.

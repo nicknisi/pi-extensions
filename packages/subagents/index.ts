@@ -101,7 +101,7 @@ function wantsTreeMutation(spec: TaskSpec): boolean {
   return (spec.tools ?? []).some((tool) => TREE_MUTATING_TOOLS.has(tool));
 }
 
-function toSpawnOptions(spec: TaskSpec, cwd: string): SpawnOptions {
+function toSpawnOptions(spec: TaskSpec, cwd: string, parentSession: string | undefined): SpawnOptions {
   const opts: SpawnOptions = {
     prompt: spec.task,
     tools: spec.tools ?? DEFAULT_TOOLS,
@@ -111,6 +111,7 @@ function toSpawnOptions(spec: TaskSpec, cwd: string): SpawnOptions {
   if (spec.model) opts.model = spec.model;
   if (spec.systemPrompt) opts.systemPrompt = spec.systemPrompt;
   if (spec.worktree) opts.worktree = true;
+  if (parentSession) opts.parentSession = parentSession;
   return opts;
 }
 
@@ -630,6 +631,11 @@ export default function subagents(pi: ExtensionAPI) {
 
       if (ctx.hasUI) widgetUi = ctx.ui;
 
+      // Owning pi session file path, for parentSession linkage on the
+      // dual-written standard session JSONL mirror. undefined in print /
+      // in-memory hosts — the mirror is still written, just unparented.
+      const parentSession = ctx.sessionManager?.getSessionFile();
+
       const progress = new Map<TaskSpec, TaskProgress>();
       const details: DispatchDetails = { tasks: [], settled: false };
       for (const spec of specs) {
@@ -693,7 +699,7 @@ export default function subagents(pi: ExtensionAPI) {
         const task = progress.get(spec)!;
         // Deliberately no tool signal for background runs: pi may abort tool
         // signals after execute returns, which would kill the child.
-        const done = spawnCancellable(runtime, toSpawnOptions(spec, ctx.cwd), undefined);
+        const done = spawnCancellable(runtime, toSpawnOptions(spec, ctx.cwd, parentSession), undefined);
         const runId = (done as Promise<SpawnResult> & { runId: string }).runId;
         task.status = 'background';
         task.runId = runId;
@@ -730,7 +736,11 @@ export default function subagents(pi: ExtensionAPI) {
             task.status = 'working';
             task.startedAt = Date.now();
             emit();
-            const result = await spawnCancellable(runtime, toSpawnOptions(spec, ctx.cwd), signal ?? undefined);
+            const result = await spawnCancellable(
+              runtime,
+              toSpawnOptions(spec, ctx.cwd, parentSession),
+              signal ?? undefined,
+            );
             settle(task, result);
             emit();
             return result;
@@ -758,7 +768,11 @@ export default function subagents(pi: ExtensionAPI) {
         task.status = 'working';
         task.startedAt = Date.now();
         emit();
-        const result = await spawnCancellable(runtime, toSpawnOptions(spec, ctx.cwd), signal ?? undefined);
+        const result = await spawnCancellable(
+          runtime,
+          toSpawnOptions(spec, ctx.cwd, parentSession),
+          signal ?? undefined,
+        );
         settle(task, result);
         emit();
         if (result.ok) {
@@ -877,6 +891,7 @@ export default function subagents(pi: ExtensionAPI) {
         run.worktree
           ? `worktree: ${run.worktree.path}${run.worktree.patchPath ? ` · patch: ${run.worktree.patchPath} (${run.worktree.changedFiles ?? 0} files)` : ' · no changes'}`
           : undefined,
+        run.sessionFile ? `session: ${run.sessionFile} (pi /resume, /tree, --fork)` : undefined,
         run.transcript && run.transcript.length > 0
           ? `transcript (last ${run.transcript.length}): ${run.transcript.map((t) => (t.kind === 'tool' ? `⚙${t.label}` : t.label)).join(' → ')}`
           : undefined,
