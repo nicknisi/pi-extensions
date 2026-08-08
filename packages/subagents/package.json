@@ -1,0 +1,40 @@
+{
+  "name": "@nicknisi/pi-subagents",
+  "version": "0.0.0",
+  "description": "First-party subagent dispatch and fleet: fan out parallel child agents and inspect their runs — no pi-subagents dependency",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-package"
+  ],
+  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/subagents#readme",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicknisi/pi-extensions.git",
+    "directory": "packages/subagents"
+  },
+  "files": [
+    "dist",
+    "index.ts"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@nicknisi/pi-shared": "workspace:*",
+    "typebox": "^1.1.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
