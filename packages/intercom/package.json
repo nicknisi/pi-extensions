@@ -1,0 +1,43 @@
+{
+  "name": "@nicknisi/pi-intercom",
+  "version": "0.0.0",
+  "description": "Brokerless session-to-session messaging for pi — a file mailbox that outlives the process, with ask/reply coordination. Drop-in replacement for nicobailon/pi-intercom.",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-package"
+  ],
+  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/intercom#readme",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicknisi/pi-extensions.git",
+    "directory": "packages/intercom"
+  },
+  "files": [
+    "dist",
+    "index.ts",
+    "registry.ts",
+    "mailbox.ts",
+    "policy.ts",
+    "format.ts"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "typebox": "^1.1.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
