@@ -5,6 +5,7 @@ Codemode for the first-party subagent platform: the model writes TypeScript that
 ## What it adds
 
 - **`codemode` tool** (model-facing) — params: `{ code: string; label?: string; timeoutMs?: number }` (default 10 min, capped at 30 min). The snippet gets two injected bindings and must `export default` its result.
+- **Runscope orchestration ledger** (parent-session side effect) — every `spawn`/`runWorkflow` lifecycle event is appended to the _parent_ session as a typed custom entry (`customType: 'codemode-runscope'`). See [Runscope ledger](#runscope-ledger).
 
 ## The snippet API
 
@@ -59,6 +60,33 @@ const rollup = await spawn({
 export default { rollup: rollup.ok ? rollup.text : 'rollup failed', summaries };
 ```
 
+## Runscope ledger
+
+Every `spawn` and `runWorkflow` lifecycle event is appended to the **parent** session as a custom entry via `pi.appendEntry('codemode-runscope', entry)`. Custom entries persist to the session JSONL but **do not enter LLM context**, so the ledger is durable and free of context-window cost. Dependency-free — no OpenTelemetry.
+
+Entry shape (all fields except extras are guaranteed):
+
+```ts
+{
+  runId: string; // workflow run id, or the spawn's own runId for a standalone spawn
+  spanId: string; // this span (spawn runId, or stage id)
+  parentSpanId: string | null; // containing stage span, or the first `needs` dep for a stage, or null
+  kind: 'spawn_start' | 'spawn_end' | 'stage_start' | 'stage_end' | 'gate_result';
+  ts: number; // epoch ms
+  // extras (kind-dependent): ok, failureKind, error, passed, feedback
+}
+```
+
+Events:
+
+- **`spawn_start` / `spawn_end`** — around every `spawn`, standalone or inside a workflow stage. `spawn_end` carries `ok` and, on failure, `failureKind` + `error`.
+- **`stage_start` / `stage_end`** — around every workflow stage (including skipped / budget-exceeded ones). `stage_end` carries `ok` and, on failure, `failureKind` + `error`.
+- **`gate_result`** — emitted when a stage `gate` verdict is reached. Carries `passed: boolean` and, on revise, `feedback`.
+
+**Trace tree.** Stage `parentSpanId` is derived from `needs` edges (default: the previous stage), so the stage span tree mirrors the workflow DAG. A trace span has one parent, so a multi-need stage attaches to its **first** need — a spanning tree of the DAG. Spawns inside a workflow are parented to their stage via `AsyncLocalStorage`, so concurrent stages attribute their spawns correctly. Standalone spawns (no workflow) have `parentSpanId: null`.
+
+Read the ledger back by scanning `ctx.sessionManager.getEntries()` for `entry.type === 'custom' && entry.customType === 'codemode-runscope'` (e.g. on `session_start` to reconstruct a run view). Entries are not rendered in the transcript unless you register a renderer via `pi.registerEntryRenderer('codemode-runscope', ...)`.
+
 ## Security model
 
 The snippet executes **in-process with the host's full privileges**. This is the same trust boundary as any `bash` tool call and as the original pi-codemode: it's your model, writing code for your session, on your machine. There is no sandbox. Do not point it at untrusted prompt sources.
@@ -75,3 +103,4 @@ None.
 - **`export default` is required.** A missing/undefined default export returns a notice, not an error.
 - **Results are bounded** (16 KB), logs are bounded (200 entries × 2 KB), stacks are bounded (4 KB).
 - **bundle-require/ESM interop quirks:** the snippet is esbuild-bundled as ESM with target es2022 (top-level await works); bare package imports fail by design (no `node_modules` near the temp dir), but Node builtins and globals remain reachable — there is no sandbox.
+- **Runscope volume:** every spawn emits two ledger entries, and a `foreach` fan-out of N items emits 2N. Entries persist to the session JSONL (never LLM context), so a large fan-out grows the session file — the trade-off for a durable trace. Emission is best-effort and never fails a run.

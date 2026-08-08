@@ -22,6 +22,8 @@
  * the same trust boundary as pi-codemode and any bash tool call.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -34,8 +36,12 @@ import {
   type RunWorkflowOptions,
   type SpawnOptions,
   type SpawnResult,
+  type StageContext,
+  type SubagentRuntime,
+  type WorkflowEvent,
   type WorkflowResult,
   type WorkflowSpec,
+  type WorkflowStage,
 } from '@nicknisi/pi-shared';
 import { bundleRequire } from 'bundle-require';
 import { Type } from 'typebox';
@@ -50,6 +56,33 @@ const MAX_LOG_CHARS = 2000;
 
 /** Spawn options as exposed to the codemode snippet: the shared runtime's set, plus `text` — an explicit raw-text opt-in. */
 type CodemodeSpawnOptions = SpawnOptions & { text?: boolean };
+
+// ── Runscope orchestration ledger ─────────────────────────────────────────
+// Every spawn/runWorkflow lifecycle event is appended to the PARENT session
+// as a typed custom entry (customType 'codemode-runscope') via pi.appendEntry.
+// Custom entries persist to the session JSONL but never enter LLM context, so
+// the ledger is durable and free of context-window cost. No OpenTelemetry —
+// just structured spans written through the session.
+const RUNSCOPE_TYPE = 'codemode-runscope';
+
+type RunscopeKind = 'spawn_start' | 'spawn_end' | 'stage_start' | 'stage_end' | 'gate_result';
+
+interface RunscopeEntry {
+  runId: string;
+  spanId: string;
+  parentSpanId: string | null;
+  kind: RunscopeKind;
+  ts: number;
+  [extra: string]: unknown;
+}
+
+// Async context carrying the active workflow run + stage span, so a spawn
+// fired inside a workflow stage can be parented to its stage even when stages
+// run concurrently. `enterWith` is used (not `run`) because the spawn call
+// lives inside the shared engine's runJob frame, which we cannot wrap — the
+// stage's prompt wrapper is our only interception point in that frame. Each
+// runJob is its own async frame, so the context does not leak across stages.
+const runscopeCtx = new AsyncLocalStorage<{ runId: string; stageSpan: string }>();
 
 const BINDINGS_PRELUDE = 'const { spawn, log, runWorkflow } = (globalThis as any).__piCodemode;\n';
 const GLOBAL_KEY = '__piCodemode';
@@ -178,6 +211,49 @@ function spinnerDot(theme: Theme, frame: number): string {
 
 export default function codemode(pi: ExtensionAPI) {
   const runtime = createSubagentRuntime({ namespace: 'codemode', artifactsDir: ARTIFACTS_ROOT });
+
+  // Append a runscope span to the parent session JSONL. Best-effort: a ledger
+  // write must never fail a codemode run.
+  const emitRunscope = (entry: RunscopeEntry): void => {
+    try {
+      pi.appendEntry(RUNSCOPE_TYPE, entry);
+    } catch {
+      // best-effort
+    }
+  };
+
+  // Traced runtime: wraps every spawn with spawn_start/spawn_end ledger
+  // entries. Used both by the snippet's `spawn` binding and by runWorkflow, so
+  // every child — standalone or inside a stage — is traced. The runId/parent
+  // come from the async context set by runWorkflow's stage-prompt wrapper; for
+  // a standalone spawn there is no context, so runId = the spawn's own runId
+  // and parentSpanId = null.
+  const tracedRuntime: SubagentRuntime = {
+    namespace: runtime.namespace,
+    spawn: (opts) => tracedRuntime.spawnDetached(opts).done,
+    spawnDetached: (opts) => {
+      const { runId, done } = runtime.spawnDetached(opts);
+      const span = runscopeCtx.getStore();
+      const entryRunId = span?.runId ?? runId;
+      const parentSpanId = span?.stageSpan ?? null;
+      emitRunscope({ runId: entryRunId, spanId: runId, parentSpanId, kind: 'spawn_start', ts: Date.now() });
+      void done.then((res) => {
+        emitRunscope({
+          runId: entryRunId,
+          spanId: runId,
+          parentSpanId,
+          kind: 'spawn_end',
+          ts: Date.now(),
+          ok: res.ok,
+          ...(res.ok ? {} : { failureKind: res.kind, error: res.error }),
+        });
+      });
+      return { runId, done };
+    },
+    listRuns: () => runtime.listRuns(),
+    activeCount: () => runtime.activeCount(),
+  };
+
   // Snippet bindings are handed over via a single global (globalThis.__piCodemode),
   // so two concurrent executions would clobber each other's spawn/log/runWorkflow —
   // serialize runs with a promise-chain mutex.
@@ -278,7 +354,7 @@ export default function codemode(pi: ExtensionAPI) {
         // (read/bash/edit/write) would apply otherwise.
         if (opts.tools === undefined) opts.tools = ['read', 'grep', 'find', 'ls'];
         if (merged) opts.signal = merged;
-        return runtime.spawn(opts);
+        return tracedRuntime.spawn(opts);
       };
 
       const boundRunWorkflow = (
@@ -286,9 +362,96 @@ export default function codemode(pi: ExtensionAPI) {
         wfOpts: Partial<RunWorkflowOptions> = {},
       ): Promise<WorkflowResult> => {
         const merged = mergeSignals(wfOpts.signal, signal ?? undefined, controller.signal);
+        const userOnProgress = wfOpts.onProgress;
         const full: RunWorkflowOptions = { cwd: ctx.cwd, ...wfOpts };
         if (merged) full.signal = merged;
-        return runWorkflow(spec, runtime, full);
+
+        // One runId for the whole workflow; every stage/gate entry carries it.
+        const wfRunId = randomUUID();
+        // Derive a stage's parent span from its needs edges so the trace tree
+        // mirrors the workflow DAG. A trace span has one parent, so multi-need
+        // stages attach to the first need (a spanning tree of the DAG); the
+        // full needs list is included in the entry for completeness.
+        const parentOf = (stageId: string): string | null => {
+          const idx = spec.stages.findIndex((s) => s.id === stageId);
+          if (idx === -1) return null;
+          const stage = spec.stages[idx]!;
+          const needs = stage.needs ?? (idx === 0 ? [] : [spec.stages[idx - 1]!.id]);
+          return needs[0] ?? null;
+        };
+
+        // Wrap each stage's prompt so the stage's async frame (runJob) carries
+        // the runId + stage span via AsyncLocalStorage.enterWith. The shared
+        // engine calls buildPrompt (and thus this wrapper) at the start of each
+        // attempt inside runJob; the subsequent `await runtime.spawn(...)` in
+        // the same frame inherits the context, so tracedRuntime can parent the
+        // spawn's span to its stage even under concurrent stages. String
+        // prompts are wrapped in a function returning the original string.
+        const wrappedStages: WorkflowStage[] = spec.stages.map((stage) => {
+          const origPrompt = stage.prompt;
+          const promptFn = typeof origPrompt === 'function' ? origPrompt : () => origPrompt;
+          const wrappedPrompt = (gctx: StageContext, item?: unknown, index?: number): string => {
+            runscopeCtx.enterWith({ runId: wfRunId, stageSpan: stage.id });
+            return promptFn(gctx, item, index);
+          };
+          const wrapped: WorkflowStage = { ...stage, prompt: wrappedPrompt };
+          if (stage.gate) {
+            const origGate = stage.gate;
+            wrapped.gate = (outcome, gctx) => {
+              const verdict = origGate(outcome, gctx);
+              emitRunscope({
+                runId: wfRunId,
+                spanId: stage.id,
+                parentSpanId: parentOf(stage.id),
+                kind: 'gate_result',
+                ts: Date.now(),
+                passed: verdict === true,
+                ...(verdict === true ? {} : { feedback: verdict.revise }),
+              });
+              return verdict;
+            };
+          }
+          return wrapped;
+        });
+
+        full.onProgress = (event: WorkflowEvent) => {
+          try {
+            if (event.type === 'stage_start') {
+              emitRunscope({
+                runId: wfRunId,
+                spanId: event.stageId!,
+                parentSpanId: parentOf(event.stageId!),
+                kind: 'stage_start',
+                ts: Date.now(),
+              });
+            } else if (
+              event.type === 'stage_complete' ||
+              event.type === 'stage_failed' ||
+              event.type === 'stage_skipped'
+            ) {
+              emitRunscope({
+                runId: wfRunId,
+                spanId: event.stageId!,
+                parentSpanId: parentOf(event.stageId!),
+                kind: 'stage_end',
+                ts: Date.now(),
+                ok: event.outcome?.ok,
+                ...(event.outcome && !event.outcome.ok
+                  ? { failureKind: event.outcome.kind, error: event.outcome.error }
+                  : {}),
+              });
+            }
+          } catch {
+            // ledger emission is best-effort
+          }
+          try {
+            userOnProgress?.(event);
+          } catch {
+            // a caller's progress callback must never break the workflow
+          }
+        };
+
+        return runWorkflow({ ...spec, stages: wrappedStages }, tracedRuntime, full);
       };
 
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-codemode-'));
