@@ -32,7 +32,21 @@ import {
   type Letter,
 } from './mailbox.js';
 import { BACKLOG_CAP, OutboundPolicy, inboundAccepts } from './policy.js';
-import { deriveAddr, listRecords, presenceOf, sweep, writeRecord, type SessionRecord } from './registry.js';
+import {
+  claimAlias,
+  clearAlias,
+  deriveAddr,
+  listAliases,
+  listRecords,
+  presenceOf,
+  readAlias,
+  readRecord,
+  sweep,
+  writeAlias,
+  writeRecord,
+  type AliasRecord,
+  type SessionRecord,
+} from './registry.js';
 
 const dirs: string[] = [];
 function tmpRoot(): string {
@@ -220,6 +234,58 @@ describe('mailbox', () => {
     expect(unreadCount(root, addr)).toBe(1);
     // "resume": drain-on-start
     expect(drain(root, addr).map((l) => l.body)).toEqual(['while you were out']);
+  });
+});
+
+describe('aliases', () => {
+  function alias(over: Partial<AliasRecord> = {}): AliasRecord {
+    return { name: 'ci', addr: 'aaaa1111bbbb', sessionId: 'sid-1', claimedAt: Date.now(), ...over };
+  }
+
+  it('claim is last-claim-wins and persists on disk across restart', () => {
+    const root = tmpRoot();
+    writeAlias(root, alias({ addr: 'old00000000', sessionId: 'old-sid' }));
+    expect(readAlias(root, 'ci')?.addr).toBe('old00000000');
+    // a new session claims the same name — overwrites
+    claimAlias(root, 'ci', 'new00000001', 'new-sid');
+    expect(readAlias(root, 'ci')?.addr).toBe('new00000001');
+    expect(listAliases(root).map((a) => a.name)).toEqual(['ci']);
+  });
+
+  it('sweep reaps an alias whose owning session record is gone', () => {
+    const root = tmpRoot();
+    // live owner keeps its alias
+    const live = record({ addr: 'live00000001', pid: process.pid });
+    writeRecord(root, live);
+    claimAlias(root, 'ci', live.addr, live.sessionId);
+    sweep(root);
+    expect(readAlias(root, 'ci')?.addr).toBe(live.addr);
+
+    // owner record reaped (offline, empty, not resumable) → alias reaped too
+    const dead = record({ addr: 'dead00000002', offline: true, pid: 2_000_000_010, sessionId: 'gone' });
+    writeRecord(root, dead);
+    claimAlias(root, 'dotfiles', dead.addr, dead.sessionId);
+    sweep(root, Date.now(), () => false); // nothing resumable
+    expect(readAlias(root, 'ci')?.addr).toBe(live.addr); // untouched
+    expect(readAlias(root, 'dotfiles')).toBeNull();
+  });
+
+  it('a resumable-but-offline owner keeps its alias (deliverable while down)', () => {
+    const root = tmpRoot();
+    const down = record({ addr: 'down00000003', offline: true, pid: 2_000_000_011, sessionId: 'can-resume' });
+    writeRecord(root, down);
+    claimAlias(root, 'ci', down.addr, down.sessionId);
+    sweep(root, Date.now(), (id) => id === 'can-resume');
+    expect(readAlias(root, 'ci')?.addr).toBe(down.addr);
+  });
+
+  it('clearAlias is idempotent', () => {
+    const root = tmpRoot();
+    writeAlias(root, alias());
+    clearAlias(root, 'ci');
+    clearAlias(root, 'ci'); // no throw
+    expect(readAlias(root, 'ci')).toBeNull();
+    expect(readRecord(root, 'aaaa1111bbbb')).toBeNull(); // sanity: readRecord on missing → null
   });
 });
 

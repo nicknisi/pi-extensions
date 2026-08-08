@@ -49,7 +49,13 @@ main moved; rebase before you push.
 
 ### ask / reply / pending / cancel
 
-`ask` deposits a question and blocks (default 120s, `timeoutMs` to change) until the peer's `reply` (with the ask id) arrives — or a `cancel`, timeout, or abort. Received asks wait in `pending`; answer them via `reply` with `replyTo` so correlation works. `cancel { messageId }` withdraws one of your outstanding asks. If a reply arrives after its asker gave up, it lands as an ordinary message.
+`ask` deposits a question and blocks (default 120s, `timeoutMs` to change) until the peer's `reply` (with the ask id) arrives — or a `cancel`, a timeout, or an abort. Received asks wait in `pending`; answer them via `reply` with `replyTo` so correlation works. `cancel { messageId }` withdraws one of your outstanding asks. If a reply arrives after its asker gave up, it lands as an ordinary message.
+
+**Explicit thread tokens.** Every `send`/`ask` returns a message id (`id …` in the delivery card and the tool result). `reply` **requires** `replyTo` (the ask/message id or a unique prefix) — correlation is explicit. The previous behavior of inferring a single pending ask when `replyTo` was omitted is gone: identical calls no longer silently change semantics based on invisible broker state.
+
+### Durable claimable aliases
+
+`claim { to: "@ci" }` binds a human-readable `@alias` to this session's address. Aliases are **durable** (persisted in the registry, not runtime-only) and survive `pi -c` restart; **last-claim-wins** (a new claim overwrites any prior owner); and **swept when the owning session dies** — specifically, when sweep reaps the owning session's record (a resumable-but-offline session keeps both its record and its alias, so mail stays deliverable while it's down). Target an alias from any session with `to: "@ci"`. Names match `^[a-z0-9][a-z0-9_-]{0,31}$` (1-32 chars, leading alphanumeric). Aliases this session owns surface in `status`.
 
 ## Configuration
 
