@@ -60,6 +60,7 @@ const ARTIFACTS_ROOT = path.join(getAgentDir(), 'subagent-runs');
 const PATCHES_STATE_DIR = path.join(getAgentDir(), 'subagent-patches');
 const PATCHES_STATE_FILE = path.join(PATCHES_STATE_DIR, 'state.json');
 const STATUS_KEY = 'subagents';
+const INLINE_WIDGET_KEY = 'subagents-inline';
 /** Toggle the fleet radar overlay. Rebind via ~/.pi/agent/keybindings.json. */
 const RADAR_SHORTCUT = 'alt+ctrl+f';
 const STATUS_INTERVAL = 2000;
@@ -1232,6 +1233,118 @@ let statusTimer: ReturnType<typeof setInterval> | undefined;
 let statusUi: ExtensionUIContext | null = null;
 let statusTheme: Theme | null = null;
 
+// ── & dispatch prefix: inline single-subagent runs ────────────────────────
+//
+// `&scout how does auth work` at position zero intercepts the input, dispatches
+// ONE child inline (reusing the same spawnCancellable path as the dispatch
+// tool), surfaces live progress as a widget above the editor, and lands the
+// final result as a collapsible `subagents:inline` custom message that uses
+// the same render vocabulary as a dispatch tool result. Each dispatch is also
+// captured as a `subagents:dispatch` custom entry so `/again` can re-fire it.
+
+function inlineComponent(getLines: (width: number) => string[]): Component {
+  return {
+    render: (width: number) => getLines(width).map((l) => truncateToWidth(l, width)),
+    invalidate: () => {},
+  };
+}
+
+function renderInlineWidget(ctx: ExtensionContext, details: DispatchDetails, frame: number): void {
+  if (!ctx.hasUI) return;
+  const theme = (ctx.ui as ExtensionUIContext).theme;
+  const task = details.tasks[0];
+  if (!task) return;
+  const spinner = theme
+    ? theme.fg('muted', SPINNER_FRAMES[frame % SPINNER_FRAMES.length]!)
+    : SPINNER_FRAMES[frame % SPINNER_FRAMES.length]!;
+  const header = theme ? dispatchHeader(task.label, theme, `${spinner} `) : `${spinner} ${task.label}`;
+  const lines = [header, ''];
+  if (theme) lines.push(...renderTaskTree(details.tasks, theme, frame));
+  try {
+    ctx.ui.setWidget(INLINE_WIDGET_KEY, lines, { placement: 'aboveEditor' });
+  } catch {
+    // best-effort; a lost widget update during shutdown is harmless
+  }
+}
+
+async function dispatchInline(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  runtime: SubagentRuntime,
+  spec: TaskSpec,
+): Promise<void> {
+  const parentSession = ctx.sessionManager?.getSessionFile();
+  const task: TaskProgress = { label: spec.agent ?? short(spec.task, 40), status: 'pending' };
+  if (spec.model) task.model = spec.model;
+  const details: DispatchDetails = { tasks: [task], settled: false };
+
+  let frame = 0;
+  const widgetTimer = setInterval(() => {
+    frame = (frame + 1) % SPINNER_FRAMES.length;
+    renderInlineWidget(ctx, details, frame);
+  }, SPINNER_INTERVAL);
+  task.status = 'working';
+  task.startedAt = Date.now();
+  renderInlineWidget(ctx, details, 0);
+
+  const done = spawnCancellable(runtime, toSpawnOptions(spec, ctx.cwd, parentSession), undefined);
+  const runId = (done as Promise<SpawnResult> & { runId: string }).runId;
+  task.runId = runId;
+
+  let result: SpawnResult;
+  try {
+    result = await done;
+  } catch (err) {
+    result = {
+      ok: false,
+      runId,
+      kind: 'crashed',
+      error: err instanceof Error ? err.message : String(err),
+      text: '',
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      durationMs: 0,
+    };
+  }
+  clearInterval(widgetTimer);
+  try {
+    ctx.ui.setWidget(INLINE_WIDGET_KEY, undefined);
+  } catch {
+    // best-effort
+  }
+
+  task.doneAt = Date.now();
+  task.tokens = result.usage;
+  if (result.ok) {
+    task.status = 'done';
+    task.text = result.text;
+  } else {
+    task.status = 'error';
+    task.error = result.error;
+    if (result.text) task.text = result.text;
+  }
+  details.settled = true;
+
+  const content = result.ok
+    ? `## ${task.label} — ${formatSeconds(task.startedAt, task.doneAt)}${formatTokens(result.usage)}\n\n${result.text.slice(0, MAX_TASK_OUTPUT_CHARS)}`
+    : `## ✗ ${task.label} — ${result.kind} (${formatSeconds(task.startedAt, task.doneAt)})\n\n${result.error}${result.text ? `\n\nPartial output:\n${result.text.slice(0, 1000)}` : ''}`;
+  try {
+    pi.sendMessage({ customType: 'subagents:inline', content, display: true, details });
+  } catch {
+    // sending into a dying session is best-effort
+  }
+  try {
+    pi.appendEntry('subagents:dispatch', {
+      prompt: spec.task,
+      agentType: spec.agent,
+      worktree: !!spec.worktree,
+      runId,
+      at: Date.now(),
+    });
+  } catch {
+    // best-effort persistence
+  }
+}
+
 export default function subagents(pi: ExtensionAPI) {
   const runtime = createSubagentRuntime({ namespace: 'subagents', artifactsDir: ARTIFACTS_ROOT });
   // GC old artifacts (7d retention, incl. worktrees + patches) and reap
@@ -1704,6 +1817,92 @@ export default function subagents(pi: ExtensionAPI) {
         },
         { overlay: true, overlayOptions: { width: '80%', maxHeight: '75%', anchor: 'center' } },
       );
+    },
+  });
+
+  // `&<agent> <prompt>` at position zero dispatches a single subagent inline.
+  // The run reuses the same spawn/cancel path as the dispatch tool; live progress
+  // shows in an editor widget and the final result lands as a collapsible
+  // `subagents:inline` message that uses the dispatch render vocabulary.
+  pi.on('input', async (event, ctx) => {
+    if (event.source === 'extension') return { action: 'continue' };
+    if (!event.text.startsWith('&')) return { action: 'continue' };
+    if (!ctx.hasUI) return { action: 'continue' };
+    const rest = event.text.slice(1);
+    const sp = rest.search(/\s/);
+    let agentType: string | undefined;
+    let prompt: string;
+    if (sp === -1) {
+      prompt = rest.trim();
+    } else {
+      agentType = rest.slice(0, sp);
+      prompt = rest.slice(sp + 1).trim();
+    }
+    if (!prompt && agentType) {
+      prompt = agentType;
+      agentType = undefined;
+    }
+    if (!prompt) {
+      ctx.ui.notify('Usage: &<agent> <prompt> (e.g. &scout how does auth work)', 'warning');
+      return { action: 'handled' };
+    }
+    const spec: TaskSpec = { task: prompt, agent: agentType };
+    void dispatchInline(pi, ctx, runtime, spec);
+    return { action: 'handled' };
+  });
+
+  // Collapsible transcript block for inline `&` dispatches — reuses the same
+  // renderTaskTree / createExpandedDispatchView machinery as the dispatch tool.
+  pi.registerMessageRenderer('subagents:inline', (message, { expanded }, theme) => {
+    const details = message.details as DispatchDetails | undefined;
+    if (!details?.tasks || details.tasks.length === 0) return undefined;
+    const task = details.tasks[0]!;
+    const dot = task.status === 'error' ? `${theme.fg('error', '✗')} ` : undefined;
+    const model = task.model ? ` ${theme.fg('dim', task.model)}` : '';
+    const header = dispatchHeader(`${task.label}${model}`, theme, dot);
+    if (!expanded) {
+      const tree = renderTaskTree(details.tasks, theme, 0);
+      tree[tree.length - 1] += expandHint(theme);
+      return inlineComponent(() => ['', header, ...tree]);
+    }
+    const view = createExpandedDispatchView(details.tasks, theme);
+    return {
+      render: (width: number) => ['', header, ...view.render(width)].map((l) => truncateToWidth(l, width)),
+      invalidate: () => view.invalidate(),
+    };
+  });
+
+  // `/again [amendment]` re-fires the last `&` dispatch verbatim, or with the
+  // amendment appended. The last dispatch is recovered from the session's
+  // `subagents:dispatch` custom entries, which survive restart.
+  pi.registerCommand('again', {
+    description: 'Re-fire the last & dispatch, optionally with an amendment appended',
+    handler: async (args, ctx) => {
+      if (!ctx.hasUI) {
+        ctx.ui.notify('/again needs the TUI.', 'warning');
+        return;
+      }
+      const entries = ctx.sessionManager.getEntries();
+      let last: { data?: { prompt?: string; agentType?: string; worktree?: boolean } } | undefined;
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const e = entries[i]!;
+        if (e.type === 'custom' && (e as { customType?: string }).customType === 'subagents:dispatch') {
+          last = e as typeof last;
+          break;
+        }
+      }
+      if (!last?.data?.prompt) {
+        ctx.ui.notify('No prior & dispatch to re-fire.', 'warning');
+        return;
+      }
+      const amendment = args.trim();
+      const prompt = amendment ? `${last.data.prompt}\n\n${amendment}` : last.data.prompt;
+      const spec: TaskSpec = {
+        task: prompt,
+        agent: last.data.agentType,
+        worktree: last.data.worktree ? true : undefined,
+      };
+      void dispatchInline(pi, ctx, runtime, spec);
     },
   });
 }

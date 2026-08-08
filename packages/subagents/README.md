@@ -9,6 +9,8 @@ First-party subagent dispatch and fleet for pi — fan out parallel child agents
 - **`/fleet` command** — user-facing run table.
 - **Fleet radar overlay + statusline** — `Alt+Ctrl+F` (rebind via `~/.pi/agent/keybindings.json`) opens a tmux-choose-tree-style overlay listing every run as a per-child lane: status, model, current tool, token burn, last activity. `Enter` inspects the live run transcript; `c` cancels the focused run (wired into the cascading-cancellation registry); `Esc` closes. While any run is in flight, an ambient footer segment (`ctx.ui.setStatus`) shows live `working · done · failed` counts.
 - **`/patches` command** — staging area for worktree-subagent `.patch` handoffs. Opens a keyboard-driven overlay over every pending patch with diffstat and a pre-flight stamp (`clean` / `conflicts` / `stale`, checked via `git apply --check` **without** applying). `Enter` applies the whole patch (`git apply --3way`); `e` expands the full diff with per-hunk navigation (`n`/`p`); `s` applies the focused hunk; `d` discards. Apply/discard decisions persist to `~/.pi/agent/subagent-patches/state.json` so `/patches` survives restart.
+- **`&` dispatch prefix** — `&scout how does auth work` at position zero dispatches a single subagent inline (reusing the same spawn/cancel path as the `dispatch` tool). Live progress shows in a widget above the editor; the final result lands as a collapsible `subagents:inline` transcript block rendered with the same vocabulary as a dispatch tool result, and the answer reaches the model's context. Each dispatch is captured as a session custom entry so it survives restart.
+- **`/again [amendment]` command** — re-fires the last `&` dispatch verbatim, or with the amendment appended.
 
 ## Usage
 
@@ -31,6 +33,23 @@ or directly:
 ```text
 /fleet
 ```
+
+### Inline `&` dispatch
+
+Prefix a prompt with `&` to dispatch a single subagent inline — the run reuses the same spawn/cancel path as the `dispatch` tool, but is driven from the editor instead of the model:
+
+```text
+&scout how does auth work
+```
+
+Live progress shows in a widget above the editor; when the child settles, the result lands in the transcript as a collapsible block (same vocabulary as a `dispatch` tool result) and the answer is added to the model's context. The dispatch is recorded as a session entry, so `/again` can re-fire it:
+
+```text
+/again
+/again focus only on the JWT path
+```
+
+`/again` re-fires the last `&` dispatch verbatim, or with an amendment appended. Cancellation: an inline run is registered in the cascading-cancellation registry, so it is aborted on session shutdown and can be cancelled mid-flight from the fleet radar (`Alt+Ctrl+F` → `c`) or the `fleet` tool — it is **not** aborted by a bare Esc (the `input` event fires while idle, so no agent abort signal is available to thread in).
 
 ### Worktree isolation
 
