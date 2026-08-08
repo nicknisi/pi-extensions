@@ -1,3 +1,4 @@
+---
 '@nicknisi/pi-shared': minor
 '@nicknisi/pi-subagents': minor
 ---

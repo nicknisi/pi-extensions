@@ -1,3 +1,4 @@
+---
 '@nicknisi/pi-shared': patch
 '@nicknisi/pi-subagents': patch
 '@nicknisi/pi-intercom': patch
