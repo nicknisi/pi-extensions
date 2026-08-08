@@ -23,13 +23,25 @@ npm whoami --registry="$REGISTRY" >/dev/null 2>&1 || {
 # Phase 1: publish packages that don't exist on npm yet.
 # `pnpm publish` (not npm) so workspace:* ranges rewrite to real versions.
 publish_pkg() {
-  local dir="$1" name
+  local dir="$1" name version
   name="$(node -p "require('$ROOT/packages/$dir/package.json').name")"
-  if npm view "$name" version --registry="$REGISTRY" >/dev/null 2>&1; then
-    echo "== $name already on npm, skipping publish"
+  version="$(node -p "require('$ROOT/packages/$dir/package.json').version")"
+  # NOTE: `npm view <name>` can 404 on a lagging read replica minutes after a
+  # successful publish (this happened with pi-relay). Query the exact version
+  # endpoint instead — it reads authoritatively — and treat a 403
+  # 'previously published' from the publish attempt itself as success.
+  if curl -sf "$REGISTRY/$(echo "$name" | sed 's|/|%2f|')/$version" >/dev/null 2>&1; then
+    echo "== $name@$version already on npm, skipping publish"
   else
-    echo "== publishing $name"
-    (cd "$ROOT/packages/$dir" && pnpm publish --access public --no-git-checks --registry="$REGISTRY")
+    echo "== publishing $name@$version"
+    if ! (cd "$ROOT/packages/$dir" && pnpm publish --access public --no-git-checks --registry="$REGISTRY"); then
+      if curl -sf "$REGISTRY/$(echo "$name" | sed 's|/|%2f|')/$version" >/dev/null 2>&1; then
+        echo "== $name@$version showed up after the failed publish (replica lag) — continuing"
+      else
+        echo "!! publish of $name failed for real" >&2
+        exit 1
+      fi
+    fi
     sleep 2
   fi
 }
