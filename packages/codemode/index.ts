@@ -84,7 +84,6 @@ interface RunscopeEntry {
 // runJob is its own async frame, so the context does not leak across stages.
 const runscopeCtx = new AsyncLocalStorage<{ runId: string; stageSpan: string }>();
 
-const BINDINGS_PRELUDE = 'const { spawn, log, runWorkflow } = (globalThis as any).__piCodemode;\n';
 const GLOBAL_KEY = '__piCodemode';
 
 function truncate(text: string, max: number): string {
@@ -123,6 +122,24 @@ interface CodemodeDetails {
   durationMs: number;
   error?: string;
   stack?: string;
+}
+
+/** Outcome of a codemode run: formatted text for display + the raw default export. */
+interface CodemodeOutcome {
+  text: string;
+  details: CodemodeDetails;
+  value: unknown;
+}
+
+/** Persisted shape of a console (`=` or `/cx`) run, rendered as a custom entry. */
+interface ConsoleEntryData {
+  n: number; // 1-indexed $N slot this result binds to (only on success)
+  label: string;
+  code: string;
+  text: string;
+  details: CodemodeDetails;
+  value: unknown; // raw default export; bound to $N and rebuilt on session load
+  ts: number;
 }
 
 const SPINNER_CHARS = ['·', '✢', '✳', '✶', '✻', '✽'];
@@ -259,6 +276,252 @@ export default function codemode(pi: ExtensionAPI) {
   // serialize runs with a promise-chain mutex.
   let execChain: Promise<unknown> = Promise.resolve();
 
+  // ── Console session state (= inline prefix + /cx named snippets) ─────
+  // Returned snippet values bind to $1, $2, … for later console snippets in
+  // the session. Held in-memory; rebuilt from persisted custom entries on
+  // session load. The model-facing `codemode` tool does NOT bind (it is not a
+  // console snippet) — only `=` and `/cx` do.
+  const CONSOLE_TYPE = 'codemode-console';
+  const sessionResults: unknown[] = [];
+
+  pi.on('session_start', (_event, ctx) => {
+    sessionResults.length = 0;
+    try {
+      for (const entry of ctx.sessionManager.getEntries()) {
+        if (entry.type === 'custom' && entry.customType === CONSOLE_TYPE) {
+          const data = entry.data as ConsoleEntryData | undefined;
+          if (data) sessionResults.push(data.value);
+        }
+      }
+    } catch {
+      // best-effort rebuild
+    }
+  });
+
+  function bindingsPrelude(): string {
+    let prelude = 'const { spawn, log, runWorkflow } = (globalThis as any).__piCodemode;\n';
+    for (let i = 0; i < sessionResults.length; i++) {
+      prelude += `const $${i + 1} = (globalThis as any).__piCodemode.results[${i}];\n`;
+    }
+    return prelude;
+  }
+
+  // Compile + run a snippet in-process through the same runtime as the
+  // `codemode` tool. Shared by the tool, the `=` console prefix, and `/cx`.
+  // Serialized via execChain because bindings ride a single global.
+  async function runCodemode(input: {
+    code: string;
+    label: string;
+    timeoutMs: number;
+    cwd: string;
+    externalSignal?: AbortSignal | undefined;
+    bindResult?: boolean;
+  }): Promise<CodemodeOutcome> {
+    const { code, label, timeoutMs, cwd, externalSignal, bindResult = false } = input;
+    const logs: string[] = [];
+    const controller = new AbortController();
+
+    const log = (...args: unknown[]) => {
+      if (logs.length >= MAX_LOG_ENTRIES) return;
+      const line = args
+        .map((a) => {
+          if (typeof a === 'string') return a;
+          try {
+            return JSON.stringify(a);
+          } catch {
+            return String(a);
+          }
+        })
+        .join(' ');
+      logs.push(truncate(line, MAX_LOG_CHARS));
+    };
+
+    const spawn = (options: CodemodeSpawnOptions): Promise<SpawnResult> => {
+      // Output contract: a schema-less spawn returns raw text, and reading a
+      // field off unparsed text fails silently (undefined, not an error) — a
+      // whole fan-out can look successful while every result is unusable.
+      // Require EITHER an outputSchema OR an explicit `text: true` opt-in.
+      // This throws synchronously and loudly rather than returning ok:false,
+      // so the run cannot be mistaken for a success.
+      if (!options.outputSchema && !options.text) {
+        throw new Error(
+          'spawn() requires an explicit output contract: pass `outputSchema` ' +
+            'for validated structured output (parsed JSON lands in result.data) ' +
+            'or `text: true` to opt into raw text mode. A schema-less spawn ' +
+            'without `text: true` is rejected to prevent silently-unusable ' +
+            'results (reading a field off unparsed text yields undefined, not an error).',
+        );
+      }
+      const merged = mergeSignals(options.signal, externalSignal, controller.signal);
+      const { signal: _userSignal, text: _text, ...rest } = options;
+      const opts: SpawnOptions = { ...rest, cwd: options.cwd ?? cwd };
+      // Default children to read-only, matching dispatch; pi's own default
+      // (read/bash/edit/write) would apply otherwise.
+      if (opts.tools === undefined) opts.tools = ['read', 'grep', 'find', 'ls'];
+      if (merged) opts.signal = merged;
+      return tracedRuntime.spawn(opts);
+    };
+
+    const boundRunWorkflow = (
+      spec: WorkflowSpec,
+      wfOpts: Partial<RunWorkflowOptions> = {},
+    ): Promise<WorkflowResult> => {
+      const merged = mergeSignals(wfOpts.signal, externalSignal, controller.signal);
+      const userOnProgress = wfOpts.onProgress;
+      const full: RunWorkflowOptions = { cwd, ...wfOpts };
+      if (merged) full.signal = merged;
+
+      // One runId for the whole workflow; every stage/gate entry carries it.
+      const wfRunId = randomUUID();
+      // Derive a stage's parent span from its needs edges so the trace tree
+      // mirrors the workflow DAG. A trace span has one parent, so multi-need
+      // stages attach to the first need (a spanning tree of the DAG); the
+      // full needs list is included in the entry for completeness.
+      const parentOf = (stageId: string): string | null => {
+        const idx = spec.stages.findIndex((s) => s.id === stageId);
+        if (idx === -1) return null;
+        const stage = spec.stages[idx]!;
+        const needs = stage.needs ?? (idx === 0 ? [] : [spec.stages[idx - 1]!.id]);
+        return needs[0] ?? null;
+      };
+
+      // Wrap each stage's prompt so the stage's async frame (runJob) carries
+      // the runId + stage span via AsyncLocalStorage.enterWith. The shared
+      // engine calls buildPrompt (and thus this wrapper) at the start of each
+      // attempt inside runJob; the subsequent `await runtime.spawn(...)` in
+      // the same frame inherits the context, so tracedRuntime can parent the
+      // spawn's span to its stage even under concurrent stages. String
+      // prompts are wrapped in a function returning the original string.
+      const wrappedStages: WorkflowStage[] = spec.stages.map((stage) => {
+        const origPrompt = stage.prompt;
+        const promptFn = typeof origPrompt === 'function' ? origPrompt : () => origPrompt;
+        const wrappedPrompt = (gctx: StageContext, item?: unknown, index?: number): string => {
+          runscopeCtx.enterWith({ runId: wfRunId, stageSpan: stage.id });
+          return promptFn(gctx, item, index);
+        };
+        const wrapped: WorkflowStage = { ...stage, prompt: wrappedPrompt };
+        if (stage.gate) {
+          const origGate = stage.gate;
+          wrapped.gate = (outcome, gctx) => {
+            const verdict = origGate(outcome, gctx);
+            emitRunscope({
+              runId: wfRunId,
+              spanId: stage.id,
+              parentSpanId: parentOf(stage.id),
+              kind: 'gate_result',
+              ts: Date.now(),
+              passed: verdict === true,
+              ...(verdict === true ? {} : { feedback: verdict.revise }),
+            });
+            return verdict;
+          };
+        }
+        return wrapped;
+      });
+
+      full.onProgress = (event: WorkflowEvent) => {
+        try {
+          if (event.type === 'stage_start') {
+            emitRunscope({
+              runId: wfRunId,
+              spanId: event.stageId!,
+              parentSpanId: parentOf(event.stageId!),
+              kind: 'stage_start',
+              ts: Date.now(),
+            });
+          } else if (
+            event.type === 'stage_complete' ||
+            event.type === 'stage_failed' ||
+            event.type === 'stage_skipped'
+          ) {
+            emitRunscope({
+              runId: wfRunId,
+              spanId: event.stageId!,
+              parentSpanId: parentOf(event.stageId!),
+              kind: 'stage_end',
+              ts: Date.now(),
+              ok: event.outcome?.ok,
+              ...(event.outcome && !event.outcome.ok
+                ? { failureKind: event.outcome.kind, error: event.outcome.error }
+                : {}),
+            });
+          }
+        } catch {
+          // ledger emission is best-effort
+        }
+        try {
+          userOnProgress?.(event);
+        } catch {
+          // a caller's progress callback must never break the workflow
+        }
+      };
+
+      return runWorkflow({ ...spec, stages: wrappedStages }, tracedRuntime, full);
+    };
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-codemode-'));
+    const file = path.join(dir, 'snippet.ts');
+    fs.writeFileSync(file, bindingsPrelude() + code);
+    const startedAt = Date.now();
+
+    const runSnippet = async (): Promise<unknown> => {
+      const { mod } = await bundleRequire({
+        filepath: file,
+        format: 'esm',
+        esbuildOptions: { target: 'es2022' },
+      });
+      return mod.default;
+    };
+
+    // Serialize executions: the snippet reads its bindings from the single
+    // global set below, so two concurrent runs would clobber each other's
+    // spawn/log/runWorkflow. Wait for the previous run's finally to release.
+    const previous = execChain;
+    let release!: () => void;
+    execChain = new Promise<void>((resolve) => (release = resolve));
+    await previous;
+
+    (globalThis as any)[GLOBAL_KEY] = { spawn, log, runWorkflow: boundRunWorkflow, results: sessionResults };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const execPromise = runSnippet();
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort(); // in-flight spawns abort; the JS itself can't be preempted
+          reject(new Error(`Timed out after ${timeoutMs}ms (in-flight subagents were aborted)`));
+        }, timeoutMs);
+      });
+      const value = await Promise.race([execPromise, timeoutPromise]);
+      execPromise.catch(() => {}); // if we raced ahead, swallow any late rejection
+      const text =
+        typeof value === 'string'
+          ? truncate(value, MAX_RESULT_CHARS)
+          : value === undefined
+            ? '(undefined — did you forget `export default`?)'
+            : truncate(JSON.stringify(value, null, 2) ?? String(value), MAX_RESULT_CHARS);
+      if (bindResult) sessionResults.push(value);
+      return { text, details: { label, logs, durationMs: Date.now() - startedAt }, value };
+    } catch (err) {
+      const logText = logs.length > 0 ? `\n\nCaptured logs (${logs.length}):\n${logs.join('\n')}` : '';
+      return {
+        text: `${label} failed:\n\n${formatError(err)}${logText}`,
+        details: {
+          label,
+          logs,
+          durationMs: Date.now() - startedAt,
+          error: err instanceof Error ? err.message : String(err),
+          ...(err instanceof Error && err.stack ? { stack: truncate(err.stack, MAX_STACK_CHARS) } : {}),
+        },
+        value: undefined,
+      };
+    } finally {
+      if (timer) clearTimeout(timer);
+      delete (globalThis as any)[GLOBAL_KEY];
+      fs.rmSync(dir, { recursive: true, force: true });
+      release(); // let the next queued run set its own bindings
+    }
+  }
+
   pi.registerTool({
     name: 'codemode',
     label: 'Codemode',
@@ -313,209 +576,17 @@ export default function codemode(pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const label = params.label ?? 'codemode';
       const timeoutMs = Math.min(Math.max(params.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1000), MAX_TIMEOUT_MS);
-      const logs: string[] = [];
-      const controller = new AbortController();
-
-      const log = (...args: unknown[]) => {
-        if (logs.length >= MAX_LOG_ENTRIES) return;
-        const line = args
-          .map((a) => {
-            if (typeof a === 'string') return a;
-            try {
-              return JSON.stringify(a);
-            } catch {
-              return String(a);
-            }
-          })
-          .join(' ');
-        logs.push(truncate(line, MAX_LOG_CHARS));
+      const outcome = await runCodemode({
+        code: params.code,
+        label,
+        timeoutMs,
+        cwd: ctx.cwd,
+        externalSignal: signal ?? undefined,
+      });
+      return {
+        content: [{ type: 'text' as const, text: outcome.text }],
+        details: outcome.details,
       };
-
-      const spawn = (options: CodemodeSpawnOptions): Promise<SpawnResult> => {
-        // Output contract: a schema-less spawn returns raw text, and reading a
-        // field off unparsed text fails silently (undefined, not an error) — a
-        // whole fan-out can look successful while every result is unusable.
-        // Require EITHER an outputSchema OR an explicit `text: true` opt-in.
-        // This throws synchronously and loudly rather than returning ok:false,
-        // so the run cannot be mistaken for a success.
-        if (!options.outputSchema && !options.text) {
-          throw new Error(
-            'spawn() requires an explicit output contract: pass `outputSchema` ' +
-              'for validated structured output (parsed JSON lands in result.data) ' +
-              'or `text: true` to opt into raw text mode. A schema-less spawn ' +
-              'without `text: true` is rejected to prevent silently-unusable ' +
-              'results (reading a field off unparsed text yields undefined, not an error).',
-          );
-        }
-        const merged = mergeSignals(options.signal, signal ?? undefined, controller.signal);
-        const { signal: _userSignal, text: _text, ...rest } = options;
-        const opts: SpawnOptions = { ...rest, cwd: options.cwd ?? ctx.cwd };
-        // Default children to read-only, matching dispatch; pi's own default
-        // (read/bash/edit/write) would apply otherwise.
-        if (opts.tools === undefined) opts.tools = ['read', 'grep', 'find', 'ls'];
-        if (merged) opts.signal = merged;
-        return tracedRuntime.spawn(opts);
-      };
-
-      const boundRunWorkflow = (
-        spec: WorkflowSpec,
-        wfOpts: Partial<RunWorkflowOptions> = {},
-      ): Promise<WorkflowResult> => {
-        const merged = mergeSignals(wfOpts.signal, signal ?? undefined, controller.signal);
-        const userOnProgress = wfOpts.onProgress;
-        const full: RunWorkflowOptions = { cwd: ctx.cwd, ...wfOpts };
-        if (merged) full.signal = merged;
-
-        // One runId for the whole workflow; every stage/gate entry carries it.
-        const wfRunId = randomUUID();
-        // Derive a stage's parent span from its needs edges so the trace tree
-        // mirrors the workflow DAG. A trace span has one parent, so multi-need
-        // stages attach to the first need (a spanning tree of the DAG); the
-        // full needs list is included in the entry for completeness.
-        const parentOf = (stageId: string): string | null => {
-          const idx = spec.stages.findIndex((s) => s.id === stageId);
-          if (idx === -1) return null;
-          const stage = spec.stages[idx]!;
-          const needs = stage.needs ?? (idx === 0 ? [] : [spec.stages[idx - 1]!.id]);
-          return needs[0] ?? null;
-        };
-
-        // Wrap each stage's prompt so the stage's async frame (runJob) carries
-        // the runId + stage span via AsyncLocalStorage.enterWith. The shared
-        // engine calls buildPrompt (and thus this wrapper) at the start of each
-        // attempt inside runJob; the subsequent `await runtime.spawn(...)` in
-        // the same frame inherits the context, so tracedRuntime can parent the
-        // spawn's span to its stage even under concurrent stages. String
-        // prompts are wrapped in a function returning the original string.
-        const wrappedStages: WorkflowStage[] = spec.stages.map((stage) => {
-          const origPrompt = stage.prompt;
-          const promptFn = typeof origPrompt === 'function' ? origPrompt : () => origPrompt;
-          const wrappedPrompt = (gctx: StageContext, item?: unknown, index?: number): string => {
-            runscopeCtx.enterWith({ runId: wfRunId, stageSpan: stage.id });
-            return promptFn(gctx, item, index);
-          };
-          const wrapped: WorkflowStage = { ...stage, prompt: wrappedPrompt };
-          if (stage.gate) {
-            const origGate = stage.gate;
-            wrapped.gate = (outcome, gctx) => {
-              const verdict = origGate(outcome, gctx);
-              emitRunscope({
-                runId: wfRunId,
-                spanId: stage.id,
-                parentSpanId: parentOf(stage.id),
-                kind: 'gate_result',
-                ts: Date.now(),
-                passed: verdict === true,
-                ...(verdict === true ? {} : { feedback: verdict.revise }),
-              });
-              return verdict;
-            };
-          }
-          return wrapped;
-        });
-
-        full.onProgress = (event: WorkflowEvent) => {
-          try {
-            if (event.type === 'stage_start') {
-              emitRunscope({
-                runId: wfRunId,
-                spanId: event.stageId!,
-                parentSpanId: parentOf(event.stageId!),
-                kind: 'stage_start',
-                ts: Date.now(),
-              });
-            } else if (
-              event.type === 'stage_complete' ||
-              event.type === 'stage_failed' ||
-              event.type === 'stage_skipped'
-            ) {
-              emitRunscope({
-                runId: wfRunId,
-                spanId: event.stageId!,
-                parentSpanId: parentOf(event.stageId!),
-                kind: 'stage_end',
-                ts: Date.now(),
-                ok: event.outcome?.ok,
-                ...(event.outcome && !event.outcome.ok
-                  ? { failureKind: event.outcome.kind, error: event.outcome.error }
-                  : {}),
-              });
-            }
-          } catch {
-            // ledger emission is best-effort
-          }
-          try {
-            userOnProgress?.(event);
-          } catch {
-            // a caller's progress callback must never break the workflow
-          }
-        };
-
-        return runWorkflow({ ...spec, stages: wrappedStages }, tracedRuntime, full);
-      };
-
-      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-codemode-'));
-      const file = path.join(dir, 'snippet.ts');
-      fs.writeFileSync(file, BINDINGS_PRELUDE + params.code);
-      const startedAt = Date.now();
-
-      const runSnippet = async (): Promise<unknown> => {
-        const { mod } = await bundleRequire({
-          filepath: file,
-          format: 'esm',
-          esbuildOptions: { target: 'es2022' },
-        });
-        return mod.default;
-      };
-
-      // Serialize executions: the snippet reads its bindings from the single
-      // global set below, so two concurrent runs would clobber each other's
-      // spawn/log/runWorkflow. Wait for the previous run's finally to release.
-      const previous = execChain;
-      let release!: () => void;
-      execChain = new Promise<void>((resolve) => (release = resolve));
-      await previous;
-
-      (globalThis as any)[GLOBAL_KEY] = { spawn, log, runWorkflow: boundRunWorkflow };
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        const execPromise = runSnippet();
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          timer = setTimeout(() => {
-            controller.abort(); // in-flight spawns abort; the JS itself can't be preempted
-            reject(new Error(`Timed out after ${timeoutMs}ms (in-flight subagents were aborted)`));
-          }, timeoutMs);
-        });
-        const value = await Promise.race([execPromise, timeoutPromise]);
-        execPromise.catch(() => {}); // if we raced ahead, swallow any late rejection
-        const text =
-          typeof value === 'string'
-            ? truncate(value, MAX_RESULT_CHARS)
-            : value === undefined
-              ? '(undefined — did you forget `export default`?)'
-              : truncate(JSON.stringify(value, null, 2) ?? String(value), MAX_RESULT_CHARS);
-        return {
-          content: [{ type: 'text' as const, text }],
-          details: { label, logs, durationMs: Date.now() - startedAt },
-        };
-      } catch (err) {
-        const logText = logs.length > 0 ? `\n\nCaptured logs (${logs.length}):\n${logs.join('\n')}` : '';
-        return {
-          content: [{ type: 'text' as const, text: `${label} failed:\n\n${formatError(err)}${logText}` }],
-          details: {
-            label,
-            logs,
-            durationMs: Date.now() - startedAt,
-            error: err instanceof Error ? err.message : String(err),
-            ...(err instanceof Error && err.stack ? { stack: truncate(err.stack, MAX_STACK_CHARS) } : {}),
-          },
-        };
-      } finally {
-        if (timer) clearTimeout(timer);
-        delete (globalThis as any)[GLOBAL_KEY];
-        fs.rmSync(dir, { recursive: true, force: true });
-        release(); // let the next queued run set its own bindings
-      }
     },
 
     renderCall(args, theme, ctx) {
@@ -587,5 +658,96 @@ export default function codemode(pi: ExtensionAPI) {
       appendLogTree(lines, logs, theme);
       return makeText(ctx?.lastComponent, lines.join('\n'));
     },
+  });
+
+  // ── `=` console prefix ─────────────────────────────────────────────
+  // `=<snippet>` at position zero runs the snippet through the codemode
+  // runtime inline, devtools-console style. The result renders as a
+  // collapsible custom entry (toggled with the same `app.tools.expand` key
+  // as tool output), the returned value binds to the next $N for later
+  // console snippets, and the run is persisted as a session custom entry.
+  // `{ action: "handled" }` is the documented interception mechanism — it
+  // skips the agent entirely. Only the TUI editor prefix is intercepted;
+  // extension-injected messages and non-tui modes pass through.
+  pi.on('input', async (event, ctx) => {
+    if (event.source === 'extension' || ctx.mode !== 'tui') return { action: 'continue' };
+    const stripped = event.text.trimStart();
+    if (!stripped.startsWith('=') || stripped.length <= 1) return { action: 'continue' };
+    const code = event.text.slice(event.text.indexOf('=') + 1);
+    const n = sessionResults.length + 1;
+    const outcome = await runCodemode({
+      code,
+      label: 'console',
+      timeoutMs: DEFAULT_TIMEOUT_MS,
+      cwd: ctx.cwd,
+      bindResult: true,
+    });
+    pi.appendEntry<ConsoleEntryData>(CONSOLE_TYPE, {
+      n,
+      label: 'console',
+      code,
+      text: outcome.text,
+      details: outcome.details,
+      value: outcome.value,
+      ts: Date.now(),
+    });
+    return { action: 'handled' };
+  });
+
+  // ── Console entry renderer (collapsible) ─────────────────────────
+  // Mirrors the tool's renderResult: ✓/✗ header with label + #N slot +
+  // duration, preview lines collapsed behind `app.tools.expand`, captured
+  // logs as an indented tree when expanded. Custom entries persist to the
+  // session JSONL but never enter LLM context.
+  pi.registerEntryRenderer<ConsoleEntryData>(CONSOLE_TYPE, (entry, { expanded }, theme) => {
+    const data = entry.data ?? {
+      n: 0,
+      label: 'console',
+      code: '',
+      text: '',
+      details: { label: 'console', logs: [], durationMs: 0 },
+      value: undefined,
+      ts: 0,
+    };
+    const d = data.details;
+    const logs = d?.logs ?? [];
+    const label = fg(theme, 'accent', data.label);
+    const nTag = d?.error ? '' : ` ${fg(theme, 'dim', `#$${data.n}`)}`;
+    const duration = fg(theme, 'dim', formatDuration(d?.durationMs));
+    let lines: string[];
+
+    if (d?.error) {
+      const header = `${fg(theme, 'error', '✗')} ${label}${nTag} ${duration}`;
+      const firstLine = d.error.split('\n')[0] ?? d.error;
+      if (!expanded) {
+        lines = [header, `${branchLine(theme, fg(theme, 'error', firstLine))}${expandHint(theme)}`];
+      } else {
+        lines = [header, branchLine(theme, fg(theme, 'error', firstLine))];
+        if (d.stack) {
+          for (const line of d.stack.split('\n')) lines.push(indentLine(fg(theme, 'dim', line)));
+        }
+        appendLogTree(lines, logs, theme);
+      }
+      return makeText(undefined, lines.join('\n'));
+    }
+
+    const header = `${fg(theme, 'success', '✓')} ${label}${nTag} ${duration}`;
+    const resultLines = (data.text ?? '').split('\n');
+    if (!expanded) {
+      const shown = resultLines.slice(0, RESULT_PREVIEW_LINES);
+      const remaining = resultLines.length - shown.length;
+      lines = [header];
+      shown.forEach((line, i) => lines.push(i === 0 ? branchLine(theme, line) : indentLine(line)));
+      if (remaining > 0) {
+        lines.push(`${indentLine(fg(theme, 'dim', `+${remaining} more lines`))}${expandHint(theme)}`);
+      } else if (logs.length > 0) {
+        lines[0] = `${header}${expandHint(theme)}`;
+      }
+      return makeText(undefined, lines.join('\n'));
+    }
+    lines = [header];
+    resultLines.forEach((line, i) => lines.push(i === 0 ? branchLine(theme, line) : indentLine(line)));
+    appendLogTree(lines, logs, theme);
+    return makeText(undefined, lines.join('\n'));
   });
 }
