@@ -388,6 +388,17 @@ describe('policy', () => {
     expect(p.check('same', 0).ok).toBe(true);
   });
 
+  it('dedupe is per-target: a broadcast of one body reaches distinct peers', () => {
+    const p = new OutboundPolicy();
+    expect(p.check('main moved', 0, 'peerA').ok).toBe(true);
+    p.recordSend('main moved', 'peerA');
+    // same body, different peer → not deduped (loop-breaking is per-peer)
+    expect(p.check('main moved', 0, 'peerB').ok).toBe(true);
+    p.recordSend('main moved', 'peerB');
+    // same body, same peer again → still deduped inside the window
+    expect(p.check('main moved', 0, 'peerA').ok).toBe(false);
+  });
+
   it('rate limits at 8 per 30s', () => {
     const p = new OutboundPolicy();
     for (let i = 0; i < 8; i++) {

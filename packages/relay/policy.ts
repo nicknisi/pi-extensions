@@ -24,9 +24,11 @@ export class OutboundPolicy {
   /**
    * Gate one outbound letter. `unreadBacklog` is the target's current
    * unread count (report 0 when the target is idle — an idle agent has by
-   * definition worked through what it was handed).
+   * definition worked through what it was handed). `target` scopes the
+   * identical-body dedupe to a single peer (loop-breaking) so a broadcast
+   * of one body to N peers is not deduped after the first.
    */
-  check(body: string, unreadBacklog: number): OutboundVerdict {
+  check(body: string, unreadBacklog: number, target?: string): OutboundVerdict {
     if (body.length > MAX_BODY_CHARS) {
       return {
         ok: false,
@@ -40,9 +42,10 @@ export class OutboundPolicy {
       };
     }
     const now = this.now();
-    const lastSame = this.recentBodies.get(body);
+    const dedupeKey = `${body}\u0000${target ?? ''}`;
+    const lastSame = this.recentBodies.get(dedupeKey);
     if (lastSame !== undefined && now - lastSame < DEDUPE_WINDOW_MS) {
-      return { ok: false, reason: 'Identical message sent less than 10s ago — dropped to break loops.' };
+      return { ok: false, reason: 'Identical message to the same peer less than 10s ago — dropped to break loops.' };
     }
     const windowStart = now - RATE_LIMIT_WINDOW_MS;
     while (this.sentAt.length > 0 && this.sentAt[0]! < windowStart) this.sentAt.shift();
@@ -56,9 +59,9 @@ export class OutboundPolicy {
   }
 
   /** Record a successful send so dedupe/rate state stays current. */
-  recordSend(body: string): void {
+  recordSend(body: string, target?: string): void {
     this.sentAt.push(this.now());
-    this.recentBodies.set(body, this.now());
+    this.recentBodies.set(`${body}\u0000${target ?? ''}`, this.now());
     // bound the dedupe map
     if (this.recentBodies.size > 200) {
       const cutoff = this.now() - DEDUPE_WINDOW_MS;
