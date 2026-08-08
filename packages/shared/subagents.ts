@@ -28,6 +28,8 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+  type AgentSession,
+  type AgentSessionEvent,
   createAgentSession,
   DefaultResourceLoader,
   defineTool,
@@ -179,6 +181,14 @@ function markFailed(record: RunRecord, result: SpawnFailure): SpawnFailure {
   record.endedAt = Date.now();
   record.error = result.error;
   return result;
+}
+
+/**
+ * The child session's terminal error, if its last turn failed or was aborted.
+ * Typed through AgentSession so an SDK rename breaks the build, not silently.
+ */
+function childSessionError(session: AgentSession): string | undefined {
+  return session.agent.state.errorMessage;
 }
 
 /** Extract the text of the last assistant message that produced any. */
@@ -547,17 +557,23 @@ export function createSubagentRuntime(options: {
     let turnCount = 0;
     let toolCallCount = 0;
     if (opts.maxTurns !== undefined || opts.maxToolCalls !== undefined) {
-      session.subscribe((event: any) => {
-        if (event.type === 'turn_start') {
-          turnCount++;
-          if (opts.maxTurns !== undefined && turnCount > opts.maxTurns) {
-            abortOnce(`Turn budget exceeded (${opts.maxTurns})`);
+      session.subscribe((event: AgentSessionEvent) => {
+        // Typed narrowing: a pi event rename fails the build here instead of
+        // silently disabling budget enforcement.
+        switch (event.type) {
+          case 'turn_start': {
+            turnCount++;
+            if (opts.maxTurns !== undefined && turnCount > opts.maxTurns) {
+              abortOnce(`Turn budget exceeded (${opts.maxTurns})`);
+            }
+            break;
           }
-        }
-        if (event.type === 'tool_execution_start') {
-          toolCallCount++;
-          if (opts.maxToolCalls !== undefined && toolCallCount > opts.maxToolCalls) {
-            abortOnce(`Tool-call budget exceeded (${opts.maxToolCalls})`);
+          case 'tool_execution_start': {
+            toolCallCount++;
+            if (opts.maxToolCalls !== undefined && toolCallCount > opts.maxToolCalls) {
+              abortOnce(`Tool-call budget exceeded (${opts.maxToolCalls})`);
+            }
+            break;
           }
         }
       });
@@ -576,7 +592,7 @@ export function createSubagentRuntime(options: {
     const messages = session.messages as readonly any[];
     const text = lastAssistantText(messages);
     const usage = sumUsage(messages);
-    const stateError = session.agent.state.errorMessage;
+    const stateError = childSessionError(session);
     session.dispose();
 
     const durationMs = Date.now() - startedAt;

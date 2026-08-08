@@ -13,14 +13,15 @@
  */
 
 import * as path from 'node:path';
-import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, ExtensionCommandContext, ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import { createSubagentRuntime, readRunArtifacts, type RunArtifact, type SpawnOptions } from '@nicknisi/pi-shared';
-import { Type } from 'typebox';
+import { Type, type TSchema } from 'typebox';
 
 const ARTIFACTS_ROOT = path.join(getAgentDir(), 'subagent-runs');
 const MAX_TASKS = 8;
 const DEFAULT_TOOLS = ['read', 'grep', 'find', 'ls'];
+const TREE_MUTATING_TOOLS = new Set(['edit', 'write', 'bash']);
 const MAX_TASK_OUTPUT_CHARS = 4000;
 const MAX_FLEET_LIST = 20;
 
@@ -31,6 +32,24 @@ interface TaskSpec {
   tools?: string[] | undefined;
   systemPrompt?: string | undefined;
   background?: boolean | undefined;
+  allowTreeMutation?: boolean | undefined;
+}
+
+function wantsTreeMutation(spec: TaskSpec): boolean {
+  return (spec.tools ?? []).some((tool) => TREE_MUTATING_TOOLS.has(tool));
+}
+
+function registerTool<TParams extends TSchema>(pi: ExtensionAPI, tool: ToolDefinition<TParams>): void {
+  try {
+    pi.registerTool(tool);
+  } catch (err) {
+    if (err instanceof Error && /already registered|duplicate|conflict/i.test(err.message)) {
+      throw new Error(
+        `@nicknisi/pi-subagents: another extension (likely nicobailon/pi-subagents) already registers the '${tool.name}' tool — uninstall it first (e.g. \`pi remove pi-subagents\`), then reload. Original error: ${err.message}`,
+      );
+    }
+    throw err;
+  }
 }
 
 function toSpawnOptions(spec: TaskSpec, cwd: string): SpawnOptions {
@@ -90,7 +109,7 @@ function toolResult(text: string, details: Record<string, unknown> = {}) {
 export default function subagents(pi: ExtensionAPI) {
   const runtime = createSubagentRuntime({ namespace: 'subagents', artifactsDir: ARTIFACTS_ROOT });
 
-  pi.registerTool({
+  registerTool(pi, {
     name: 'dispatch',
     label: 'Dispatch Subagents',
     description: [
@@ -99,12 +118,15 @@ export default function subagents(pi: ExtensionAPI) {
       'extensions/skills/context files) with a read-only tool allowlist unless overridden, and',
       'returns its final answer. Children cannot spawn children. Not for trivial questions or',
       'sequential work — dispatch only when tasks are independent and parallel.',
+      'Tasks whose tools include edit, write, or bash mutate the shared working tree: they require',
+      'allowTreeMutation: true and always run sequentially, one at a time, after the parallel batch.',
     ].join(' '),
     promptSnippet: 'Fan out parallel child agents for independent subtasks',
     promptGuidelines: [
       `Use dispatch for independent parallel subtasks (max ${MAX_TASKS}); never for sequential work or trivial questions.`,
       'Children default to read-only tools (read, grep, find, ls). Pass tools explicitly for builders.',
       'Set background: true for long-running tasks; results surface via the fleet tool.',
+      'Tasks with edit/write/bash tools need allowTreeMutation: true and serialize after the parallel batch — never dispatch two tree-mutating tasks expecting concurrency.',
     ],
     parameters: Type.Object({
       tasks: Type.Array(
@@ -117,6 +139,12 @@ export default function subagents(pi: ExtensionAPI) {
           ),
           systemPrompt: Type.Optional(Type.String({ description: 'Appended to the child system prompt' })),
           background: Type.Optional(Type.Boolean({ description: 'Run detached; check results via the fleet tool' })),
+          allowTreeMutation: Type.Optional(
+            Type.Boolean({
+              description:
+                'Required when tools include edit/write/bash; such tasks run sequentially after the parallel batch',
+            }),
+          ),
         }),
       ),
     }),
@@ -130,23 +158,48 @@ export default function subagents(pi: ExtensionAPI) {
         return toolResult(`Too many tasks (${specs.length}); max is ${MAX_TASKS}. Split into multiple dispatch calls.`);
       }
 
-      const background = specs.filter((s) => s.background);
-      const foreground = specs.filter((s) => !s.background);
       const lines: string[] = [];
+
+      // Refuse undeclared tree-mutating tasks outright; declared ones serialize after the parallel batch.
+      const runnable: TaskSpec[] = [];
+      const mutating: TaskSpec[] = [];
+      for (const spec of specs) {
+        if (wantsTreeMutation(spec)) {
+          if (spec.allowTreeMutation === true) {
+            mutating.push(spec);
+          } else {
+            lines.push(
+              `## ✗ ${spec.agent ?? short(spec.task, 40)} — refused\n\nTools include edit/write/bash, which mutate the shared working tree. Resubmit with allowTreeMutation: true (the task will run sequentially, after the parallel batch).`,
+            );
+          }
+        } else {
+          runnable.push(spec);
+        }
+      }
+
+      const background = runnable.filter((s) => s.background);
+      const foreground = runnable.filter((s) => !s.background);
 
       for (const spec of background) {
         const { runId, done } = runtime.spawnDetached(toSpawnOptions(spec, ctx.cwd));
         lines.push(
           `⏳ ${spec.agent ?? short(spec.task, 40)} — background run ${runId.slice(0, 8)} (check the fleet tool)`,
         );
-        void done.then((result) => {
-          pi.sendMessage({
-            customType: 'subagents:background',
-            content: `Background subagent ${runId.slice(0, 8)} (${spec.agent ?? 'task'}) ${result.ok ? 'completed' : `failed: ${result.error}`}`,
-            display: true,
-            details: { runId, ok: result.ok },
+        // Deliberately no AbortSignal here: pi may abort tool signals after execute returns, which
+        // would kill the background child. Swallow late failures — sendMessage throws once the
+        // session is ending, and an unhandled rejection is worse than a lost notification.
+        void done
+          .then((result) => {
+            pi.sendMessage({
+              customType: 'subagents:background',
+              content: `Background subagent ${runId.slice(0, 8)} (${spec.agent ?? 'task'}) ${result.ok ? 'completed' : `failed: ${result.error}`}`,
+              display: true,
+              details: { runId, ok: result.ok },
+            });
+          })
+          .catch((err) => {
+            console.error(`[subagents] background run ${runId.slice(0, 8)} completion notice failed:`, err);
           });
-        });
       }
 
       if (foreground.length > 0) {
@@ -174,11 +227,30 @@ export default function subagents(pi: ExtensionAPI) {
         }
       }
 
+      // Tree-mutating tasks run strictly sequentially, after the parallel batch, so they never
+      // stomp the working tree concurrently with each other or with read-only children.
+      for (const spec of mutating) {
+        const result = await runtime.spawn({
+          ...toSpawnOptions(spec, ctx.cwd),
+          ...(signal ? { signal } : {}),
+        });
+        const label = spec.agent ?? short(spec.task, 40);
+        if (result.ok) {
+          lines.push(
+            `## ✓ ${label} — ${formatSeconds(0, result.durationMs)}${formatTokens(result.usage)}\n\n${result.text.slice(0, MAX_TASK_OUTPUT_CHARS)}`,
+          );
+        } else {
+          lines.push(
+            `## ✗ ${label} — ${result.kind} (${formatSeconds(0, result.durationMs)})\n\n${result.error}${result.text ? `\n\nPartial output:\n${result.text.slice(0, 1000)}` : ''}`,
+          );
+        }
+      }
+
       return toolResult(lines.join('\n\n'));
     },
   });
 
-  pi.registerTool({
+  registerTool(pi, {
     name: 'fleet',
     label: 'Subagent Fleet',
     description:

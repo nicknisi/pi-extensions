@@ -8,6 +8,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { Type } from 'typebox';
 import { describe, expect, it } from 'vitest';
 import type { SpawnOptions, SpawnResult, SpawnUsage, SubagentRuntime } from './subagents.js';
 import { runWorkflow, type WorkflowSpec } from './workflow.js';
@@ -216,6 +217,55 @@ describe('runWorkflow', () => {
     );
     expect(result.ok).toBe(true);
     expect(fake.calls.map((c) => c.prompt)).toEqual(['produce', 'handle-x', 'handle-y']);
+  });
+
+  it('settles an empty static foreach with an ok empty aggregate', async () => {
+    const fake = makeFake(() => ok('unused'));
+    const result = await run(
+      {
+        name: 'foreach-empty',
+        stages: [{ id: 'fan', needs: [], foreach: [], prompt: 'never spawned' }],
+      },
+      fake,
+    );
+    expect(result.ok).toBe(true);
+    expect(fake.calls).toHaveLength(0);
+    const outcome = result.outcomes['fan'];
+    expect(outcome?.ok).toBe(true);
+    if (outcome?.ok) {
+      expect(outcome.output).toBe('[]');
+      expect(outcome.data).toBeUndefined();
+      expect(outcome.attempts).toBe(0);
+    }
+  });
+
+  it('settles a foreach whose pick yields zero items, with data [] when outputSchema is set', async () => {
+    const fake = makeFake(() => ok('produce'));
+    const result = await run(
+      {
+        name: 'foreach-empty-pick',
+        stages: [
+          { id: 'a', needs: [], prompt: 'produce' },
+          {
+            id: 'b',
+            needs: ['a'],
+            foreach: { from: 'a', pick: () => [] },
+            prompt: 'never spawned',
+            outputSchema: Type.Object({ value: Type.String() }),
+          },
+          { id: 'c', needs: ['b'], prompt: 'after' },
+        ],
+      },
+      fake,
+    );
+    expect(result.ok).toBe(true);
+    expect(fake.calls.map((c) => c.prompt)).toEqual(['produce', 'after']);
+    const outcome = result.outcomes['b'];
+    expect(outcome?.ok).toBe(true);
+    if (outcome?.ok) {
+      expect(outcome.output).toBe('[]');
+      expect(outcome.data).toEqual([]);
+    }
   });
 
   it('revises via gate feedback and passes on a later attempt', async () => {

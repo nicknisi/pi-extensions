@@ -44,8 +44,9 @@ export function deposit(root: string, toAddr: string, letter: Letter): void {
 
 /**
  * Take every letter in the inbox, oldest first. Each letter is unlinked as
- * it is read — before parsing — so a crash mid-drain loses at most the
- * in-flight letter and never double-delivers.
+ * it is read — before parsing — so it can never be delivered twice. The
+ * tradeoff: a drained letter that is never delivered would be lost, so the
+ * caller must re-deposit any letter it fails to deliver (checkInbox does).
  */
 export function drain(root: string, addr: string): Letter[] {
   const dir = inboxDir(root, addr);

@@ -17,10 +17,10 @@ log(...args: unknown[]): void;
 - `spawn` launches a hermetic in-process child agent through the shared runtime (namespace `codemode`). Children are version-matched to the host, cannot themselves spawn, and honor the ecosystem recursion guard. Run artifacts persist to `~/.pi/agent/subagent-runs/codemode/`, so codemode children appear in the `fleet` tool / `/fleet` command from `@nicknisi/pi-subagents`.
 - `spawn` **never rejects**. Check `result.ok`; failures carry `kind: 'crashed' | 'empty' | 'schema_invalid' | 'aborted'` plus `error`.
 - `runWorkflow` runs a declarative multi-stage DAG over `spawn` (from `@nicknisi/pi-shared`'s engine): per-stage `needs` deps (default linear), `foreach` fan-out, `gate` revise-feedback loops, `retries`, `tokenBudget`, and `sharesTree` stages that never overlap other work and hand their bounded `git diff HEAD` to dependents. Control artifacts land in `~/.pi/agent/workflow-runs/`; `opts.resumeFrom` skips previously-ok stages. Also never rejects — per-stage outcomes carry `ok`/`kind`. Prefer it over hand-rolled `Promise.all` when stages depend on each other, need gates/retries, or edit the working tree.
-- `SpawnOptions` highlights: `prompt` (required), `agent` (label), `model` (`'provider/id'`), `tools` (allowlist — pass `['read','grep','find','ls']` for read-only children; `undefined` = pi defaults `read/bash/edit/write`), `systemPrompt`, `outputSchema` (validated; parsed JSON lands in `result.data`), `cwd`, `timeoutMs`, `maxTurns`, `maxToolCalls`, `thinkingLevel`.
+- `SpawnOptions` highlights: `prompt` (required), `agent` (label), `model` (`'provider/id'`), `tools` (allowlist — `undefined` defaults to read-only `['read','grep','find','ls']`; pass `['read','bash','edit','write']` explicitly for builders), `systemPrompt`, `outputSchema` (validated; parsed JSON lands in `result.data`), `cwd`, `timeoutMs`, `maxTurns`, `maxToolCalls`, `thinkingLevel`.
 - `log` output comes back in the tool result's `details.logs`.
 
-No imports resolve inside the snippet (it's bundled standalone from a temp dir) — `spawn`, `runWorkflow`, and `log` are the whole API. Composition is plain code: that's the point.
+The snippet executes **in the host process with full Node access** — `process`, `require`, and `fs` are all reachable, the same trust boundary as the `bash` tool (see Security model). `spawn`, `runWorkflow`, and `log` are the injected codemode API. Composition is plain code: that's the point.
 
 ## Usage examples
 
@@ -65,8 +65,9 @@ None.
 
 ## Caveats
 
-- **No crash isolation.** A pathological snippet (memory bomb, infinite sync loop) hurts the host. The timeout cannot preempt CPU-bound synchronous code — it aborts in-flight subagents and stops awaiting, but JS can't be killed mid-`while(true)`.
+- **No crash isolation.** A pathological snippet (memory bomb, infinite sync loop) hurts the host. The timeout cannot preempt CPU-bound synchronous code — it aborts in-flight subagents and stops awaiting, but JS can't be killed mid-`while(true)`. Never write busy-wait or long synchronous loops: they block the host event loop and can freeze the session.
+- **Executions are serialized.** Runs queue behind each other because snippet bindings are passed through a single global; concurrent `codemode` calls do not run in parallel.
 - **Timeout semantics:** on expiry, in-flight `spawn` calls (including every stage of an in-flight `runWorkflow`) are aborted (children stop quickly) and the tool returns a timeout error with captured logs; the detached snippet promise settles later and is discarded.
 - **`export default` is required.** A missing/undefined default export returns a notice, not an error.
 - **Results are bounded** (16 KB), logs are bounded (200 entries × 2 KB), stacks are bounded (4 KB).
-- **bundle-require/ESM interop quirks:** the snippet is esbuild-bundled as ESM with target es2022 (top-level await works); bare imports fail by design.
+- **bundle-require/ESM interop quirks:** the snippet is esbuild-bundled as ESM with target es2022 (top-level await works); bare package imports fail by design (no `node_modules` near the temp dir), but Node builtins and globals remain reachable — there is no sandbox.

@@ -6,8 +6,9 @@
  * and the tool compiles + runs it in-process via bundle-require, returning
  * the module's default export as the result.
  *
- * The snippet runs standalone — no imports resolve from the temp dir. Its
- * entire API is three injected bindings:
+ * The snippet executes IN the host process with full Node access —
+ * process/require/fs are all reachable. Its codemode API is three injected
+ * bindings:
  *
  *   spawn(options: SpawnOptions): Promise<SpawnResult>  — shared-runtime
  *     spawn (namespace 'codemode'); never rejects, check result.ok.
@@ -76,6 +77,10 @@ function formatError(err: unknown): string {
 
 export default function codemode(pi: ExtensionAPI) {
   const runtime = createSubagentRuntime({ namespace: 'codemode', artifactsDir: ARTIFACTS_ROOT });
+  // Snippet bindings are handed over via a single global (globalThis.__piCodemode),
+  // so two concurrent executions would clobber each other's spawn/log/runWorkflow —
+  // serialize runs with a promise-chain mutex.
+  let execChain: Promise<unknown> = Promise.resolve();
 
   pi.registerTool({
     name: 'codemode',
@@ -88,8 +93,8 @@ export default function codemode(pi: ExtensionAPI) {
       '{ ok: true, text, data?, usage, durationMs, runId }; on failure { ok: false, kind:',
       "'crashed'|'empty'|'schema_invalid'|'aborted', error, text, usage, durationMs, runId }.",
       'spawn never rejects — check result.ok. SpawnOptions: { prompt: string (required); agent?:',
-      "string label; model?: string 'provider/id'; tools?: string[] allowlist (undefined = pi defaults",
-      'read/bash/edit/write — pass [read, grep, find, ls] for read-only children); systemPrompt?:',
+      "string label; model?: string 'provider/id'; tools?: string[] allowlist (undefined = read-only",
+      '[read, grep, find, ls]; pass [read, bash, edit, write] explicitly for builders); systemPrompt?:',
       'string; replaceSystemPrompt?: boolean; extensionPaths?: string[]; skillPaths?: string[];',
       'includeContextFiles?: boolean; outputSchema?: TypeBox-like JSON schema object (validated;',
       'parsed JSON lands in result.data); cwd?: string; timeoutMs?: number (default 15 min);',
@@ -102,9 +107,9 @@ export default function codemode(pi: ExtensionAPI) {
       '=> unknown[] }, gate?: (outcome, ctx) => true | { revise: feedback }, maxGateAttempts?, retries?,',
       'sharesTree?: boolean (never overlaps other stages; its git diff HEAD flows to dependents via',
       'treeDiffs), maxTurns?, maxToolCalls?, timeoutMs? }], concurrency?, tokenBudget? } — resolves to',
-      '{ ok, outcomes, usage, runDir }; never rejects. No imports resolve;',
-      'spawn, runWorkflow, and log are the whole API. Keep the default export SMALL (summaries, counts, key',
-      'findings) — never raw file dumps.',
+      '{ ok, outcomes, usage, runDir }; never rejects. The snippet runs IN the host process with full',
+      'Node access (process/require/fs reachable) — the same trust boundary as the bash tool. Keep the',
+      'default export SMALL (summaries, counts, key findings) — never raw file dumps.',
     ].join(' '),
     promptSnippet: 'Run TypeScript that orchestrates subagents compositionally',
     promptGuidelines: [
@@ -115,6 +120,7 @@ export default function codemode(pi: ExtensionAPI) {
       'Prefer runWorkflow over hand-rolled Promise.all when stages depend on each other, need gates/retries, or edit the working tree.',
       'Use log(...) for progress notes; they come back in the result details.',
       'Do not attempt imports — the snippet is bundled standalone and only spawn/runWorkflow/log are available.',
+      'Never write busy-wait or long synchronous loops — they block the host event loop and can freeze the session (the timeout cannot preempt synchronous JS).',
     ],
     parameters: Type.Object({
       code: Type.String({ description: 'TypeScript source. Must `export default` the result.' }),
@@ -147,6 +153,9 @@ export default function codemode(pi: ExtensionAPI) {
         const merged = mergeSignals(options.signal, signal ?? undefined, controller.signal);
         const { signal: _userSignal, ...rest } = options;
         const opts: SpawnOptions = { ...rest, cwd: options.cwd ?? ctx.cwd };
+        // Default children to read-only, matching dispatch; pi's own default
+        // (read/bash/edit/write) would apply otherwise.
+        if (opts.tools === undefined) opts.tools = ['read', 'grep', 'find', 'ls'];
         if (merged) opts.signal = merged;
         return runtime.spawn(opts);
       };
@@ -174,6 +183,14 @@ export default function codemode(pi: ExtensionAPI) {
         });
         return mod.default;
       };
+
+      // Serialize executions: the snippet reads its bindings from the single
+      // global set below, so two concurrent runs would clobber each other's
+      // spawn/log/runWorkflow. Wait for the previous run's finally to release.
+      const previous = execChain;
+      let release!: () => void;
+      execChain = new Promise<void>((resolve) => (release = resolve));
+      await previous;
 
       (globalThis as any)[GLOBAL_KEY] = { spawn, log, runWorkflow: boundRunWorkflow };
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -212,6 +229,7 @@ export default function codemode(pi: ExtensionAPI) {
         if (timer) clearTimeout(timer);
         delete (globalThis as any)[GLOBAL_KEY];
         fs.rmSync(dir, { recursive: true, force: true });
+        release(); // let the next queued run set its own bindings
       }
     },
   });

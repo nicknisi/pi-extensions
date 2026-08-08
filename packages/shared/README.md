@@ -163,7 +163,7 @@ const result = await runWorkflow(
 );
 ```
 
-Full stage schema: `{ id, agent?, prompt (string | (ctx, item?, index?) => string), model?, tools?, systemPrompt?, outputSchema?, needs?, sharesTree?, foreach?, gate?, maxGateAttempts?, retries?, maxTurns?, maxToolCalls?, timeoutMs? }`. `prompt`/`gate` receive a `StageContext`: `results` (typed outcomes of completed stages), `treeDiffs`, `cwd`, `runDir`.
+Full stage schema: `{ id, agent?, prompt (string | (ctx, item?, index?) => string), model?, tools?, systemPrompt?, outputSchema?, needs?, sharesTree?, foreach?, gate?, maxGateAttempts?, retries?, maxTurns?, maxToolCalls?, timeoutMs? }`. `prompt`/`gate` receive a `StageContext`: `results` (typed outcomes of completed stages), `treeDiffs`, `cwd`, `runDir`. `tools` defaults to read-only (`['read', 'grep', 'find', 'ls']`) when omitted — a stage that edits files or runs bash must pass `tools` explicitly.
 
 Semantics:
 

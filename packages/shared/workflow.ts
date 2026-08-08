@@ -66,6 +66,11 @@ export interface WorkflowStage {
   /** Static prompt or function of dependency context (item/index set for foreach jobs). */
   prompt: string | ((ctx: StageContext, item?: unknown, index?: number) => string);
   model?: string;
+  /**
+   * Built-in tool allowlist for the stage's spawns. Default read-only
+   * ['read', 'grep', 'find', 'ls'] — a stage that edits files or runs bash
+   * must declare its tools explicitly. [] = no tools.
+   */
   tools?: string[];
   systemPrompt?: string;
   /** Typebox schema, passed through to the runtime; validated per spawn (per item for foreach). */
@@ -128,6 +133,8 @@ export interface RunWorkflowOptions {
 
 const DEFAULT_CONCURRENCY = 4;
 const DEFAULT_GATE_ATTEMPTS = 2;
+/** Tool allowlist for stages that don't declare one: read-only by default. */
+const DEFAULT_STAGE_TOOLS = ['read', 'grep', 'find', 'ls'];
 const MAX_TREE_DIFF_CHARS = 64 * 1024;
 
 interface JobOk {
@@ -320,7 +327,7 @@ export async function runWorkflow(
       const spawnOpts: SpawnOptions = { prompt: buildPrompt(stage, item, index, feedback), cwd: opts.cwd };
       if (stage.agent !== undefined) spawnOpts.agent = stage.agent;
       if (stage.model !== undefined) spawnOpts.model = stage.model;
-      if (stage.tools !== undefined) spawnOpts.tools = stage.tools;
+      spawnOpts.tools = stage.tools ?? DEFAULT_STAGE_TOOLS;
       if (stage.systemPrompt !== undefined) spawnOpts.systemPrompt = stage.systemPrompt;
       if (stage.outputSchema !== undefined) spawnOpts.outputSchema = stage.outputSchema;
       if (stage.maxTurns !== undefined) spawnOpts.maxTurns = stage.maxTurns;
@@ -579,6 +586,21 @@ export async function runWorkflow(
           });
           continue;
         }
+      }
+
+      if (items.length === 0) {
+        // Zero items launch no jobs, so the launch callback's aggregation
+        // never fires — settle now with an ok empty aggregate.
+        emit({ type: 'stage_start', stageId: stage.id });
+        settle(stage, {
+          ok: true,
+          output: '[]',
+          ...(stage.outputSchema !== undefined ? { data: [] } : {}),
+          usage: zeroUsage(),
+          durationMs: 0,
+          attempts: 0,
+        });
+        continue;
       }
 
       state.set(stage.id, 'running');
