@@ -62,8 +62,19 @@ for dir in "$ROOT"/packages/*/; do
     echo "== $name already trusts $REPO/$WORKFLOW, skipping"
     continue
   fi
+  # NOTE: `npm trust list` itself can require 2FA and fail silently above —
+  # so also treat a 409 from the create call as 'already configured' (npm
+  # allows exactly one trusted publisher per package).
   echo "== trusting $name -> $REPO ($WORKFLOW)"
-  npm trust github "$name" --file "$WORKFLOW" --repo "$REPO" --allow-publish --yes --registry="$REGISTRY"
+  if npm trust github "$name" --file "$WORKFLOW" --repo "$REPO" --allow-publish --yes --registry="$REGISTRY" 2>&1 | tee /tmp/npm-trust-$$.log | grep -q "E409\|409 Conflict"; then
+    echo "== $name already has a trusted publisher (409) — verify it's $REPO/$WORKFLOW in the npm UI"
+  elif [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    echo "!! trust failed for $name" >&2
+    cat /tmp/npm-trust-$$.log >&2
+    rm -f /tmp/npm-trust-$$.log
+    exit 1
+  fi
+  rm -f /tmp/npm-trust-$$.log
   sleep 2
 done
 
