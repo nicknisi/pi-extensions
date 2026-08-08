@@ -1,5 +1,5 @@
 /**
- * Session registry for the intercom mailbox: who is around, where, and
+ * Session registry for the relay mailbox: who is around, where, and
  * whether they're reachable. Pi-free — importable from tests without pi's
  * loader.
  *

@@ -1,18 +1,18 @@
 {
-  "name": "@nicknisi/pi-intercom",
+  "name": "@nicknisi/pi-relay",
   "version": "0.0.0",
-  "description": "Brokerless session-to-session messaging for pi — a file mailbox that outlives the process, with ask/reply coordination. Drop-in replacement for nicobailon/pi-intercom.",
+  "description": "Brokerless session-to-session messaging for pi — a file mailbox that outlives the process, with ask/reply coordination. Formerly @nicknisi/pi-intercom.",
   "keywords": [
     "pi",
     "pi-coding-agent",
     "pi-package"
   ],
-  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/intercom#readme",
+  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/relay#readme",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nicknisi/pi-extensions.git",
-    "directory": "packages/intercom"
+    "directory": "packages/relay"
   },
   "files": [
     "dist",

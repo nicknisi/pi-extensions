@@ -69,7 +69,7 @@ export class OutboundPolicy {
   }
 }
 
-/** Inbound guard: PI_INTERCOM_INBOUND=refuse drops all peer mail. */
-export function inboundAccepts(env: string | undefined = process.env.PI_INTERCOM_INBOUND): boolean {
+/** Inbound guard: PI_RELAY_INBOUND=refuse drops all peer mail. */
+export function inboundAccepts(env: string | undefined = process.env.PI_RELAY_INBOUND): boolean {
   return env !== 'refuse';
 }

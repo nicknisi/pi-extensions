@@ -1,13 +1,13 @@
-# @nicknisi/pi-intercom
+# @nicknisi/pi-relay
 
-First-party session-to-session messaging for pi — a **brokerless file mailbox** (no daemon, no socket, no connection). Drop-in replacement for [nicobailon/pi-intercom](https://github.com/nicobailon/pi-intercom).
+First-party session-to-session messaging for pi — a **brokerless file mailbox** (no daemon, no socket, no connection). Renamed from the briefly-published `@nicknisi/pi-intercom@0.0.0`; the design is a from-scratch reimplementation of [nicobailon/pi-intercom](https://github.com/nicobailon/pi-intercom)'s surface.
 
-Architecture follows [shift-labs/pi-peer](https://github.com/shift-labs-ai/pi-peer)'s design (files beat a broker for this problem), extended with the coordination surface pi-intercom users rely on: `ask`/`reply`/`pending`/`cancel`.
+Architecture follows [shift-labs/pi-peer](https://github.com/shift-labs-ai/pi-peer)'s design (files beat a broker for this problem), extended with the coordination surface intercom users rely on: `ask`/`reply`/`pending`/`cancel`.
 
 ## What it adds
 
-- **`intercom` tool** — actions: `list`, `list-cwd`, `send`, `ask`, `reply`, `pending`, `cancel`, `status`
-- **`/intercom` command** — prints the session listing
+- **`relay` tool** — actions: `list`, `list-cwd`, `send`, `ask`, `reply`, `pending`, `cancel`, `status`
+- **`/relay` command** — prints the session listing
 
 ## Usage
 
@@ -49,16 +49,18 @@ main moved; rebase before you push.
 
 ## Configuration
 
-| Variable              | Default                | Meaning                                         |
-| --------------------- | ---------------------- | ----------------------------------------------- |
-| `PI_INTERCOM_DIR`     | `~/.pi/agent/intercom` | Where records and mailboxes live                |
-| `PI_INTERCOM_INBOUND` | `accept`               | `accept` delivers; `refuse` drops all peer mail |
+| Variable           | Default             | Meaning                                         |
+| ------------------ | ------------------- | ----------------------------------------------- |
+| `PI_RELAY_DIR`     | `~/.pi/agent/relay` | Where records and mailboxes live                |
+| `PI_RELAY_INBOUND` | `accept`            | `accept` delivers; `refuse` drops all peer mail |
 
 The directory is created `0700` and every file `0600` — other users on the machine cannot read your mail.
 
-## Migrating from nicobailon/pi-intercom
+## Migrating
 
-**Uninstall nicobailon/pi-intercom BEFORE loading this package** (`pi remove pi-intercom`). Both register the `intercom` tool; pi detects the conflict at startup and refuses to load the second extension, printing `Failed to load extension … Tool "intercom" conflicts with <path>` — loud and named, but your session won't start with both. Ours is a deliberate drop-in: the tool name, action surface (`list`, `list-cwd`, `send`, `ask`, `reply`, `pending`, `cancel`, `status`), and name/short-id targeting carry over, so skills and habits keep working. Not carried over: attachments (plain text only — send a path), and the broker daemon itself (nothing to run, supervise, or leak).
+**From `@nicknisi/pi-intercom@0.0.0` (briefly published, now deprecated):** `pi remove @nicknisi/pi-intercom`, install this package. State moves from `~/.pi/agent/intercom/` to `~/.pi/agent/relay/` (old mail is abandoned — pre-1.0, no migration), env vars rename `PI_INTERCOM_*` → `PI_RELAY_*`, and the tool/command are now `relay` / `/relay`.
+
+**From nicobailon/pi-intercom:** `pi remove pi-intercom`, install this package. No conflict — ours registers `relay`, theirs `intercom`, they can even coexist during a transition. The action surface (`list`, `list-cwd`, `send`, `ask`, `reply`, `pending`, `cancel`, `status`) and name/short-id targeting carry over. Not carried over: attachments (plain text only — send a path), and the broker daemon itself (nothing to run, supervise, or leak).
 
 ## Caveats
 

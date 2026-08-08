@@ -27,7 +27,7 @@ export function formatDelivery(letter: Letter, now: number = Date.now()): string
   const meta = `_id ${letter.id} · ${letter.kind} · sent ${age(letter.ts, now)}_`;
   const hint =
     letter.kind === 'ask'
-      ? `\n\nReply with the intercom tool: { action: "reply", replyTo: "${letter.id}", message: "..." }`
+      ? `\n\nReply with the relay tool: { action: "reply", replyTo: "${letter.id}", message: "..." }`
       : '';
   return `${BOUNDARY_PREAMBLE}\n\n${header}:\n\n${letter.body}\n\n${meta}${hint}`;
 }

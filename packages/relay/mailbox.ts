@@ -1,5 +1,5 @@
 /**
- * Letter transport for the intercom mailbox. Pi-free.
+ * Letter transport for the relay mailbox. Pi-free.
  *
  * Guarantees (each pinned by a test):
  * - A reader never sees half a letter: writers rename into place; readers

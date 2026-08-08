@@ -1,14 +1,14 @@
 /**
- * First-party intercom for pi: brokerless session-to-session messaging.
+ * First-party session relay for pi: brokerless session-to-session messaging.
  *
- * No daemon, no socket — a file mailbox under <agentDir>/intercom/ (or
- * PI_INTERCOM_DIR). Sending is an atomic file deposit; receiving is an
+ * No daemon, no socket — a file mailbox under <agentDir>/relay/ (or
+ * PI_RELAY_DIR). Sending is an atomic file deposit; receiving is an
  * fs.watch (plus 3s poll fallback) on your own inbox. Mail addressed to a
  * closed session waits on disk and is drained when the session resumes.
  *
- * Surface: one `intercom` tool (list, list-cwd, send, ask, reply, pending,
- * cancel, status) and a `/intercom` command. Drop-in replacement for
- * nicobailon/pi-intercom — uninstall it first (duplicate tool name).
+ * Surface: one `relay` tool (list, list-cwd, send, ask, reply, pending,
+ * cancel, status) and a `/relay` command. Renamed from the briefly-published @nicknisi/pi-relay@0.0.0 (itself a drop-in replacement for
+ * nicobailon/pi-relay — uninstall it first (duplicate tool name).
  */
 
 import { randomUUID } from 'node:crypto';
@@ -64,8 +64,8 @@ function toolResult(text: string, details: Record<string, unknown> = {}) {
 // look in the terminal. Visual vocabulary matches llm-council: one accent,
 // dim metadata, └─ hints, ✓/✗-family status glyphs.
 
-const DELIVERY_TYPE = 'intercom:delivery';
-const LIST_TYPE = 'intercom:list';
+const DELIVERY_TYPE = 'relay:delivery';
+const LIST_TYPE = 'relay:list';
 
 /** Presentation metadata for a delivery. `details` is never sent to the LLM. */
 interface DeliveryDetails {
@@ -77,7 +77,7 @@ interface DeliveryDetails {
   replyTo?: string;
 }
 
-interface IntercomListRow {
+interface RelayListRow {
   name: string;
   addr: string;
   cwd: string;
@@ -149,8 +149,8 @@ function collectResumableSessionIds(): Set<string> {
   return ids;
 }
 
-export default function intercom(pi: ExtensionAPI) {
-  const root = process.env.PI_INTERCOM_DIR ?? path.join(getAgentDir(), 'intercom');
+export default function relay(pi: ExtensionAPI) {
+  const root = process.env.PI_RELAY_DIR ?? path.join(getAgentDir(), 'relay');
   const policy = new OutboundPolicy();
 
   let self: SessionRecord | undefined;
@@ -398,8 +398,8 @@ export default function intercom(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: 'intercom',
-    label: 'Intercom',
+    name: 'relay',
+    label: 'Relay',
     description:
       'Message other pi sessions on this machine. list/list-cwd show registered sessions with presence (idle/working/not responding/offline). send delivers plain text (≤32KB — send a summary and a path, never payloads); offline sessions collect mail when they resume. ask blocks until a reply (default 120s); answer asks with reply (replyTo) so correlation works; cancel withdraws one of your asks.',
     promptSnippet: 'Message other pi sessions on this machine',
@@ -434,7 +434,7 @@ export default function intercom(pi: ExtensionAPI) {
     }),
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      if (!self) return toolResult('Intercom is not initialized (no session_start yet).');
+      if (!self) return toolResult('Relay is not initialized (no session_start yet).');
 
       switch (params.action) {
         case 'list':
@@ -554,7 +554,7 @@ export default function intercom(pi: ExtensionAPI) {
     const footer = theme.fg('dim', `id ${id8} · ${d.kind} · ${relativeTime(d.ts)}`);
     const out = [header, body, '', footer];
     if (d.kind === 'ask') {
-      out.push(theme.fg('dim', `└─ reply via intercom { action: "reply", replyTo: "${id8}" }`));
+      out.push(theme.fg('dim', `└─ reply via relay { action: "reply", replyTo: "${id8}" }`));
     }
     if (truncated) {
       out.push(theme.fg('dim', `… ${expandToggleKey()} to expand`));
@@ -566,10 +566,10 @@ export default function intercom(pi: ExtensionAPI) {
     return box;
   });
 
-  // ── /intercom listing ──────────────────────────────────────────────────
+  // ── /relay listing ──────────────────────────────────────────────────
   // A custom ENTRY (appendEntry): the listing is for the human, never the
   // model — the tool's list action already serves context.
-  pi.registerEntryRenderer<{ rows: IntercomListRow[] }>(LIST_TYPE, (entry, _options, theme) => {
+  pi.registerEntryRenderer<{ rows: RelayListRow[] }>(LIST_TYPE, (entry, _options, theme) => {
     const rows = entry.data?.rows;
     if (!rows) return undefined;
     if (rows.length === 0) {
@@ -577,7 +577,7 @@ export default function intercom(pi: ExtensionAPI) {
     }
     const clean = rows.map((r) => ({ ...r, name: displayName(r.name).slice(0, 24) }));
     const nameW = Math.max(...clean.map((r) => r.name.length));
-    const lines = [theme.fg('dim', `intercom · ${clean.length} session${clean.length === 1 ? '' : 's'}`)];
+    const lines = [theme.fg('dim', `relay · ${clean.length} session${clean.length === 1 ? '' : 's'}`)];
     for (const r of clean) {
       const dot =
         r.presence === 'live'
@@ -592,23 +592,23 @@ export default function intercom(pi: ExtensionAPI) {
     return new Text(lines.join('\n'), 0, 0);
   });
 
-  pi.registerCommand('intercom', {
-    description: 'List registered pi sessions (the intercom mailbox listing)',
+  pi.registerCommand('relay', {
+    description: 'List registered pi sessions (the relay mailbox listing)',
     handler: async (_args, ctx) => {
       if (!self || !ctx.hasUI) {
         // Plain-text fallback (print/rpc mode): the entry renderer never runs there.
         const text = self
           ? formatListing(listRecords(root), self.addr, (r) => presenceOf(r))
-          : 'Intercom is not initialized (no session_start yet).';
+          : 'Relay is not initialized (no session_start yet).';
         pi.sendMessage({
           customType: LIST_TYPE,
           content: text,
           display: true,
-          details: { kind: 'intercom-list' },
+          details: { kind: 'relay-list' },
         });
         return;
       }
-      const rows: IntercomListRow[] = listRecords(root)
+      const rows: RelayListRow[] = listRecords(root)
         .filter((r) => r.addr !== self!.addr)
         .map((r) => ({ name: r.name, addr: r.addr, cwd: r.cwd, presence: presenceOf(r), status: r.status }));
       pi.appendEntry(LIST_TYPE, { rows });

@@ -7,9 +7,9 @@
 # against claude-haiku-4-5.
 set -u
 PKG="$(cd "$(dirname "${BASH_SOURCE[0]}")/../packages" && pwd)"
-EXTS="-ne -e $PKG/llm-council/index.ts -e $PKG/subagents/index.ts -e $PKG/codemode/index.ts -e $PKG/intercom/index.ts"
-export PI_INTERCOM_DIR=/tmp/smoke-intercom
-rm -rf /tmp/smoke-intercom /tmp/smoke-a /tmp/smoke-b /tmp/smoke-council
+EXTS="-ne -e $PKG/llm-council/index.ts -e $PKG/subagents/index.ts -e $PKG/codemode/index.ts -e $PKG/relay/index.ts"
+export PI_RELAY_DIR=/tmp/smoke-relay
+rm -rf /tmp/smoke-relay /tmp/smoke-a /tmp/smoke-b /tmp/smoke-council
 mkdir -p /tmp/smoke-a /tmp/smoke-b /tmp/smoke-council/.pi/configs
 cat > /tmp/smoke-council/.pi/configs/llm-council.json <<'EOF'
 {
@@ -71,16 +71,16 @@ echo "── 6/7 llm-council: members + chairman synthesis"
 cd /tmp/smoke-council && pi -p --no-session $EXTS "Use the llm_council tool with question: 'Is a hot dog a sandwich? One sentence verdict.' Report the chairman's synthesis." > /tmp/smoke-6.log 2>&1
 check "council chairman synthesis" /tmp/smoke-6.log "sandwich"
 
-echo "── 7/7 intercom: live two-session delivery"
+echo "── 7/7 relay: live two-session delivery"
 cd /tmp/smoke-b && pi -p --no-session $EXTS "Use the bash tool to run: sleep 25. Then say B-DONE." > /tmp/smoke-7b.log 2>&1 &
 B_PID=$!
 sleep 6
-B_ADDR=$(ls $PI_INTERCOM_DIR 2>/dev/null | grep -o '^[a-f0-9]*' | head -1)
-if [ -z "$B_ADDR" ]; then echo "❌ FAIL: intercom B never registered"; FAIL=$((FAIL+1)); else
-  cd /tmp/smoke-a && pi -p --no-session $EXTS "Use the intercom tool to send this exact message to the session at address $B_ADDR: 'full-stack smoke says hi'. Report the exact verdict." > /tmp/smoke-7a.log 2>&1
-  check "intercom live delivery receipt" /tmp/smoke-7a.log "delivered"
+B_ADDR=$(ls $PI_RELAY_DIR 2>/dev/null | grep -o '^[a-f0-9]*' | head -1)
+if [ -z "$B_ADDR" ]; then echo "❌ FAIL: relay B never registered"; FAIL=$((FAIL+1)); else
+  cd /tmp/smoke-a && pi -p --no-session $EXTS "Use the relay tool to send this exact message to the session at address $B_ADDR: 'full-stack smoke says hi'. Report the exact verdict." > /tmp/smoke-7a.log 2>&1
+  check "relay live delivery receipt" /tmp/smoke-7a.log "delivered"
   wait $B_PID; sleep 1
-  check "intercom B received the message mid-run" /tmp/smoke-7b.log "peer\|smoke-a\|another pi session"
+  check "relay B received the message mid-run" /tmp/smoke-7b.log "peer\|smoke-a\|another pi session"
 fi
 
 echo

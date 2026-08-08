@@ -1,5 +1,5 @@
 /**
- * Intercom mechanism tests — tmp dirs, no pi imports. The suite is the
+ * Relay mechanism tests — tmp dirs, no pi imports. The suite is the
  * specification: each case pins a guarantee from the design.
  */
 
@@ -26,7 +26,7 @@ import { deriveAddr, listRecords, presenceOf, sweep, writeRecord, type SessionRe
 
 const dirs: string[] = [];
 function tmpRoot(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-intercom-test-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-relay-test-'));
   dirs.push(dir);
   return dir;
 }
