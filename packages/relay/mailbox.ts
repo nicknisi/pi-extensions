@@ -9,6 +9,9 @@
  * - A corrupt letter is discarded on read, so it cannot poison every drain.
  * - Consumption is the receipt: the sender learns "delivered" only when the
  *   letter actually disappeared from the target's inbox.
+ * - Every deposit and every delivery appends one append-only audit line —
+ *   drain-as-receipt must not destroy evidence. The log never holds a full
+ *   body, only a short preview.
  */
 
 import * as fs from 'node:fs';
@@ -40,6 +43,16 @@ export function deposit(root: string, toAddr: string, letter: Letter): void {
   const tmp = path.join(dir, `${name}.${process.pid}.tmp`);
   fs.writeFileSync(tmp, JSON.stringify(letter), { mode: 0o600 });
   fs.renameSync(tmp, path.join(dir, name));
+  // Send-side choke point: every send/ask/reply/cancel goes through here.
+  appendAudit(root, {
+    ts: Date.now(),
+    event: 'deposit',
+    kind: letter.kind,
+    from: letter.from.addr,
+    to: toAddr,
+    messageId: letter.id,
+    preview: previewBody(letter.body),
+  });
 }
 
 /**
@@ -201,6 +214,66 @@ export function clearAsk(root: string, addr: string, askId: string): void {
       // already gone
     }
   }
+}
+
+// ── Audit log ────────────────────────────────────────────────────────────
+// Append-only line-delimited JSON at <root>/audit.log. Written from the
+// deposit and deliver choke points so the record survives the letter being
+// unlinked-as-read. Never holds a full body — only a short preview.
+
+export interface AuditRecord {
+  ts: number;
+  event: 'deposit' | 'deliver';
+  kind: Letter['kind'];
+  from: string;
+  to: string;
+  messageId: string;
+  preview: string;
+}
+
+const AUDIT_PREVIEW_CHARS = 80;
+
+/** Whitespace-collapsed body preview — never the full payload. */
+export function previewBody(body: string): string {
+  return body.replace(/\s+/g, ' ').trim().slice(0, AUDIT_PREVIEW_CHARS);
+}
+
+export function auditLogPath(root: string): string {
+  return path.join(root, 'audit.log');
+}
+
+/** Append one audit record. Best-effort: never throws (audit must not break delivery). */
+export function appendAudit(root: string, record: AuditRecord): void {
+  try {
+    const file = auditLogPath(root);
+    if (!fs.existsSync(file)) fs.writeFileSync(file, '', { mode: 0o600 });
+    fs.appendFileSync(file, `${JSON.stringify(record)}\n`);
+  } catch {
+    // audit failure never breaks the mail path
+  }
+}
+
+/** Read the last `limit` audit entries (oldest-first within that tail). */
+export function readAudit(root: string, limit = 50): AuditRecord[] {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(auditLogPath(root), 'utf8');
+  } catch {
+    return [];
+  }
+  const out: AuditRecord[] = [];
+  for (const line of raw.split('\n')) {
+    if (line.length === 0) continue;
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed && typeof parsed.ts === 'number' && typeof parsed.event === 'string') {
+        out.push(parsed as AuditRecord);
+      }
+    } catch {
+      // skip corrupt line — append-only, never fatal
+    }
+  }
+  return out.slice(-limit);
 }
 
 /** Asks we have received and not yet answered, oldest first. */

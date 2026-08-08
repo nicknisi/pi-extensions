@@ -7,13 +7,23 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { BOUNDARY_PREAMBLE, formatDelivery, formatListing, refusalAmbiguous, refusalUnknown } from './format.js';
 import {
+  BOUNDARY_PREAMBLE,
+  formatAudit,
+  formatDelivery,
+  formatListing,
+  refusalAmbiguous,
+  refusalUnknown,
+} from './format.js';
+import {
+  appendAudit,
   awaitReceipt,
   clearAsk,
   deposit,
   drain,
   pendingAsks,
+  previewBody,
+  readAudit,
   readOutgoingAsk,
   trackIncomingAsk,
   trackOutgoingAsk,
@@ -210,6 +220,74 @@ describe('mailbox', () => {
     expect(unreadCount(root, addr)).toBe(1);
     // "resume": drain-on-start
     expect(drain(root, addr).map((l) => l.body)).toEqual(['while you were out']);
+  });
+});
+
+describe('audit log', () => {
+  it('append-only: deposit writes one line, never the full body', () => {
+    const root = tmpRoot();
+    const addr = 'aud00000001';
+    const long = 'x'.repeat(500);
+    deposit(root, addr, letter({ id: 'a-1', body: long, ts: 1000 }));
+    const entries = readAudit(root, 100);
+    expect(entries).toHaveLength(1);
+    const e = entries[0]!;
+    expect(e.event).toBe('deposit');
+    expect(e.kind).toBe('message');
+    expect(e.from).toBe(letter().from.addr);
+    expect(e.to).toBe(addr);
+    expect(e.messageId).toBe('a-1');
+    // preview is bounded — the full 500-char body never lands in the log
+    expect(e.preview).toBe(previewBody(long));
+    expect(e.preview.length).toBeLessThan(long.length);
+  });
+
+  it('append-only survives corruption and returns a bounded tail', () => {
+    const root = tmpRoot();
+    for (let i = 0; i < 3; i++) deposit(root, 'aud00000002', letter({ id: `a-${i}`, ts: 1000 + i }));
+    // a corrupt line must not poison reads (append-only, skip-on-parse-fail)
+    fs.appendFileSync(path.join(root, 'audit.log'), '{not json}\n');
+    const entries = readAudit(root, 2);
+    expect(entries).toHaveLength(2);
+    expect(entries.map((e) => e.messageId)).toEqual(['a-1', 'a-2']);
+  });
+
+  it('deliver and deposit both record (evidence survives drain-as-receipt)', () => {
+    const root = tmpRoot();
+    const addr = 'aud00000003';
+    deposit(root, addr, letter({ id: 'd-1', kind: 'ask', body: 'can I push?' }));
+    // drain consumes (unlinks) the letter, but the audit line stays
+    drain(root, addr);
+    const entries = readAudit(root);
+    expect(entries.filter((e) => e.event === 'deposit' && e.messageId === 'd-1')).toHaveLength(1);
+    // a deliver record is appended by index.ts deliver(); simulate it here:
+    appendAudit(root, {
+      ts: Date.now(),
+      event: 'deliver',
+      kind: 'ask',
+      from: letter().from.addr,
+      to: addr,
+      messageId: 'd-1',
+      preview: previewBody('can I push?'),
+    });
+    const after = readAudit(root).filter((e) => e.messageId === 'd-1');
+    expect(after.map((e) => e.event)).toEqual(['deposit', 'deliver']);
+  });
+
+  it('formatAudit renders entries and handles the empty case', () => {
+    expect(formatAudit([])).toContain('No audit entries');
+    const root = tmpRoot();
+    deposit(root, 'aud00000004', letter({ id: 'f-1', kind: 'message', body: 'hello world' }));
+    const text = formatAudit(readAudit(root));
+    expect(text).toContain('deposit');
+    expect(text).toContain('f-1'.slice(0, 8));
+    expect(text).toContain('hello world'); // preview present
+    // a long body is only present as its bounded preview
+    const root2 = tmpRoot();
+    const long = 'A'.repeat(500);
+    deposit(root2, 'aud00000005', letter({ id: 'f-2', body: long }));
+    const text2 = formatAudit(readAudit(root2));
+    expect(text2).not.toContain(long);
   });
 });
 

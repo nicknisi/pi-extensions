@@ -3,7 +3,7 @@
  * pinned by tests; change them deliberately.
  */
 
-import type { Letter } from './mailbox.js';
+import type { AuditRecord, Letter } from './mailbox.js';
 import type { Presence, SessionRecord } from './registry.js';
 
 export const BOUNDARY_PREAMBLE =
@@ -57,4 +57,17 @@ export function refusalUnknown(to: string, reachable: string[]): string {
 
 export function refusalAmbiguous(to: string, candidates: string[]): string {
   return `'${to}' is ambiguous; matches: ${candidates.join(', ')}. Use a full name or address prefix.`;
+}
+
+/** Render recent audit entries for `/relay log`. */
+export function formatAudit(records: AuditRecord[], now: number = Date.now()): string {
+  if (records.length === 0) return 'No audit entries yet.';
+  const head = `relay audit · ${records.length} entr${records.length === 1 ? 'y' : 'ies'}`;
+  const lines = [head];
+  for (const r of records) {
+    const when = age(r.ts, now);
+    const dir = `${shortAddr(r.from)} → ${shortAddr(r.to)}`;
+    lines.push(`• ${r.event} ${r.kind}  ${dir}  id ${r.messageId.slice(0, 8)}  ${when}  ${r.preview}`);
+  }
+  return lines.join('\n');
 }

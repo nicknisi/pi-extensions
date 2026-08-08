@@ -20,6 +20,7 @@ import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import { Box, getKeybindings, Text } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import {
+  formatAudit,
   formatDelivery,
   formatListing,
   formatPendingAsk,
@@ -28,11 +29,14 @@ import {
   shortAddr,
 } from './format.js';
 import {
+  appendAudit,
   awaitReceipt,
   clearAsk,
   drain,
   deposit,
   pendingAsks,
+  previewBody,
+  readAudit,
   readOutgoingAsk,
   trackIncomingAsk,
   trackOutgoingAsk,
@@ -66,6 +70,7 @@ function toolResult(text: string, details: Record<string, unknown> = {}) {
 
 const DELIVERY_TYPE = 'relay:delivery';
 const LIST_TYPE = 'relay:list';
+const AUDIT_TYPE = 'relay:audit';
 
 /** Presentation metadata for a delivery. `details` is never sent to the LLM. */
 interface DeliveryDetails {
@@ -174,6 +179,17 @@ export default function relay(pi: ExtensionAPI) {
 
   /** Hand a letter to pi (or to a waiting ask). Returns false if the session refused every delivery attempt. */
   function deliver(letter: Letter): boolean {
+    // Receive-side choke point: every letter that reaches this session goes
+    // through here, so the audit log captures delivery, not just deposit.
+    appendAudit(root, {
+      ts: Date.now(),
+      event: 'deliver',
+      kind: letter.kind,
+      from: letter.from.addr,
+      to: self!.addr,
+      messageId: letter.id,
+      preview: previewBody(letter.body),
+    });
     // Route replies/cancels for our own outstanding asks to their waiters.
     if ((letter.kind === 'reply' || letter.kind === 'cancel') && letter.replyTo) {
       const waiter = askWaiters.get(letter.replyTo);
@@ -592,9 +608,36 @@ export default function relay(pi: ExtensionAPI) {
     return new Text(lines.join('\n'), 0, 0);
   });
 
+  pi.registerEntryRenderer<{ entries: ReturnType<typeof readAudit> }>(AUDIT_TYPE, (entry, _options, theme) => {
+    const entries = entry.data?.entries;
+    if (!entries || entries.length === 0) {
+      return new Text(theme.fg('dim', '· No audit entries yet.'), 0, 0);
+    }
+    const lines = [theme.fg('dim', `relay audit · ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}`)];
+    for (const r of entries) {
+      const dir = `${shortAddr(r.from)} → ${shortAddr(r.to)}`;
+      lines.push(
+        `${theme.fg('accent', r.event)} ${theme.fg('dim', r.kind)}  ${dir}  ${theme.fg('dim', `id ${r.messageId.slice(0, 8)} · ${relativeTime(r.ts)}`)}  ${sanitizeTerminal(r.preview)}`,
+      );
+    }
+    return new Text(lines.join('\n'), 0, 0);
+  });
+
   pi.registerCommand('relay', {
-    description: 'List registered pi sessions (the relay mailbox listing)',
-    handler: async (_args, ctx) => {
+    description: 'List registered pi sessions, or show the audit log: /relay [log [N]]',
+    handler: async (args, ctx) => {
+      const [sub, ...rest] = (args ?? '').trim().split(/\s+/).filter(Boolean);
+      if (sub === 'log') {
+        const limit = Math.max(1, Math.min(500, Number(rest[0] ?? 50)));
+        const entries = self ? readAudit(root, limit) : [];
+        const text = self ? formatAudit(entries) : 'Relay is not initialized (no session_start yet).';
+        if (!self || !ctx.hasUI) {
+          pi.sendMessage({ customType: AUDIT_TYPE, content: text, display: true, details: { kind: 'relay-audit' } });
+          return;
+        }
+        pi.appendEntry(AUDIT_TYPE, { entries });
+        return;
+      }
       if (!self || !ctx.hasUI) {
         // Plain-text fallback (print/rpc mode): the entry renderer never runs there.
         const text = self

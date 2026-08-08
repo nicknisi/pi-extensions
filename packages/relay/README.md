@@ -7,7 +7,11 @@ Architecture follows [shift-labs/pi-peer](https://github.com/shift-labs-ai/pi-pe
 ## What it adds
 
 - **`relay` tool** — actions: `list`, `list-cwd`, `send`, `ask`, `reply`, `pending`, `cancel`, `status`
-- **`/relay` command** — prints the session listing
+- **`/relay` command** — prints the session listing; `/relay log [N]` prints the last N audit entries (default 50)
+
+## Audit log
+
+Every deposit and every delivery appends one line-delimited JSON record to `<PI_RELAY_DIR>/audit.log` — written from the transport choke points so draining a letter as a receipt no longer destroys the evidence that it existed. Each line records the timestamp, the event (`deposit`/`deliver`), the letter kind, the from/to addresses, and the message id. **The full body is never logged** — only a short (≤80 char) whitespace-collapsed preview. The file is `0600`, append-only, and survives corrupt lines (skipped on parse). Read it with `/relay log [N]`.
 
 ## Usage
 
