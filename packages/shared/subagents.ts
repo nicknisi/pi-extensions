@@ -27,6 +27,7 @@
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { addWorktree, captureHandoff, findRepoRoot, removeWorktree } from './worktree.js';
 import {
   type AgentSession,
   type AgentSessionEvent,
@@ -106,6 +107,16 @@ export interface SpawnOptions {
   maxTurns?: number;
   /** Abort after this many tool executions (budget exceeded → kind 'aborted'). */
   maxToolCalls?: number;
+  /**
+   * Run the child in an isolated git worktree (~/.pi/agent/subagent-worktrees/<runId>,
+   * detached from HEAD at spawn time). The child's writes never touch the caller's
+   * working tree; on settle, the full change set (INCLUDING untracked files, via
+   * `git add -A` + `git diff --cached`) is captured to `<runId>.patch` next to the
+   * run artifact and recorded on RunRecord.worktree. Merge-back is the caller's
+   * decision — central integration, not auto-merge. Fails fast (kind 'crashed')
+   * when cwd is not inside a git repository.
+   */
+  worktree?: boolean;
 }
 
 export interface SpawnUsage {
@@ -131,6 +142,23 @@ export type SpawnResult =
   | { ok: true; runId: string; text: string; data?: unknown; usage: SpawnUsage; durationMs: number }
   | SpawnFailure;
 
+/** One line of a bounded child transcript, for post-hoc debugging. */
+export interface TranscriptEntry {
+  kind: 'turn' | 'tool';
+  label: string;
+}
+
+/** Where a worktree-isolated run lived and what it changed. */
+export interface WorktreeInfo {
+  /** Worktree path (kept on disk until GC, for inspection/manual merge). */
+  path: string;
+  /** Main repo root the worktree belongs to, when known. */
+  repoRoot?: string | undefined;
+  /** Full untruncated `git diff --cached HEAD` patch file, when anything changed. */
+  patchPath?: string | undefined;
+  changedFiles?: number | undefined;
+}
+
 export interface RunRecord {
   runId: string;
   namespace: string;
@@ -142,6 +170,11 @@ export interface RunRecord {
   endedAt?: number | undefined;
   usage?: SpawnUsage | undefined;
   error?: string | undefined;
+  /** Host pi process id — reaping distinguishes ghosts from live runs. */
+  hostPid?: number | undefined;
+  /** Last N child events (turns/tool calls), bounded. */
+  transcript?: TranscriptEntry[] | undefined;
+  worktree?: WorktreeInfo | undefined;
 }
 
 export interface SubagentRuntime {
@@ -162,6 +195,38 @@ const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_RETAINED_RUNS = 200;
 const MAX_ARTIFACT_OUTPUT_CHARS = 64 * 1024;
 const MAX_ARTIFACT_FILES_READ = 500;
+const MAX_TRANSCRIPT_ENTRIES = 20;
+/** Persisted artifacts (and their worktrees) are GC'd after this age. */
+export const ARTIFACT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+// ── Process-wide child budget ─────────────────────────────────────────────
+// Module-level on purpose: every extension gets its own copy of this module
+// under pi's loader, so a TRUE cross-extension budget would need a file lock
+// (overkill). What this does cover is the realistic stacking case — multiple
+// runtimes created inside ONE extension instance (e.g. codemode spawning a
+// workflow that spawns children) — and it caps each runtime's own acquire()
+// below it anyway, so 3 runtimes x 4 = 12 cannot stack within one extension.
+// Cross-extension stacking is bounded by the per-runtime limit.
+const GLOBAL_MAX_CHILDREN = 8;
+let globalActive = 0;
+const globalWaiters: Array<() => void> = [];
+
+function acquireGlobal(): Promise<void> {
+  if (globalActive < GLOBAL_MAX_CHILDREN) {
+    globalActive++;
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => globalWaiters.push(resolve));
+}
+
+function releaseGlobal(): void {
+  globalActive--;
+  const next = globalWaiters.shift();
+  if (next) {
+    globalActive++;
+    next();
+  }
+}
 
 function fail(runId: string, kind: SpawnFailureKind, error: string, startedAt: number): SpawnFailure {
   return {
@@ -332,6 +397,95 @@ export function readRunArtifacts(rootDir: string): RunArtifact[] {
   return out.sort((a, b) => b.startedAt - a.startedAt);
 }
 
+/**
+ * One GC + reaping pass over persisted run artifacts:
+ * - records older than ARTIFACT_RETENTION_MS are deleted, together with their
+ *   sibling `<runId>.patch` and any recorded worktree;
+ * - records still 'queued'/'running' whose hostPid is not this process are
+ *   ghosts of a dead host (in-process children cannot outlive it) — marked
+ *   'aborted' with an explanatory error so /fleet shows the truth.
+ *
+ * Returns counts for observability. Never throws. Injectable `now` for tests.
+ */
+export function sweepRunArtifacts(
+  rootDir: string,
+  opts: { now?: number; retentionMs?: number } = {},
+): { deleted: number; reaped: number } {
+  const now = opts.now ?? Date.now();
+  const retentionMs = opts.retentionMs ?? ARTIFACT_RETENTION_MS;
+  let deleted = 0;
+  let reaped = 0;
+  let namespaces: fs.Dirent[];
+  try {
+    namespaces = fs.readdirSync(rootDir, { withFileTypes: true });
+  } catch {
+    return { deleted, reaped };
+  }
+  for (const ns of namespaces) {
+    if (!ns.isDirectory()) continue;
+    const dir = path.join(rootDir, ns.name);
+    let files: fs.Dirent[];
+    try {
+      files = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const file of files) {
+      if (!file.isFile() || !file.name.endsWith('.json')) continue;
+      const filePath = path.join(dir, file.name);
+      let record: RunArtifact;
+      try {
+        record = JSON.parse(fs.readFileSync(filePath, 'utf8')) as RunArtifact;
+      } catch {
+        continue; // unreadable — left for retention GC by mtime another day
+      }
+      if (!record || typeof record.runId !== 'string') continue;
+
+      const isGhost =
+        (record.status === 'running' || record.status === 'queued') &&
+        typeof record.hostPid === 'number' &&
+        record.hostPid !== process.pid;
+      if (isGhost) {
+        try {
+          record.status = 'aborted';
+          record.endedAt = now;
+          record.error =
+            'Host pi process exited while this run was active (in-process children cannot outlive their host).';
+          fs.writeFileSync(filePath, JSON.stringify(record, null, 2));
+          reaped++;
+        } catch {
+          // best-effort
+        }
+        continue;
+      }
+
+      const age = now - (record.endedAt ?? record.startedAt ?? 0);
+      if (age <= retentionMs) continue;
+      try {
+        if (record.worktree?.path) removeWorktree(record.worktree.repoRoot ?? null, record.worktree.path);
+        fs.rmSync(filePath, { force: true });
+        fs.rmSync(filePath.replace(/\.json$/, '.patch'), { force: true });
+        deleted++;
+      } catch {
+        // best-effort
+      }
+    }
+  }
+  return { deleted, reaped };
+}
+
+let sweptThisProcess = false;
+/** Run sweepRunArtifacts once per host process (each extension loads its own copy; cheap and idempotent). */
+export function sweepRunArtifactsOnce(rootDir: string): void {
+  if (sweptThisProcess) return;
+  sweptThisProcess = true;
+  try {
+    sweepRunArtifacts(rootDir);
+  } catch {
+    // never block startup on GC
+  }
+}
+
 // ── Runtime ────────────────────────────────────────────────────────────────
 
 export function createSubagentRuntime(options: {
@@ -445,12 +599,15 @@ export function createSubagentRuntime(options: {
     }
 
     await acquire();
+    await acquireGlobal();
     record.status = 'running';
+    record.hostPid = process.pid;
     persist(record);
     try {
       return await runChild(runId, opts, startedAt, record);
     } finally {
       release();
+      releaseGlobal();
     }
   }
 
@@ -460,8 +617,27 @@ export function createSubagentRuntime(options: {
     startedAt: number,
     record: RunRecord,
   ): Promise<SpawnResult> {
-    const cwd = opts.cwd ?? process.cwd();
+    let cwd = opts.cwd ?? process.cwd();
     const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+
+    // Worktree isolation: the child writes into a detached worktree, never
+    // the caller's tree. Handoff (full patch incl. untracked files) is
+    // captured at settle; merge-back is the caller's decision.
+    if (opts.worktree) {
+      const repoRoot = findRepoRoot(cwd);
+      if (!repoRoot) {
+        return markFailed(
+          record,
+          fail(runId, 'crashed', `worktree requested but ${cwd} is not inside a git repository`, startedAt),
+        );
+      }
+      const added = addWorktree(repoRoot, runId);
+      if ('error' in added) {
+        return markFailed(record, fail(runId, 'crashed', `worktree setup failed: ${added.error}`, startedAt));
+      }
+      record.worktree = { path: added.path, repoRoot };
+      cwd = added.path;
+    }
 
     // Supervisor channel: a closure tool, not a protocol.
     const customTools = [];
@@ -561,28 +737,34 @@ export function createSubagentRuntime(options: {
 
     let turnCount = 0;
     let toolCallCount = 0;
-    if (opts.maxTurns !== undefined || opts.maxToolCalls !== undefined) {
-      session.subscribe((event: AgentSessionEvent) => {
-        // Typed narrowing: a pi event rename fails the build here instead of
-        // silently disabling budget enforcement.
-        switch (event.type) {
-          case 'turn_start': {
-            turnCount++;
-            if (opts.maxTurns !== undefined && turnCount > opts.maxTurns) {
-              abortOnce(`Turn budget exceeded (${opts.maxTurns})`);
-            }
-            break;
+    const transcript: TranscriptEntry[] = [];
+    session.subscribe((event: AgentSessionEvent) => {
+      // Typed narrowing: a pi event rename fails the build here instead of
+      // silently disabling budget enforcement.
+      switch (event.type) {
+        case 'turn_start': {
+          turnCount++;
+          transcript.push({ kind: 'turn', label: `turn ${turnCount}` });
+          if (opts.maxTurns !== undefined && turnCount > opts.maxTurns) {
+            abortOnce(`Turn budget exceeded (${opts.maxTurns})`);
           }
-          case 'tool_execution_start': {
-            toolCallCount++;
-            if (opts.maxToolCalls !== undefined && toolCallCount > opts.maxToolCalls) {
-              abortOnce(`Tool-call budget exceeded (${opts.maxToolCalls})`);
-            }
-            break;
-          }
+          break;
         }
-      });
-    }
+        case 'tool_execution_start': {
+          toolCallCount++;
+          const toolName =
+            typeof (event as { toolName?: unknown }).toolName === 'string'
+              ? ((event as { toolName?: string }).toolName as string)
+              : 'tool';
+          transcript.push({ kind: 'tool', label: toolName });
+          if (opts.maxToolCalls !== undefined && toolCallCount > opts.maxToolCalls) {
+            abortOnce(`Tool-call budget exceeded (${opts.maxToolCalls})`);
+          }
+          break;
+        }
+      }
+      if (transcript.length > MAX_TRANSCRIPT_ENTRIES) transcript.splice(0, transcript.length - MAX_TRANSCRIPT_ENTRIES);
+    });
 
     let promptError: unknown;
     try {
@@ -600,9 +782,23 @@ export function createSubagentRuntime(options: {
     const stateError = childSessionError(session);
     session.dispose();
 
+    // Worktree handoff: full patch (incl. untracked files) beside the artifact.
+    if (record.worktree && artifactsDir) {
+      try {
+        const dir = path.join(artifactsDir, namespace);
+        fs.mkdirSync(dir, { recursive: true });
+        const handoff = captureHandoff(record.worktree.path, path.join(dir, `${runId}.patch`));
+        if (handoff.patchPath) record.worktree.patchPath = handoff.patchPath;
+        record.worktree.changedFiles = handoff.changedFiles;
+      } catch {
+        // handoff capture is best-effort; the worktree path on the record is the fallback
+      }
+    }
+
     const durationMs = Date.now() - startedAt;
     record.endedAt = Date.now();
     record.usage = usage;
+    if (transcript.length > 0) record.transcript = [...transcript];
 
     const finish = (result: SpawnResult): SpawnResult => {
       if (result.ok) {
