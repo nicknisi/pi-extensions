@@ -1,5 +1,22 @@
 # @nicknisi/pi-llm-council
 
+## 0.2.0
+
+### Minor Changes
+
+- 6634463: Spawn council members and the chairman through `@nicknisi/pi-shared`'s in-process subagent runtime instead of headless `pi` subprocesses. Behavior changes: children are hermetic — `extensions: null` / `skills: null` no longer inherit ambient resources (both mean "none"; named resources still load, containment-checked); member text is the child's final assistant message rather than a concatenation of all assistant messages (fixes wrong output when members use tools); spawning is refused inside pi-subagents child sessions (`PI_SUBAGENT_DEPTH`/`PI_SUBAGENT_CHILD`).
+
+### Patch Changes
+
+- Updated dependencies [cacb4cc]
+- Updated dependencies [121a19d]
+- Updated dependencies [c60bd34]
+- Updated dependencies [0aabf31]
+- Updated dependencies [0aabf31]
+- Updated dependencies [cacb4cc]
+- Updated dependencies [73c772e]
+  - @nicknisi/pi-shared@0.2.0
+
 ## 0.1.3
 
 ### Patch Changes

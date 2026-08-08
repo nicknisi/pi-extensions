@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-agent-urls",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "agent:// and history:// URL tools for reading pi-subagents runs, outputs, and transcripts",
   "keywords": [
     "pi",

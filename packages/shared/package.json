@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-shared",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Shared helpers for Nick's pi extensions (one-off LLM provider access, TUI utilities)",
   "keywords": [
     "pi",
