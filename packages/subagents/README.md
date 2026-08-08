@@ -8,6 +8,7 @@ First-party subagent dispatch and fleet for pi — fan out parallel child agents
 - **`fleet` tool** (model-facing) — `list` recent runs (live + persisted, across extensions using the shared runtime) or fetch a `result` by runId. This is how the model checks on background dispatches.
 - **`/fleet` command** — user-facing run table.
 - **Fleet radar overlay + statusline** — `Alt+Ctrl+F` (rebind via `~/.pi/agent/keybindings.json`) opens a tmux-choose-tree-style overlay listing every run as a per-child lane: status, model, current tool, token burn, last activity. `Enter` inspects the live run transcript; `c` cancels the focused run (wired into the cascading-cancellation registry); `Esc` closes. While any run is in flight, an ambient footer segment (`ctx.ui.setStatus`) shows live `working · done · failed` counts.
+- **`/patches` command** — staging area for worktree-subagent `.patch` handoffs. Opens a keyboard-driven overlay over every pending patch with diffstat and a pre-flight stamp (`clean` / `conflicts` / `stale`, checked via `git apply --check` **without** applying). `Enter` applies the whole patch (`git apply --3way`); `e` expands the full diff with per-hunk navigation (`n`/`p`); `s` applies the focused hunk; `d` discards. Apply/discard decisions persist to `~/.pi/agent/subagent-patches/state.json` so `/patches` survives restart.
 
 ## Usage
 
@@ -48,6 +49,18 @@ Builder tasks should prefer `worktree: true` over `allowTreeMutation: true`:
 ```
 
 The child runs in a detached worktree at `~/.pi/agent/subagent-worktrees/<runId>` from current `HEAD`. Its writes never touch your working tree, mutating tools stay **parallel** (no `allowTreeMutation`, no serialization), and on completion the full change set — **including new untracked files** — is captured as an untruncated patch at `~/.pi/agent/subagent-runs/subagents/<runId>.patch`. Integration is your call (the central-integrator pattern): inspect the patch, `git apply` what you want. `fleet` `action: 'result'` shows the worktree path, patch path, and changed-file count. Fails fast if the cwd isn't a git repo.
+
+#### `/patches` staging area
+
+Instead of hunting for `.patch` files by hand, run `/patches`. It scans every completed worktree run's patch alongside its run artifact, pre-flights each one **without applying** (`git apply --check`), and stamps it:
+
+- `clean` — applies cleanly to the current tree.
+- `conflicts` — `--check` fails; the context no longer matches (inspect before applying).
+- `stale` — a modified (non-created) target file no longer exists in the working tree.
+
+Keys in the overlay: `↑↓` select, `Enter` applies the whole patch (`git apply --3way`), `e` expands the full diff with per-hunk navigation, `s` applies the focused hunk, `d` discards, `Esc` closes. Apply/discard decisions persist to `~/.pi/agent/subagent-patches/state.json`, so already-applied or discarded patches don't re-appear after restart.
+
+Cuts (honest): `s` applies a **single focused hunk** (reconstructed as a sub-patch with its file header and `git apply --3way`-ed); multi-hunk selection is not implemented. The full-diff view is capped at 2000 lines (truncated with a marker) so an enormous patch can't swamp the overlay. The pre-flight stamp is a heuristic: `stale` vs `conflicts` is decided by whether a modified target file still exists, not by a true base-commit comparison (the run record doesn't store the base commit).
 
 #### Worktree cleanup policy
 

@@ -18,6 +18,8 @@
  */
 
 import * as path from 'node:path';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -30,6 +32,7 @@ import {
   getKeybindings,
   Key,
   matchesKey,
+  SelectList,
   Text,
   truncateToWidth,
   visibleWidth,
@@ -54,6 +57,8 @@ import {
 import { Type } from 'typebox';
 
 const ARTIFACTS_ROOT = path.join(getAgentDir(), 'subagent-runs');
+const PATCHES_STATE_DIR = path.join(getAgentDir(), 'subagent-patches');
+const PATCHES_STATE_FILE = path.join(PATCHES_STATE_DIR, 'state.json');
 const STATUS_KEY = 'subagents';
 /** Toggle the fleet radar overlay. Rebind via ~/.pi/agent/keybindings.json. */
 const RADAR_SHORTCUT = 'alt+ctrl+f';
@@ -568,6 +573,548 @@ class FleetOverlay implements Component, Focusable {
           ? ` ${this.scrollTop + 1}–${Math.min(all.length, this.scrollTop + viewport)}/${all.length} •`
           : '';
       pushBoxLine(this.theme.fg('dim', `${scrollInfo} ↑↓ scroll • PgUp/PgDn page • c cancel • Esc back`));
+    }
+
+    lines.push(this.border(`╰${'─'.repeat(innerWidth)}╯`));
+    this.cachedWidth = width;
+    this.cachedLines = lines;
+    return lines;
+  }
+
+  invalidate(): void {
+    this.cachedWidth = undefined;
+    this.cachedLines = undefined;
+  }
+}
+
+// ── /patches staging area ─────────────────────────────────────────────────
+//
+// Worktree subagents hand back .patch files beside their run artifacts. This
+// is the central integration surface: a keyboard-driven overlay over every
+// pending patch with diffstat, a clean/conflicts/stale pre-flight (checked
+// WITHOUT applying, via `git apply --check`), apply / apply-selected-hunk /
+// discard, and an expandable full-diff view. Apply/discard decisions persist
+// to ~/.pi/agent/subagent-patches/state.json so /patches survives restart.
+
+interface PatchFileStat {
+  path: string;
+  added: number;
+  removed: number;
+  created: boolean;
+  header: string[];
+}
+interface PatchHunk {
+  fileIndex: number;
+  header: string;
+  body: string[];
+}
+interface ParsedPatch {
+  files: PatchFileStat[];
+  hunks: PatchHunk[];
+  totalAdded: number;
+  totalRemoved: number;
+}
+interface PatchState {
+  version: 1;
+  decisions: Record<string, { decision: 'applied' | 'discarded'; at: number }>;
+}
+interface PatchEntry {
+  runId: string;
+  patchPath: string;
+  parsed: ParsedPatch;
+  stamp: 'clean' | 'conflicts' | 'stale';
+  decision: 'applied' | 'discarded' | undefined;
+  promptPreview: string;
+  agent?: string | undefined;
+  changedFiles: number;
+  startedAt: number;
+}
+
+const PATCH_DIFF_CAP = 2000;
+
+function parseUnifiedDiff(text: string): ParsedPatch {
+  const lines = text.split('\n');
+  const files: PatchFileStat[] = [];
+  const hunks: PatchHunk[] = [];
+  let totalAdded = 0;
+  let totalRemoved = 0;
+  let fileIndex = -1;
+  let header: string[] | null = null;
+  let hunk: PatchHunk | null = null;
+  const flushHunk = () => {
+    if (hunk) {
+      hunks.push(hunk);
+      hunk = null;
+    }
+  };
+  for (const line of lines) {
+    if (line.startsWith('diff --git ')) {
+      flushHunk();
+      fileIndex = files.length;
+      header = [line];
+      files.push({ path: '', added: 0, removed: 0, created: false, header: [] });
+      continue;
+    }
+    if (header) {
+      if (line.startsWith('--- ')) {
+        header.push(line);
+        if (line.slice(4).trim() === '/dev/null') files[fileIndex]!.created = true;
+        continue;
+      }
+      if (line.startsWith('+++ ')) {
+        header.push(line);
+        const dst = line.slice(4).trim().replace(/^b\//, '');
+        if (dst !== '/dev/null') files[fileIndex]!.path = dst;
+        continue;
+      }
+      if (line.startsWith('@@')) {
+        files[fileIndex]!.header = header;
+        header = null;
+        flushHunk();
+        hunk = { fileIndex, header: line, body: [] };
+        continue;
+      }
+      header.push(line);
+      continue;
+    }
+    if (hunk) {
+      if (line.startsWith('@@')) {
+        flushHunk();
+        hunk = { fileIndex, header: line, body: [] };
+        continue;
+      }
+      if (line.startsWith('+') && !line.startsWith('+++')) {
+        files[fileIndex]!.added++;
+        totalAdded++;
+      } else if (line.startsWith('-') && !line.startsWith('---')) {
+        files[fileIndex]!.removed++;
+        totalRemoved++;
+      }
+      hunk.body.push(line);
+    }
+  }
+  flushHunk();
+  if (header && fileIndex >= 0) files[fileIndex]!.header = header;
+  return { files, hunks, totalAdded, totalRemoved };
+}
+
+function loadPatchState(): PatchState {
+  try {
+    const j = JSON.parse(fs.readFileSync(PATCHES_STATE_FILE, 'utf8')) as Partial<PatchState>;
+    if (j && j.decisions) return { version: 1, decisions: j.decisions };
+  } catch {
+    // missing/corrupt state — start fresh
+  }
+  return { version: 1, decisions: {} };
+}
+
+function savePatchState(state: PatchState): void {
+  try {
+    fs.mkdirSync(PATCHES_STATE_DIR, { recursive: true });
+    const tmp = `${PATCHES_STATE_FILE}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
+    fs.renameSync(tmp, PATCHES_STATE_FILE);
+  } catch {
+    // best-effort persistence; a lost decision just means the patch re-appears
+  }
+}
+
+/** Pre-flight WITHOUT applying: `git apply --check`. Stale = a modified (non-created) target no longer exists in the working tree. */
+async function stampPatch(
+  pi: ExtensionAPI,
+  cwd: string,
+  parsed: ParsedPatch,
+  patchPath: string,
+): Promise<'clean' | 'conflicts' | 'stale'> {
+  try {
+    const check = await pi.exec('git', ['apply', '--check', patchPath], { cwd, timeout: 5000 });
+    if (check.code === 0) return 'clean';
+  } catch {
+    // git unavailable / error — treat as conflicts so the user inspects manually
+    return 'conflicts';
+  }
+  for (const f of parsed.files) {
+    if (f.created) continue;
+    if (!fs.existsSync(path.resolve(cwd, f.path))) return 'stale';
+  }
+  return 'conflicts';
+}
+
+async function collectPatches(pi: ExtensionAPI, runtime: SubagentRuntime, cwd: string): Promise<PatchEntry[]> {
+  const state = loadPatchState();
+  const artifacts = new Map<string, RunArtifact>();
+  for (const a of readRunArtifacts(ARTIFACTS_ROOT)) artifacts.set(a.runId, a);
+  const entries: PatchEntry[] = [];
+  let namespaces: fs.Dirent[];
+  try {
+    namespaces = fs.readdirSync(ARTIFACTS_ROOT, { withFileTypes: true });
+  } catch {
+    return entries;
+  }
+  for (const ns of namespaces) {
+    if (!ns.isDirectory()) continue;
+    const dir = path.join(ARTIFACTS_ROOT, ns.name);
+    let files: fs.Dirent[];
+    try {
+      files = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const f of files) {
+      if (!f.isFile() || !f.name.endsWith('.patch')) continue;
+      const runId = f.name.slice(0, -'.patch'.length);
+      const patchPath = path.join(dir, f.name);
+      let diff: string;
+      try {
+        diff = fs.readFileSync(patchPath, 'utf8');
+      } catch {
+        continue;
+      }
+      const parsed = parseUnifiedDiff(diff);
+      const run = artifacts.get(runId);
+      const stamp = await stampPatch(pi, cwd, parsed, patchPath);
+      entries.push({
+        runId,
+        patchPath,
+        parsed,
+        stamp,
+        decision: state.decisions[patchPath]?.decision,
+        promptPreview: run?.promptPreview ?? '',
+        agent: run?.agent,
+        changedFiles: run?.worktree?.changedFiles ?? parsed.files.length,
+        startedAt: run?.startedAt ?? 0,
+      });
+    }
+  }
+  return entries.sort((a, b) => b.startedAt - a.startedAt);
+}
+
+async function applyWholePatch(
+  pi: ExtensionAPI,
+  cwd: string,
+  patchPath: string,
+): Promise<{ ok: boolean; message: string }> {
+  try {
+    const res = await pi.exec('git', ['apply', '--3way', patchPath], { cwd, timeout: 30000 });
+    if (res.code === 0) return { ok: true, message: '' };
+    return { ok: false, message: (res.stderr || res.stdout || `git apply exited ${res.code}`).trim() };
+  } catch (err) {
+    return { ok: false, message: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function applySingleHunk(
+  pi: ExtensionAPI,
+  cwd: string,
+  parsed: ParsedPatch,
+  hunk: PatchHunk,
+): Promise<{ ok: boolean; message: string }> {
+  const file = parsed.files[hunk.fileIndex];
+  if (!file) return { ok: false, message: 'hunk has no owning file' };
+  const sub = [...file.header, hunk.header, ...hunk.body].join('\n') + '\n';
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-patch-'));
+  const tmp = path.join(dir, 'hunk.patch');
+  try {
+    fs.writeFileSync(tmp, sub);
+    const res = await pi.exec('git', ['apply', '--3way', tmp], { cwd, timeout: 30000 });
+    if (res.code === 0) return { ok: true, message: '' };
+    return { ok: false, message: (res.stderr || res.stdout || `git apply exited ${res.code}`).trim() };
+  } catch (err) {
+    return { ok: false, message: err instanceof Error ? err.message : String(err) };
+  } finally {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // best-effort temp cleanup
+    }
+  }
+}
+
+function stampIcon(stamp: PatchEntry['stamp'], theme: Theme): string {
+  switch (stamp) {
+    case 'clean':
+      return theme.fg('success', '✓');
+    case 'conflicts':
+      return theme.fg('warning', '!');
+    case 'stale':
+      return theme.fg('dim', '⊘');
+  }
+}
+
+function diffstatLine(parsed: ParsedPatch, theme: Theme): string {
+  const plus = theme.fg('success', `+${parsed.totalAdded}`);
+  const minus = theme.fg('error', `-${parsed.totalRemoved}`);
+  const files = `${parsed.files.length} file${parsed.files.length === 1 ? '' : 's'}`;
+  return `${plus} ${minus} ${theme.fg('dim', files)}`;
+}
+
+class PatchesOverlay implements Component, Focusable {
+  focused = false;
+
+  private mode: 'list' | 'diff' = 'list';
+  private list: SelectList;
+  private diff: PatchEntry | null = null;
+  private diffLines: string[] = [];
+  private hunkStarts: number[] = [];
+  private focusedHunk = 0;
+  private scrollTop = 0;
+  private viewport = 10;
+  private contentTotal = 0;
+  private status: string | null = null;
+  private busy = false;
+  private cachedWidth: number | undefined;
+  private cachedLines: string[] | undefined;
+
+  constructor(
+    private patches: PatchEntry[],
+    private state: PatchState,
+    private readonly theme: Theme,
+    private readonly tui: TUI,
+    private readonly pi: ExtensionAPI,
+    private readonly cwd: string,
+    private readonly notify: (message: string, type?: 'info' | 'warning' | 'error') => void,
+    private readonly close: () => void,
+  ) {
+    const items: SelectItem[] = patches.map((p) => ({
+      value: p.patchPath,
+      label: `${stampIcon(p.stamp, theme)} ${p.runId.slice(0, 8)}${p.agent ? ` ${theme.fg('dim', p.agent)}` : ''} ${diffstatLine(p.parsed, theme)}`,
+      description: `${p.stamp} · ${p.changedFiles} changed · ${relativeTime(p.startedAt)} · ${short(sanitizeTerminalLabel(p.promptPreview), 48)}`,
+    }));
+    this.list = new SelectList(items, Math.min(Math.max(items.length, 1), 12), getSelectListTheme());
+    this.list.onSelect = (item) => {
+      const entry = this.patches.find((p) => p.patchPath === item.value);
+      if (entry) this.openDiff(entry);
+    };
+    this.list.onCancel = () => this.close();
+  }
+
+  private selected(): PatchEntry | null {
+    const item = this.list.getSelectedItem();
+    if (!item) return null;
+    return this.patches.find((p) => p.patchPath === item.value) ?? null;
+  }
+
+  private openDiff(entry: PatchEntry): void {
+    this.diff = entry;
+    this.mode = 'diff';
+    this.buildDiffLines(entry);
+    this.focusedHunk = 0;
+    this.scrollTop = 0;
+    this.invalidate();
+    this.tui.requestRender();
+  }
+
+  private buildDiffLines(entry: PatchEntry): void {
+    const theme = this.theme;
+    const lines: string[] = [];
+    this.hunkStarts = [];
+    let lastFile = -1;
+    for (const h of entry.parsed.hunks) {
+      if (h.fileIndex !== lastFile) {
+        const file = entry.parsed.files[h.fileIndex];
+        if (file) for (const h2 of file.header) lines.push(theme.fg('dim', h2));
+        lastFile = h.fileIndex;
+      }
+      this.hunkStarts.push(lines.length);
+      lines.push(theme.fg('accent', h.header));
+      for (const raw of h.body) {
+        if (raw.startsWith('+') && !raw.startsWith('+++')) lines.push(theme.fg('toolDiffAdded', raw));
+        else if (raw.startsWith('-') && !raw.startsWith('---')) lines.push(theme.fg('toolDiffRemoved', raw));
+        else if (raw.startsWith('\\')) lines.push(theme.fg('dim', raw));
+        else lines.push(raw);
+      }
+    }
+    if (lines.length > PATCH_DIFF_CAP) {
+      this.diffLines = lines.slice(0, PATCH_DIFF_CAP);
+      this.diffLines.push(theme.fg('dim', `… ${lines.length - PATCH_DIFF_CAP} more lines (truncated)`));
+    } else {
+      this.diffLines = lines;
+    }
+  }
+
+  private setDecision(entry: PatchEntry, decision: 'applied' | 'discarded'): void {
+    this.state.decisions[entry.patchPath] = { decision, at: Date.now() };
+    savePatchState(this.state);
+    this.patches = this.patches.filter((p) => p.patchPath !== entry.patchPath);
+    if (this.diff?.patchPath === entry.patchPath) this.diff = null;
+  }
+
+  private async applyWhole(entry: PatchEntry): Promise<void> {
+    this.busy = true;
+    this.status = `applying ${entry.runId.slice(0, 8)}…`;
+    this.tui.requestRender();
+    const res = await applyWholePatch(this.pi, this.cwd, entry.patchPath);
+    this.busy = false;
+    if (res.ok) {
+      this.setDecision(entry, 'applied');
+      this.status = `applied ${entry.runId.slice(0, 8)}`;
+      this.notify(`Applied patch ${entry.runId.slice(0, 8)}`, 'info');
+      this.mode = 'list';
+    } else {
+      this.status = `apply failed: ${short(res.message, 80)}`;
+      this.notify(`Apply failed: ${res.message}`, 'error');
+    }
+    this.rebuildList();
+    this.invalidate();
+    this.tui.requestRender();
+  }
+
+  private async applyHunk(entry: PatchEntry): Promise<void> {
+    const hunk = entry.parsed.hunks[this.focusedHunk];
+    if (!hunk) {
+      this.notify('No hunk focused (use n/p to move).', 'warning');
+      return;
+    }
+    this.busy = true;
+    this.status = `applying hunk ${this.focusedHunk + 1}…`;
+    this.tui.requestRender();
+    const res = await applySingleHunk(this.pi, this.cwd, entry.parsed, hunk);
+    this.busy = false;
+    if (res.ok) {
+      this.status = `applied hunk ${this.focusedHunk + 1} of ${entry.parsed.hunks.length}`;
+      this.notify(`Applied hunk ${this.focusedHunk + 1} (other hunks remain pending).`, 'info');
+    } else {
+      this.status = `hunk failed: ${short(res.message, 80)}`;
+      this.notify(`Hunk apply failed: ${res.message}`, 'error');
+    }
+    this.invalidate();
+    this.tui.requestRender();
+  }
+
+  private rebuildList(): void {
+    const items: SelectItem[] = this.patches.map((p) => ({
+      value: p.patchPath,
+      label: `${stampIcon(p.stamp, this.theme)} ${p.runId.slice(0, 8)}${p.agent ? ` ${this.theme.fg('dim', p.agent)}` : ''} ${diffstatLine(p.parsed, this.theme)}`,
+      description: `${p.stamp} · ${p.changedFiles} changed · ${relativeTime(p.startedAt)} · ${short(sanitizeTerminalLabel(p.promptPreview), 48)}`,
+    }));
+    this.list = new SelectList(items, Math.min(Math.max(items.length, 1), 12), getSelectListTheme());
+    this.list.onSelect = (item) => {
+      const entry = this.patches.find((p) => p.patchPath === item.value);
+      if (entry) this.openDiff(entry);
+    };
+    this.list.onCancel = () => this.close();
+  }
+
+  handleInput(data: string): void {
+    if (this.busy) return;
+    if (this.mode === 'diff' && this.diff) {
+      const entry = this.diff;
+      if (matchesKey(data, Key.escape) || matchesKey(data, 'e')) {
+        this.mode = 'list';
+        this.diff = null;
+      } else if (matchesKey(data, Key.up)) {
+        this.scrollTop = Math.max(0, this.scrollTop - 1);
+      } else if (matchesKey(data, Key.down)) {
+        this.scrollTop = Math.min(Math.max(0, this.contentTotal - this.viewport), this.scrollTop + 1);
+      } else if (matchesKey(data, Key.pageUp)) {
+        this.scrollTop = Math.max(0, this.scrollTop - this.viewport);
+      } else if (matchesKey(data, Key.pageDown)) {
+        this.scrollTop = Math.min(Math.max(0, this.contentTotal - this.viewport), this.scrollTop + this.viewport);
+      } else if (matchesKey(data, 'n')) {
+        this.focusedHunk = Math.min(entry.parsed.hunks.length - 1, this.focusedHunk + 1);
+        this.scrollToHunk();
+      } else if (matchesKey(data, 'p')) {
+        this.focusedHunk = Math.max(0, this.focusedHunk - 1);
+        this.scrollToHunk();
+      } else if (matchesKey(data, 's')) {
+        void this.applyHunk(entry);
+      } else if (matchesKey(data, Key.enter)) {
+        void this.applyWhole(entry);
+      } else {
+        return;
+      }
+      this.invalidate();
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, 'e')) {
+      const entry = this.selected();
+      if (entry) this.openDiff(entry);
+      return;
+    }
+    if (matchesKey(data, 'd')) {
+      const entry = this.selected();
+      if (entry) {
+        this.setDecision(entry, 'discarded');
+        this.notify(`Discarded patch ${entry.runId.slice(0, 8)}`, 'info');
+        this.rebuildList();
+        this.invalidate();
+        this.tui.requestRender();
+      }
+      return;
+    }
+    if (matchesKey(data, Key.enter)) {
+      const entry = this.selected();
+      if (entry) void this.applyWhole(entry);
+      return;
+    }
+    this.list.handleInput(data);
+    this.list.invalidate();
+    this.invalidate();
+    this.tui.requestRender();
+  }
+
+  private scrollToHunk(): void {
+    const start = this.hunkStarts[this.focusedHunk] ?? 0;
+    this.scrollTop = Math.min(start, Math.max(0, this.contentTotal - this.viewport));
+  }
+
+  private border(text: string): string {
+    return this.theme.fg('border', text);
+  }
+
+  render(width: number): string[] {
+    if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
+    const boxWidth = Math.min(Math.max(width, 20), 120);
+    const innerWidth = Math.max(1, boxWidth - 2);
+    const contentWidth = Math.max(1, innerWidth - 2);
+    const lines: string[] = [];
+    const pushBoxLine = (content = '') => {
+      const line = truncateToWidth(content, innerWidth, '…');
+      const padding = Math.max(0, innerWidth - visibleWidth(line));
+      lines.push(this.border('│') + line + ' '.repeat(padding) + this.border('│'));
+    };
+
+    lines.push(this.border(`╭${'─'.repeat(innerWidth)}╮`));
+    const applied = Object.values(this.state.decisions).filter((d) => d.decision === 'applied').length;
+    const discarded = Object.values(this.state.decisions).filter((d) => d.decision === 'discarded').length;
+    const title = ` ${this.theme.fg('accent', this.theme.bold('Patches'))}${this.theme.fg('dim', ` — ${this.patches.length} pending`)}${this.theme.fg('dim', ` · ${applied} applied · ${discarded} discarded`)}`;
+    pushBoxLine(title);
+
+    if (this.mode === 'list') {
+      if (this.patches.length === 0) {
+        pushBoxLine(` ${this.theme.fg('dim', 'No pending patches.')}`);
+      } else {
+        for (const line of this.list.render(contentWidth)) pushBoxLine(` ${line}`);
+      }
+      pushBoxLine();
+      if (this.status) pushBoxLine(` ${this.theme.fg('muted', this.status)}`);
+      pushBoxLine(this.theme.fg('dim', ' ↑↓ select • Enter apply • e expand • d discard • Esc close'));
+    } else if (this.diff) {
+      const all = this.diffLines;
+      const maxViewport = Math.max(4, Math.floor(this.tui.terminal.rows * 0.7) - 6);
+      const viewport = Math.min(maxViewport, all.length);
+      this.contentTotal = all.length;
+      this.viewport = viewport;
+      this.scrollTop = Math.min(this.scrollTop, Math.max(0, all.length - viewport));
+      const slice = all.slice(this.scrollTop, this.scrollTop + viewport);
+      for (let i = 0; i < slice.length; i++) {
+        const abs = this.scrollTop + i;
+        const hunkIdx = this.hunkStarts.indexOf(abs);
+        const marker = hunkIdx === this.focusedHunk ? this.theme.fg('accent', '▶ ') : '  ';
+        pushBoxLine(` ${marker}${slice[i]}`);
+      }
+      for (let i = slice.length; i < viewport; i++) pushBoxLine();
+      const scrollInfo =
+        all.length > viewport
+          ? ` ${this.scrollTop + 1}–${Math.min(all.length, this.scrollTop + viewport)}/${all.length} •`
+          : '';
+      pushBoxLine(
+        this.theme.fg(
+          'dim',
+          `${scrollInfo} hunk ${this.focusedHunk + 1}/${this.diff.parsed.hunks.length} • n/p hunk • s apply hunk • Enter apply all • e/Esc back`,
+        ),
+      );
     }
 
     lines.push(this.border(`╰${'─'.repeat(innerWidth)}╯`));
@@ -1113,6 +1660,50 @@ export default function subagents(pi: ExtensionAPI) {
         return;
       }
       await openFleetOverlay(pi, ctx, runtime, undefined);
+    },
+  });
+
+  pi.registerCommand('patches', {
+    description: 'Staging area for worktree-subagent patches: pre-flight, apply, apply a hunk, or discard',
+    handler: async (_args, ctx) => {
+      const all = await collectPatches(pi, runtime, ctx.cwd);
+      const pending = all.filter((p) => !p.decision);
+      if (!ctx.hasUI) {
+        postText(
+          pi,
+          ctx,
+          pending.length === 0
+            ? 'No pending patches.'
+            : pending
+                .map(
+                  (p) =>
+                    `- ${p.runId.slice(0, 8)} [${p.stamp}] +${p.parsed.totalAdded} -${p.parsed.totalRemoved} · ${short(p.promptPreview, 60)}`,
+                )
+                .join('\n'),
+        );
+        return;
+      }
+      if (pending.length === 0) {
+        ctx.ui.notify('No pending patches.', 'info');
+        return;
+      }
+      const state = loadPatchState();
+      await ctx.ui.custom<void>(
+        (tui, theme, _kb, done) => {
+          widgetTheme = theme;
+          return new PatchesOverlay(
+            pending,
+            state,
+            theme,
+            tui,
+            pi,
+            ctx.cwd,
+            (m, t) => ctx.ui.notify(m, t),
+            () => done(undefined),
+          );
+        },
+        { overlay: true, overlayOptions: { width: '80%', maxHeight: '75%', anchor: 'center' } },
+      );
     },
   });
 }
