@@ -173,6 +173,14 @@ function fail(runId: string, kind: SpawnFailureKind, error: string, startedAt: n
   };
 }
 
+/** Mark a run record failed from an early (pre-spawn) failure result. */
+function markFailed(record: RunRecord, result: SpawnFailure): SpawnFailure {
+  record.status = 'failed';
+  record.endedAt = Date.now();
+  record.error = result.error;
+  return result;
+}
+
 /** Extract the text of the last assistant message that produced any. */
 function lastAssistantText(messages: readonly any[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -395,32 +403,30 @@ export function createSubagentRuntime(options: {
 
     // Ecosystem recursion guard — honored, not namespaced. See header.
     if (process.env.PI_SUBAGENT_DEPTH || process.env.PI_SUBAGENT_CHILD) {
-      const result = fail(
-        runId,
-        'crashed',
-        'Refusing to spawn: PI_SUBAGENT_DEPTH/PI_SUBAGENT_CHILD present (nested orchestration is an ecosystem-level guard).',
-        startedAt,
+      return markFailed(
+        record,
+        fail(
+          runId,
+          'crashed',
+          'Refusing to spawn: PI_SUBAGENT_DEPTH/PI_SUBAGENT_CHILD present (nested orchestration is an ecosystem-level guard).',
+          startedAt,
+        ),
       );
-      record.status = 'failed';
-      record.endedAt = Date.now();
-      record.error = result.error;
-      return result;
     }
 
     if (
       opts.thinkingLevel !== undefined &&
       !THINKING_LEVELS.includes(opts.thinkingLevel as (typeof THINKING_LEVELS)[number])
     ) {
-      const result = fail(
-        runId,
-        'crashed',
-        `Invalid thinkingLevel ${JSON.stringify(opts.thinkingLevel)}; expected one of ${THINKING_LEVELS.join(', ')}.`,
-        startedAt,
+      return markFailed(
+        record,
+        fail(
+          runId,
+          'crashed',
+          `Invalid thinkingLevel ${JSON.stringify(opts.thinkingLevel)}; expected one of ${THINKING_LEVELS.join(', ')}.`,
+          startedAt,
+        ),
       );
-      record.status = 'failed';
-      record.endedAt = Date.now();
-      record.error = result.error;
-      return result;
     }
 
     await acquire();
@@ -482,11 +488,7 @@ export function createSubagentRuntime(options: {
     if (opts.model !== undefined) {
       const resolved = resolveCliModel({ cliModel: opts.model, modelRuntime: runtime });
       if (resolved.error || !resolved.model) {
-        const result = fail(runId, 'crashed', resolved.error ?? `Unknown model: ${opts.model}`, startedAt);
-        record.status = 'failed';
-        record.endedAt = Date.now();
-        record.error = result.error;
-        return result;
+        return markFailed(record, fail(runId, 'crashed', resolved.error ?? `Unknown model: ${opts.model}`, startedAt));
       }
       model = resolved.model;
       thinkingLevel ??= resolved.thinkingLevel;

@@ -200,6 +200,46 @@ export default function intercom(pi: ExtensionAPI) {
     };
   }
 
+  /** Block until a reply/cancel letter for askId arrives, the timeout hits, or the tool aborts. */
+  function waitForReply(askId: string, timeoutMs: number, signal: AbortSignal | undefined): Promise<AskOutcome> {
+    return new Promise((resolve) => {
+      const settle = (outcome: AskOutcome) => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        askWaiters.delete(askId);
+        resolve(outcome);
+      };
+      const timer = setTimeout(
+        () => settle({ replied: false, reason: `no reply within ${Math.round(timeoutMs / 1000)}s` }),
+        timeoutMs,
+      );
+      const onAbort = () => settle({ replied: false, reason: 'aborted' });
+      askWaiters.set(askId, settle);
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  /** Resolve which pending ask a reply targets: by id/prefix, by asker, or the only one. */
+  function resolvePendingAsk(replyTo: string | undefined, to: string | undefined): { ask?: Letter; error?: string } {
+    const asks = pendingAsks(root, self!.addr);
+    if (replyTo) {
+      const found = asks.find((a) => a.id === replyTo || a.id.startsWith(replyTo));
+      return found ? { ask: found } : { error: `No pending ask matches '${replyTo}'.` };
+    }
+    if (to) {
+      const { record, error } = resolveTarget(to);
+      if (!record) return { error: error! };
+      const latest = asks.filter((a) => a.from.addr === record.addr).at(-1);
+      return latest ? { ask: latest } : { error: `No pending ask from "${record.name}".` };
+    }
+    if (asks.length === 0) return { error: 'No pending asks to reply to.' };
+    if (asks.length > 1) {
+      return { error: `Multiple pending asks; pass replyTo:\n${asks.map((a) => formatPendingAsk(a)).join('\n')}` };
+    }
+    return { ask: asks[0]! };
+  }
+
   pi.on('session_start', (_event, ctx: ExtensionContext) => {
     try {
       ensureRoot(root);
@@ -320,25 +360,11 @@ export default function intercom(pi: ExtensionAPI) {
             body: params.message,
             ts: sent.letter.ts,
           });
-          const timeoutMs = Math.max(1000, params.timeoutMs ?? 120_000);
-          const outcome = await new Promise<AskOutcome>((resolve) => {
-            const settle = (o: AskOutcome) => {
-              clearTimeout(timer);
-              signal?.removeEventListener('abort', onAbort);
-              askWaiters.delete(sent.letter!.id);
-              resolve(o);
-            };
-            const timer = setTimeout(
-              () => settle({ replied: false, reason: `no reply within ${Math.round(timeoutMs / 1000)}s` }),
-              timeoutMs,
-            );
-            const onAbort = () => settle({ replied: false, reason: 'aborted' });
-            askWaiters.set(sent.letter!.id, settle);
-            if (signal) {
-              if (signal.aborted) onAbort();
-              else signal.addEventListener('abort', onAbort, { once: true });
-            }
-          });
+          const outcome = await waitForReply(
+            sent.letter.id,
+            Math.max(1000, params.timeoutMs ?? 120_000),
+            signal ?? undefined,
+          );
           clearAsk(root, self.addr, sent.letter.id); // out- entry
           if (!outcome.replied)
             return toolResult(`Ask ${sent.letter.id.slice(0, 8)} to "${record.name}": ${outcome.reason}.`);
@@ -347,30 +373,8 @@ export default function intercom(pi: ExtensionAPI) {
         case 'reply': {
           if (!params.message) return toolResult("reply requires 'message'.");
           // Resolve the ask: by replyTo id, or the latest pending ask from `to`.
-          let ask: Letter | undefined;
-          const replyTo = params.replyTo;
-          if (replyTo) {
-            const found = pendingAsks(root, self.addr).find((a) => a.id === replyTo || a.id.startsWith(replyTo));
-            if (!found) return toolResult(`No pending ask matches '${replyTo}'.`);
-            ask = found;
-          } else if (params.to) {
-            const { record, error } = resolveTarget(params.to);
-            if (!record) return toolResult(error!);
-            const fromThem = pendingAsks(root, self.addr).filter((a) => a.from.addr === record.addr);
-            const latest = fromThem[fromThem.length - 1];
-            if (!latest) return toolResult(`No pending ask from "${record.name}".`);
-            ask = latest;
-          } else {
-            const asks = pendingAsks(root, self.addr);
-            if (asks.length === 0) return toolResult('No pending asks to reply to.');
-            if (asks.length > 1) {
-              return toolResult(
-                `Multiple pending asks; pass replyTo:\n${asks.map((a) => formatPendingAsk(a)).join('\n')}`,
-              );
-            }
-            ask = asks[0];
-          }
-          if (!ask) return toolResult('No pending ask to reply to.');
+          const { ask, error: resolveError } = resolvePendingAsk(params.replyTo, params.to);
+          if (!ask) return toolResult(resolveError!);
           const asker = listRecords(root).find((r) => r.addr === ask.from.addr) ?? {
             addr: ask.from.addr,
             name: ask.from.name,
