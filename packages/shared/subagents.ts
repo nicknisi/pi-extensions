@@ -764,6 +764,9 @@ export function createSubagentRuntime(options: {
         }
       }
       if (transcript.length > MAX_TRANSCRIPT_ENTRIES) transcript.splice(0, transcript.length - MAX_TRANSCRIPT_ENTRIES);
+      // Mirror onto the record so /fleet can show live activity mid-run
+      // (transcript/usage otherwise only exist after settle).
+      record.transcript = [...transcript];
     });
 
     let promptError: unknown;

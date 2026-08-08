@@ -341,12 +341,14 @@ class FleetOverlay implements Component, Focusable {
   private contentTotal = 0;
   private cachedWidth: number | undefined;
   private cachedLines: string[] | undefined;
+  private readonly tick: ReturnType<typeof setInterval>;
 
   constructor(
     private readonly runs: RunArtifact[],
     initial: RunArtifact | undefined,
     private readonly tui: TUI,
     private readonly theme: Theme,
+    private readonly refresh: () => RunArtifact[],
     private readonly close: () => void,
   ) {
     const items: SelectItem[] = runs.map((run) => ({
@@ -359,8 +361,25 @@ class FleetOverlay implements Component, Focusable {
       const run = this.runs.find((r) => r.runId === item.value);
       if (run) this.openDetail(run);
     };
-    this.list.onCancel = () => this.close();
+    this.list.onCancel = () => this.dismiss();
+    // Live runs mutate underneath the overlay — re-collect once a second so
+    // an open detail view tracks current activity instead of a frozen snapshot.
+    this.tick = setInterval(() => {
+      const fresh = this.refresh();
+      this.runs.length = 0;
+      this.runs.push(...fresh);
+      if (this.mode === 'detail' && this.detail) {
+        this.detail = fresh.find((r) => r.runId === this.detail!.runId) ?? this.detail;
+      }
+      this.invalidate();
+      this.tui.requestRender();
+    }, 1000);
     if (initial) this.openDetail(initial);
+  }
+
+  private dismiss(): void {
+    clearInterval(this.tick);
+    this.close();
   }
 
   private openDetail(run: RunArtifact): void {
@@ -412,6 +431,9 @@ class FleetOverlay implements Component, Focusable {
       relativeTime(run.startedAt),
     ];
     if (run.usage) meta.push(`${(run.usage.totalTokens / 1000).toFixed(1)}k tok`);
+    const turns = run.transcript?.filter((e) => e.kind === 'turn').length ?? 0;
+    const tools = run.transcript?.filter((e) => e.kind === 'tool').length ?? 0;
+    if (turns + tools > 0) meta.push(`${turns} turn${turns === 1 ? '' : 's'} · ${tools} tool${tools === 1 ? '' : 's'}`);
     lines.push(theme.fg('muted', meta.join(' · ')));
     if (run.model) lines.push(theme.fg('muted', `model: ${run.model}`));
     lines.push(theme.fg('dim', short(sanitizeTerminalLabel(run.promptPreview ?? ''), Math.max(20, contentWidth))));
@@ -427,15 +449,18 @@ class FleetOverlay implements Component, Focusable {
         }
         for (const wrapped of wrapTextWithAnsi(clean, contentWidth)) lines.push(wrapped);
       }
+    } else if (run.status === 'running' || run.status === 'queued') {
+      lines.push(theme.fg('dim', '(running — final answer not ready yet)'));
     } else {
-      lines.push(
-        theme.fg(
-          'dim',
-          run.status === 'running' || run.status === 'queued'
-            ? '(still running — no output yet)'
-            : '(no output recorded)',
-        ),
-      );
+      lines.push(theme.fg('dim', '(no output recorded)'));
+    }
+    if (run.transcript && run.transcript.length > 0) {
+      lines.push(theme.fg('borderMuted', '─'.repeat(Math.max(1, contentWidth))));
+      lines.push(theme.fg('muted', run.endedAt ? 'activity' : 'activity (live)'));
+      for (const entry of run.transcript.slice(-10)) {
+        const text = entry.kind === 'turn' ? theme.fg('accent', entry.label) : theme.fg('dim', `→ ${entry.label}`);
+        lines.push(truncateToWidth(text, contentWidth, '…'));
+      }
     }
     return lines;
   }
@@ -883,7 +908,14 @@ export default function subagents(pi: ExtensionAPI) {
       await ctx.ui.custom<void>(
         (tui, theme, _kb, done) => {
           widgetTheme = theme;
-          return new FleetOverlay(all, initial, tui, theme, () => done(undefined));
+          return new FleetOverlay(
+            all,
+            initial,
+            tui,
+            theme,
+            () => collectFleet(runtime.listRuns() as RunArtifact[]),
+            () => done(undefined),
+          );
         },
         { overlay: true, overlayOptions: { width: '80%', maxHeight: '70%', anchor: 'center' } },
       );
