@@ -75,6 +75,20 @@ function tmpRunDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'pi-workflow-test-'));
 }
 
+/** Real git repo in a tmpdir with one committed file (file.txt = 'hello\n'). */
+function initGitRepo(): string {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-workflow-git-'));
+  execFileSync('git', ['init'], { cwd: repo });
+  fs.writeFileSync(path.join(repo, 'file.txt'), 'hello\n');
+  execFileSync('git', ['add', '.'], { cwd: repo });
+  execFileSync(
+    'git',
+    ['-c', 'user.email=test@test', '-c', 'user.name=test', '-c', 'commit.gpgsign=false', 'commit', '-m', 'init'],
+    { cwd: repo },
+  );
+  return repo;
+}
+
 async function run(
   spec: WorkflowSpec,
   fake: FakeRuntime,
@@ -383,31 +397,7 @@ describe('runWorkflow', () => {
   });
 
   it('captures a bounded git diff for sharesTree stages and hands it to dependents', async () => {
-    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-workflow-git-'));
-    execFileSync('git', ['init'], { cwd: repo });
-    execFileSync(
-      'git',
-      [
-        '-c',
-        'user.email=test@test',
-        '-c',
-        'user.name=test',
-        '-c',
-        'commit.gpgsign=false',
-        'commit',
-        '--allow-empty',
-        '-m',
-        'init',
-      ],
-      { cwd: repo },
-    );
-    fs.writeFileSync(path.join(repo, 'file.txt'), 'hello\n');
-    execFileSync('git', ['add', '.'], { cwd: repo });
-    execFileSync(
-      'git',
-      ['-c', 'user.email=test@test', '-c', 'user.name=test', '-c', 'commit.gpgsign=false', 'commit', '-m', 'add file'],
-      { cwd: repo },
-    );
+    const repo = initGitRepo();
     fs.writeFileSync(path.join(repo, 'file.txt'), 'hello\nworld\n');
 
     let dependentSawDiff = '';
@@ -434,6 +424,67 @@ describe('runWorkflow', () => {
     expect(dependentSawDiff).toContain('+world');
   });
 
+  it('includes untracked files in the sharesTree handoff', async () => {
+    const repo = initGitRepo();
+    let dependentSawDiff = '';
+    const fake = makeFake((opts) => {
+      if (opts.prompt === 'edit') {
+        // The stage creates a brand-new file that `git diff HEAD` would miss.
+        fs.writeFileSync(path.join(repo, 'new-file.txt'), 'brand new\n');
+      }
+      return ok('x');
+    });
+    const result = await runWorkflow(
+      {
+        name: 'tree-untracked',
+        stages: [
+          { id: 'edit', needs: [], prompt: 'edit', sharesTree: true },
+          {
+            id: 'review',
+            needs: ['edit'],
+            prompt: (ctx) => {
+              dependentSawDiff = ctx.treeDiffs['edit'] ?? '';
+              return 'review';
+            },
+          },
+        ],
+      },
+      fake,
+      { cwd: repo, runDir: tmpRunDir() },
+    );
+    expect(result.ok).toBe(true);
+    expect(dependentSawDiff).toContain('Untracked files');
+    expect(dependentSawDiff).toContain('new-file.txt');
+  });
+
+  it('marks the sharesTree handoff explicitly when the diff is truncated at 64KB', async () => {
+    const repo = initGitRepo();
+    // ~128KB of added lines — comfortably over the 64KB cap.
+    fs.writeFileSync(path.join(repo, 'file.txt'), 'hello\n' + 'x'.repeat(60).concat('\n').repeat(2200));
+    let dependentSawDiff = '';
+    const fake = makeFake(() => ok('x'));
+    const result = await runWorkflow(
+      {
+        name: 'tree-truncated',
+        stages: [
+          { id: 'edit', needs: [], prompt: 'edit', sharesTree: true },
+          {
+            id: 'review',
+            needs: ['edit'],
+            prompt: (ctx) => {
+              dependentSawDiff = ctx.treeDiffs['edit'] ?? '';
+              return 'review';
+            },
+          },
+        ],
+      },
+      fake,
+      { cwd: repo, runDir: tmpRunDir() },
+    );
+    expect(result.ok).toBe(true);
+    expect(dependentSawDiff).toContain('…[diff truncated at 64KB]');
+  });
+
   it('writes control artifacts and resumes by skipping previously-ok stages', async () => {
     const runDir = tmpRunDir();
     const first = makeFake((opts) => (opts.prompt === 'fail-first' ? crash('boom') : ok('good')));
@@ -450,6 +501,8 @@ describe('runWorkflow', () => {
     );
     expect(r1.ok).toBe(false);
     expect(fs.existsSync(path.join(runDir, 'status.json'))).toBe(true);
+    const status = JSON.parse(fs.readFileSync(path.join(runDir, 'status.json'), 'utf8'));
+    expect(status.specHash).toMatch(/^[0-9a-f]{64}$/);
     const stageArtifact = JSON.parse(fs.readFileSync(path.join(runDir, 'stages', 'a.json'), 'utf8'));
     expect(stageArtifact.outcome.ok).toBe(true);
 
@@ -468,6 +521,33 @@ describe('runWorkflow', () => {
     expect(r2.ok).toBe(true);
     expect(second.calls.map((c) => c.prompt)).toEqual(['fail-first']);
     expect(r2.outcomes['a']?.ok).toBe(true);
+  });
+
+  it('rejects resumeFrom when the spec changed since the recorded run', async () => {
+    const runDir = tmpRunDir();
+    const first = makeFake(() => ok('good'));
+    const r1 = await run(
+      {
+        name: 'spec-drift',
+        stages: [{ id: 'a', needs: [], prompt: 'original prompt' }],
+      },
+      first,
+      { runDir },
+    );
+    expect(r1.ok).toBe(true);
+
+    const second = makeFake(() => ok('unused'));
+    await expect(
+      run(
+        {
+          name: 'spec-drift',
+          stages: [{ id: 'a', needs: [], prompt: 'changed prompt' }],
+        },
+        second,
+        { runDir: tmpRunDir(), resumeFrom: runDir },
+      ),
+    ).rejects.toThrow(/spec changed since the recorded run.*stale outcomes/s);
+    expect(second.calls).toHaveLength(0);
   });
 
   it('threads opts.signal into every stage spawn', async () => {

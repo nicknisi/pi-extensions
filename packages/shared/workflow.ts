@@ -27,6 +27,7 @@
  */
 
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -79,6 +80,12 @@ export interface WorkflowStage {
   needs?: string[];
   /** Declares the stage edits/reads the shared working tree. Default false. See header for exclusion semantics. */
   sharesTree?: boolean;
+  /**
+   * Run this stage's spawns in isolated git worktrees instead of the shared tree.
+   * The change set (incl. untracked files) lands as a .patch beside the run artifact;
+   * integration is the caller's decision. Mutually exclusive with sharesTree.
+   */
+  worktree?: boolean;
   /** Fan out one spawn per item: static array, or items picked from a dependency's ok outcome. */
   foreach?: unknown[] | { from: string; pick?: (outcome: StageOk) => unknown[] };
   /**
@@ -189,16 +196,65 @@ function sanitize(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, '-');
 }
 
-/** Capture the shared-tree channel: bounded `git diff HEAD` for cwd, '' when not a repo. */
+/**
+ * Capture the shared-tree channel: bounded `git diff HEAD` for cwd, '' when
+ * not a repo. `git diff HEAD` never lists untracked files, so the handoff
+ * also appends the untracked list from `git status --porcelain` — otherwise
+ * dependents are blind to newly created files. Truncation at the 64KB cap is
+ * marked explicitly ('…[diff truncated at 64KB]') so it's never silent.
+ */
 async function captureTreeDiff(cwd: string): Promise<string> {
   try {
-    const { stdout } = await execFileAsync('git', ['-C', cwd, 'diff', 'HEAD'], {
-      maxBuffer: MAX_TREE_DIFF_CHARS * 2,
+    const { stdout: diff } = await execFileAsync('git', ['-C', cwd, 'diff', 'HEAD'], {
+      // Well above the 64KB cap so oversized diffs get truncated+marked below
+      // instead of erroring out the whole capture.
+      maxBuffer: 16 * 1024 * 1024,
     });
-    return stdout.slice(0, MAX_TREE_DIFF_CHARS);
+    let untracked: string[] = [];
+    try {
+      const { stdout: status } = await execFileAsync('git', ['-C', cwd, 'status', '--porcelain']);
+      untracked = status
+        .split('\n')
+        .filter((line) => line.startsWith('??'))
+        .map((line) => line.slice(3));
+    } catch {
+      // untracked listing is best-effort
+    }
+    let out =
+      diff.length > MAX_TREE_DIFF_CHARS ? `${diff.slice(0, MAX_TREE_DIFF_CHARS)}\n…[diff truncated at 64KB]\n` : diff;
+    if (untracked.length > 0) {
+      out += `\nUntracked files (not in diff):\n${untracked.map((f) => `  ${f}`).join('\n')}\n`;
+    }
+    return out;
   } catch {
     return '';
   }
+}
+
+/**
+ * Stable sha256 of the stage definitions that affect outcomes, persisted in
+ * status.json so resumeFrom can refuse to reuse stale recorded outcomes after
+ * the spec changed. NOTE: function-valued prompts hash as '<function>' —
+ * edits to prompt closures are NOT covered by the hash.
+ */
+function computeSpecHash(stages: WorkflowStage[]): string {
+  // Keys are built in a fixed literal order, so JSON.stringify is deterministic.
+  const encoded = stages.map((s) => ({
+    id: s.id,
+    model: s.model ?? null,
+    tools: s.tools ?? null,
+    needs: s.needs ?? null,
+    retries: s.retries ?? 0,
+    maxTurns: s.maxTurns ?? null,
+    maxToolCalls: s.maxToolCalls ?? null,
+    timeoutMs: s.timeoutMs ?? null,
+    prompt: typeof s.prompt === 'string' ? s.prompt : '<function>',
+    foreach: s.foreach ? (Array.isArray(s.foreach) ? 'static' : { from: s.foreach.from }) : null,
+    hasGate: !!s.gate,
+    sharesTree: !!s.sharesTree,
+    worktree: !!s.worktree,
+  }));
+  return createHash('sha256').update(JSON.stringify(encoded)).digest('hex');
 }
 
 export async function runWorkflow(
@@ -206,6 +262,11 @@ export async function runWorkflow(
   runtime: SubagentRuntime,
   opts: RunWorkflowOptions,
 ): Promise<WorkflowResult> {
+  for (const stage of spec.stages) {
+    if (stage.sharesTree && stage.worktree) {
+      throw new Error(`Workflow stage '${stage.id}' sets both sharesTree and worktree — pick one isolation model.`);
+    }
+  }
   const startedAt = Date.now();
   const runDir =
     opts.runDir ??
@@ -214,6 +275,7 @@ export async function runWorkflow(
   const concurrency = spec.concurrency ?? DEFAULT_CONCURRENCY;
 
   const stages = spec.stages;
+  const specHash = computeSpecHash(stages);
   const stageById = new Map<string, WorkflowStage>();
   const state = new Map<string, 'pending' | 'running' | 'settled'>();
   const outcomes: Record<string, StageOutcome> = {};
@@ -250,6 +312,7 @@ export async function runWorkflow(
         JSON.stringify(
           {
             name: spec.name,
+            specHash,
             startedAt,
             updatedAt: Date.now(),
             done,
@@ -333,6 +396,7 @@ export async function runWorkflow(
       if (stage.maxTurns !== undefined) spawnOpts.maxTurns = stage.maxTurns;
       if (stage.maxToolCalls !== undefined) spawnOpts.maxToolCalls = stage.maxToolCalls;
       if (stage.timeoutMs !== undefined) spawnOpts.timeoutMs = stage.timeoutMs;
+      if (stage.worktree === true) spawnOpts.worktree = true;
       if (opts.signal !== undefined) spawnOpts.signal = opts.signal;
 
       let res: SpawnResult;
@@ -491,6 +555,21 @@ export async function runWorkflow(
 
   // Resume: preload previously-ok stages from a prior run's artifacts.
   if (opts.resumeFrom) {
+    // Refuse to reuse outcomes recorded under a different spec.
+    try {
+      const prior = JSON.parse(fs.readFileSync(path.join(opts.resumeFrom, 'status.json'), 'utf8'));
+      if (prior?.specHash !== specHash) {
+        const priorShort = String(prior?.specHash ?? 'none').slice(0, 12);
+        throw new Error(
+          `workflow spec changed since the recorded run at ${opts.resumeFrom} ` +
+            `(specHash ${priorShort} -> ${specHash.slice(0, 12)}); ` +
+            'resume would reuse stale outcomes. Start a fresh run instead.',
+        );
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('spec changed since the recorded run')) throw err;
+      // no readable status.json — nothing to compare against, run fresh
+    }
     try {
       const dir = path.join(opts.resumeFrom, 'stages');
       for (const file of fs.readdirSync(dir)) {

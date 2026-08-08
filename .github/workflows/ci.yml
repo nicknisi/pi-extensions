@@ -49,3 +49,33 @@ jobs:
       - name: Changeset Status
         run: pnpm changeset status --since=origin/main
         if: github.event_name == 'pull_request' && github.head_ref != 'changeset-release/main'
+
+  smoke:
+    name: Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          cache: 'pnpm'
+
+      - name: Install Dependencies
+        run: pnpm install
+
+      # Single pinned pi version (the repo's devDep) — no version matrix.
+      - name: Install pi
+        run: npm i -g '@earendil-works/pi-coding-agent@^0.84.0'
+
+      # The smoke script spawns real pi runs against anthropic/claude-haiku-4-5,
+      # so it needs a provider key; without the secret configured, skip loudly.
+      - name: Smoke Stack
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::notice::Skipping smoke stack: ANTHROPIC_API_KEY secret is not configured."
+            exit 0
+          fi
+          scripts/smoke-stack.sh

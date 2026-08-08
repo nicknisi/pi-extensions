@@ -36,11 +36,13 @@ import {
 import {
   createSubagentRuntime,
   readRunArtifacts,
+  sweepRunArtifactsOnce,
   sanitizeTerminalLabel,
   SearchableSelectList,
   type RunArtifact,
   type SpawnOptions,
   type SpawnResult,
+  type SubagentRuntime,
   type SpawnUsage,
 } from '@nicknisi/pi-shared';
 import { Type } from 'typebox';
@@ -70,6 +72,7 @@ interface TaskSpec {
   systemPrompt?: string | undefined;
   background?: boolean | undefined;
   allowTreeMutation?: boolean | undefined;
+  worktree?: boolean | undefined;
 }
 
 type TaskStatus = 'pending' | 'working' | 'done' | 'error' | 'background';
@@ -92,6 +95,9 @@ type DispatchDetails = {
 };
 
 function wantsTreeMutation(spec: TaskSpec): boolean {
+  // Worktree-isolated tasks never touch the caller's tree, so they need
+  // neither the allowTreeMutation declaration nor serialization.
+  if (spec.worktree) return false;
   return (spec.tools ?? []).some((tool) => TREE_MUTATING_TOOLS.has(tool));
 }
 
@@ -104,6 +110,7 @@ function toSpawnOptions(spec: TaskSpec, cwd: string): SpawnOptions {
   if (spec.agent) opts.agent = spec.agent;
   if (spec.model) opts.model = spec.model;
   if (spec.systemPrompt) opts.systemPrompt = spec.systemPrompt;
+  if (spec.worktree) opts.worktree = true;
   return opts;
 }
 
@@ -274,8 +281,9 @@ function createExpandedDispatchView(tasks: TaskProgress[], theme: Theme) {
 }
 
 // ── Live progress bridge (renderCall workaround for isPartial bug) ───────
+// Keyed by toolCallId so two concurrent dispatch calls never cross-wire.
 
-let liveDispatch: DispatchDetails | null = null;
+const liveDispatches = new Map<string, DispatchDetails>();
 
 // ── Background-runs widget ───────────────────────────────────────────────
 
@@ -487,8 +495,37 @@ class FleetOverlay implements Component, Focusable {
 
 // ── Extension ────────────────────────────────────────────────────────────
 
+/** Live runId → AbortController, so the fleet tool can cancel in-flight runs. */
+const cancellables = new Map<string, AbortController>();
+
+function spawnCancellable(
+  runtime: SubagentRuntime,
+  opts: SpawnOptions,
+  toolSignal: AbortSignal | undefined,
+): Promise<SpawnResult> {
+  // Always spawn detached so we can register the controller under the runId
+  // BEFORE the run starts; callers just await done.
+  const controller = new AbortController();
+  const onToolAbort = () => controller.abort();
+  if (toolSignal) {
+    if (toolSignal.aborted) controller.abort();
+    else toolSignal.addEventListener('abort', onToolAbort, { once: true });
+  }
+  const { runId, done } = runtime.spawnDetached({ ...opts, signal: controller.signal });
+  cancellables.set(runId, controller);
+  void done.finally(() => {
+    cancellables.delete(runId);
+    toolSignal?.removeEventListener('abort', onToolAbort);
+  });
+  // Attach the runId so callers can report it without racing the registry.
+  return Object.assign(done, { runId }) as Promise<SpawnResult>;
+}
+
 export default function subagents(pi: ExtensionAPI) {
   const runtime = createSubagentRuntime({ namespace: 'subagents', artifactsDir: ARTIFACTS_ROOT });
+  // GC old artifacts (7d retention, incl. worktrees + patches) and reap
+  // ghost 'running' records left by dead host processes. Once per process.
+  sweepRunArtifactsOnce(ARTIFACTS_ROOT);
 
   pi.registerTool({
     name: 'dispatch',
@@ -500,14 +537,15 @@ export default function subagents(pi: ExtensionAPI) {
       'returns its final answer. Children cannot spawn children. Not for trivial questions or',
       'sequential work — dispatch only when tasks are independent and parallel.',
       'Tasks whose tools include edit, write, or bash mutate the shared working tree: they require',
-      'allowTreeMutation: true and always run sequentially, one at a time, after the parallel batch.',
+      'allowTreeMutation: true and run sequentially after the parallel batch. Prefer worktree: true',
+      'for builders instead — isolated worktrees stay parallel and hand off a patch for central integration.',
     ].join(' '),
     promptSnippet: 'Fan out parallel child agents for independent subtasks',
     promptGuidelines: [
       `Use dispatch for independent parallel subtasks (max ${MAX_TASKS}); never for sequential work or trivial questions.`,
       'Children default to read-only tools (read, grep, find, ls). Pass tools explicitly for builders.',
       'Set background: true for long-running tasks; results surface via the fleet tool.',
-      'Tasks with edit/write/bash tools need allowTreeMutation: true and serialize after the parallel batch — never dispatch two tree-mutating tasks expecting concurrency.',
+      'Tasks with edit/write/bash tools need allowTreeMutation: true and serialize after the parallel batch — or set worktree: true to isolate them and keep them parallel.',
     ],
     parameters: Type.Object({
       tasks: Type.Array(
@@ -526,11 +564,17 @@ export default function subagents(pi: ExtensionAPI) {
                 'Required when tools include edit/write/bash; such tasks run sequentially after the parallel batch',
             }),
           ),
+          worktree: Type.Optional(
+            Type.Boolean({
+              description:
+                'Run in an isolated git worktree; writes never touch your tree. The full change set (incl. new files) lands as a .patch next to the run artifact — integrate centrally. Mutating tools stay parallel and need no allowTreeMutation.',
+            }),
+          ),
         }),
       ),
     }),
 
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
       const specs = params.tasks as TaskSpec[];
       if (specs.length === 0) {
         return toolResult('dispatch requires at least one task.');
@@ -551,7 +595,7 @@ export default function subagents(pi: ExtensionAPI) {
       }
 
       const emit = () => {
-        liveDispatch = details;
+        liveDispatches.set(toolCallId, details);
         const settledCount = details.tasks.filter((t) => t.status !== 'pending' && t.status !== 'working').length;
         onUpdate?.({
           content: [{ type: 'text', text: `[Dispatch] ${settledCount}/${details.tasks.length} done` }],
@@ -602,7 +646,10 @@ export default function subagents(pi: ExtensionAPI) {
 
       for (const spec of background) {
         const task = progress.get(spec)!;
-        const { runId, done } = runtime.spawnDetached(toSpawnOptions(spec, ctx.cwd));
+        // Deliberately no tool signal for background runs: pi may abort tool
+        // signals after execute returns, which would kill the child.
+        const done = spawnCancellable(runtime, toSpawnOptions(spec, ctx.cwd), undefined);
+        const runId = (done as Promise<SpawnResult> & { runId: string }).runId;
         task.status = 'background';
         task.runId = runId;
         task.startedAt = Date.now();
@@ -638,10 +685,7 @@ export default function subagents(pi: ExtensionAPI) {
             task.status = 'working';
             task.startedAt = Date.now();
             emit();
-            const result = await runtime.spawn({
-              ...toSpawnOptions(spec, ctx.cwd),
-              ...(signal ? { signal } : {}),
-            });
+            const result = await spawnCancellable(runtime, toSpawnOptions(spec, ctx.cwd), signal ?? undefined);
             settle(task, result);
             emit();
             return result;
@@ -669,10 +713,7 @@ export default function subagents(pi: ExtensionAPI) {
         task.status = 'working';
         task.startedAt = Date.now();
         emit();
-        const result = await runtime.spawn({
-          ...toSpawnOptions(spec, ctx.cwd),
-          ...(signal ? { signal } : {}),
-        });
+        const result = await spawnCancellable(runtime, toSpawnOptions(spec, ctx.cwd), signal ?? undefined);
         settle(task, result);
         emit();
         if (result.ok) {
@@ -687,6 +728,7 @@ export default function subagents(pi: ExtensionAPI) {
       }
 
       details.settled = true;
+      liveDispatches.delete(toolCallId);
       return toolResult(lines.join('\n\n'), details);
     },
 
@@ -696,12 +738,12 @@ export default function subagents(pi: ExtensionAPI) {
 
       if (!ctx?.isPartial) {
         clearSpinner(ctx);
-        liveDispatch = null;
+        liveDispatches.delete(ctx?.toolCallId ?? '');
         return makeText(ctx?.lastComponent, dispatchHeader(`${count} task${count === 1 ? '' : 's'}`, theme));
       }
 
       const frame = ensureSpinner(ctx);
-      const details = liveDispatch;
+      const details = liveDispatches.get(ctx.toolCallId) ?? null;
       const settled = details
         ? details.tasks.filter((t) => t.status !== 'pending' && t.status !== 'working').length
         : 0;
@@ -748,10 +790,10 @@ export default function subagents(pi: ExtensionAPI) {
       'Inspect subagent runs: list recent runs (live and persisted, across extensions using the shared runtime) or fetch a specific run result by runId. Use to check background dispatch results.',
     promptSnippet: 'List or inspect subagent runs',
     parameters: Type.Object({
-      action: Type.Union([Type.Literal('list'), Type.Literal('result')], {
-        description: 'list runs or fetch one result',
+      action: Type.Union([Type.Literal('list'), Type.Literal('result'), Type.Literal('cancel')], {
+        description: 'list runs, fetch one result, or cancel a running run',
       }),
-      runId: Type.Optional(Type.String({ description: 'Run id (or unique prefix) for action=result' })),
+      runId: Type.Optional(Type.String({ description: 'Run id (or unique prefix) for action=result/cancel' })),
     }),
     async execute(_toolCallId, params) {
       const live = runtime.listRuns() as RunArtifact[];
@@ -762,7 +804,7 @@ export default function subagents(pi: ExtensionAPI) {
         return toolResult(text, { runs: all.slice(0, MAX_FLEET_LIST) });
       }
       if (!params.runId) {
-        return toolResult('action=result requires a runId (or prefix).');
+        return toolResult(`action=${params.action} requires a runId (or prefix).`);
       }
       const matches = all.filter((r) => r.runId.startsWith(params.runId!));
       if (matches.length === 0) return toolResult(`No run matches '${params.runId}'.`);
@@ -770,9 +812,29 @@ export default function subagents(pi: ExtensionAPI) {
         return toolResult(`Ambiguous runId prefix; matches: ${matches.map((m) => m.runId.slice(0, 8)).join(', ')}`);
       }
       const run = matches[0]!;
+
+      if (params.action === 'cancel') {
+        const controller = cancellables.get(run.runId);
+        if (!controller) {
+          return toolResult(
+            run.status === 'running' || run.status === 'queued'
+              ? `Run ${run.runId.slice(0, 8)} is not cancellable from here — it belongs to a different host process (it will be reaped if that process died) or was not launched with cancel support.`
+              : `Run ${run.runId.slice(0, 8)} already finished (${run.status}).`,
+          );
+        }
+        controller.abort();
+        return toolResult(`Cancelled run ${run.runId.slice(0, 8)} (${short(run.promptPreview ?? '', 60)}).`);
+      }
+
       const text = [
         formatRunLine(run),
         run.error ? `error: ${run.error}` : undefined,
+        run.worktree
+          ? `worktree: ${run.worktree.path}${run.worktree.patchPath ? ` · patch: ${run.worktree.patchPath} (${run.worktree.changedFiles ?? 0} files)` : ' · no changes'}`
+          : undefined,
+        run.transcript && run.transcript.length > 0
+          ? `transcript (last ${run.transcript.length}): ${run.transcript.map((t) => (t.kind === 'tool' ? `⚙${t.label}` : t.label)).join(' → ')}`
+          : undefined,
         run.output
           ? `\n${run.output}`
           : run.status === 'running' || run.status === 'queued'

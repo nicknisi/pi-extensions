@@ -62,6 +62,7 @@ The directory is created `0700` and every file `0600` — other users on the mac
 
 ## Caveats
 
+- **Mailbox semantics are unix-only.** Delivery relies on atomic `renameSync`-over-existing, `fs.watch`, and `0600`/`0700` permission bits; Windows is untested and unsupported.
 - **One machine.** Delivery is a file landing in a directory; two sessions reach each other exactly when they share a filesystem. A container and its host cannot.
 - **Presence is heartbeat-accurate**, not instantaneous (within ~45s).
 - Delivery injects with `deliverAs: "steer"` (lands between tool calls) and `triggerTurn: true` (wakes an idle session).

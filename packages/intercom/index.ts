@@ -298,7 +298,10 @@ export default function intercom(pi: ExtensionAPI) {
     deposit(root, target.addr, letter);
     policy.recordSend(body);
     if (presence === 'live') {
-      const receipt = await awaitReceipt(root, target.addr, letter);
+      // Grace for a live peer whose fs.watch hasn't fired yet: poll up to
+      // ~3s (the watcher's own poll-fallback cadence) before settling on
+      // 'queued' — awaitReceipt still resolves early on consumption.
+      const receipt = await awaitReceipt(root, target.addr, letter, 3000);
       return {
         letter,
         verdict: receipt === 'delivered' ? 'delivered' : 'queued (waits on disk until the session resumes)',

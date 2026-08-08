@@ -1,6 +1,8 @@
 # @nicknisi/pi-agent-urls
 
-`agent://` and `history://` URL tools for reading [pi-subagents](../pi-subagents) runs, outputs, and transcripts. The extension discovers past and in-flight subagent runs from session JSONL files, async-run status directories, artifact directories, and chain-run directories, assigns each run a stable `agent://<runId>` URI, and exposes both a slash command and two LLM tools for listing and reading them. It exists so that a parent agent (or the human at the prompt) can pull a child subagent's transcript or final output back into context after the run has finished, using a short URI instead of a long filesystem path.
+`agent://` URL tools for reading subagent runs persisted by the first-party shared runtime (`@nicknisi/pi-shared`). The extension enumerates run records from `~/.pi/agent/subagent-runs/<namespace>/<runId>.json` — one JSON record per run, written by any extension on the shared in-process runtime (e.g. [subagents](../subagents)' `dispatch`, codemode, llm-council) — assigns each record a stable `agent://<namespace>/<runId>` URI, and exposes both a slash command and two LLM tools for listing and reading them. It exists so that a parent agent (or the human at the prompt) can pull a run's status, usage, output, or error back into context after the run has finished, using a short URI instead of a long filesystem path.
+
+It no longer reads anything from nicobailon/pi-subagents (session JSONLs, tmpdir status dirs, artifact dirs, chain dirs) — that discovery is gone. Because records carry bounded output rather than transcripts, the old `history://` scheme and transcript rendering are dropped; there is no session file to render.
 
 ## Install
 
@@ -11,32 +13,27 @@ pi install /Users/nicknisi/Developer/pi-extensions/packages/agent-urls
 ## What it adds
 
 - Slash command: `/agent` (with `list`/`ls` and `read`/`show`/`cat` subcommands)
-- Tool: `list_agent_runs` — list recent subagent runs and their `agent://` / `history://` URLs
-- Tool: `read_agent_url` — read `agent://` and `history://` URLs (run summaries, child outputs, rendered transcripts, raw files)
+- Tool: `list_agent_runs` — list recent persisted subagent runs and their `agent://` URLs
+- Tool: `read_agent_url` — read `agent://` URLs (run summaries, outputs, errors, raw records)
 - Custom message type: `agent-url` (results of `/agent` commands are posted into the conversation as `display: true` custom messages with `details.kind = "agent-url-command"`)
-- Argument completion for `/agent`: completes `list`/`read`, then `agent://<runId>` / `history://<runId>` for the 20 most recent runs
+- Argument completion for `/agent`: completes `list`/`read`, then `agent://<namespace>/<runId>` for the 20 most recent runs
 
 No keybindings, widgets, overlays, or event hooks.
 
 ## URI scheme
 
 ```text
-agent://<runId>                       run summary (source, mode, state, cwd, children, file paths)
-agent://<runId>/<child>               child output (same as /output)
-agent://<runId>/<child>/<leaf>        specific child content
-history://<runId>                     rendered transcript for all children with a session file
-history://<runId>/<child>             rendered transcript for one child
+agent://<namespace>/<runId>             run summary (status, timing, usage, file path)
+agent://<namespace>/<runId>/<leaf>      specific leaf of the record
+agent://<runId>                         shorthand: resolves across all namespaces
 ```
 
-`<runId>` may be abbreviated to any unique prefix; ambiguous or unknown prefixes throw. `<child>` may be a child index (e.g. `0` or `run-0`) or an agent-name substring. `<leaf>` is one of:
+`<runId>` may be abbreviated to any unique prefix; ambiguous or unknown prefixes throw. `<leaf>` is one of:
 
-- `output` / `result` — child output file, falling back to log file, falling back to the last assistant message of the session
-- `history` — rendered transcript (messages only, `### user` / `### assistant` / `### toolResult` sections)
-- `session` / `jsonl` — raw session JSONL (or artifact JSONL)
-- `input` — artifact `_input.md`
-- `meta` — artifact `_meta.json`
-- `log` — async run `output-<index>.log`
-- `summary` — per-child run summary
+- `summary` (default) — formatted record summary
+- `output` / `result` — the run's recorded output text
+- `error` — the run's recorded error text
+- `raw` / `json` — the raw record JSON as written to disk
 
 ## Usage
 
@@ -44,10 +41,9 @@ Slash command:
 
 ```text
 /agent list
-/agent list workos
-/agent read agent://3f9a1c2e
-/agent read agent://3f9a1c2e/1/history
-/agent read history://3f9a1c2e/0
+/agent list codemode
+/agent read agent://subagents/7c6ef257
+/agent read agent://subagents/7c6ef257/output
 ```
 
 `/agent read` without a URI, or an unknown subcommand, shows a usage warning via `ctx.ui.notify`.
@@ -55,22 +51,31 @@ Slash command:
 Tool usage (as called by the LLM):
 
 ```json
-{ "tool": "list_agent_runs", "params": { "query": "debrief", "limit": 10 } }
-{ "tool": "read_agent_url", "params": { "uri": "agent://3f9a1c2e/0/output", "maxLines": 1000 } }
+{ "tool": "list_agent_runs", "params": { "query": "subagents", "limit": 10 } }
+{ "tool": "read_agent_url", "params": { "uri": "agent://subagents/7c6ef257/output", "maxLines": 1000 } }
 ```
 
-`list_agent_runs` also returns structured run data in `details.runs` for programmatic consumers; `read_agent_url` returns the rendered text with `details.uri` echoing the request.
+`list_agent_runs` also returns the raw run records in `details.runs` for programmatic consumers; `read_agent_url` returns the rendered text with `details.uri` echoing the request.
 
 ## Run discovery
 
-Runs are discovered on every invocation from four sources, merged by `runId` (the 8-char hex id):
+Runs are discovered on every invocation by scanning `~/.pi/agent/subagent-runs/<namespace>/*.json`. Each file is a JSON `RunRecord`:
 
-1. **session** — session JSONL files under `~/.pi/agent/sessions/` matching `/<runId>/run-<n>/*.jsonl` (the layout written by pi-subagents' `session` mode). `cwd`, first user message (task, with a leading `Task:` stripped), and last assistant message are parsed out of the JSONL.
-2. **async** — directories under `$TMPDIR/pi-subagents-uid-<uid>/async-subagent-runs/` containing a `status.json`. Steps (multi-step runs) or the top-level status become children; `events.jsonl` and `output-<index>.log` are attached when present.
-3. **artifact** — files under `~/.pi/agent/sessions/**/subagent-artifacts/` named `<runId>_<agent>[_<index>]{_input.md,_output.md,_meta.json,.jsonl}`.
-4. **chain** — directories under `$TMPDIR/pi-subagents-uid-<uid>/chain-runs/`; every `.md`/`.json` file inside becomes a child output.
+```json
+{
+  "runId": "7c6ef257-…",
+  "namespace": "subagents",
+  "agent": "geography",
+  "promptPreview": "Answer briefly: …",
+  "status": "completed",
+  "startedAt": 1786203685145,
+  "endedAt": 1786203686847,
+  "usage": { "inputTokens": 2909, "outputTokens": 63, "cost": 0.0032 },
+  "output": "Tokyo is the capital of Japan."
+}
+```
 
-Discovery caps: max depth 8 (7 for session scans, 5 for artifacts, 4 for chain dirs), max 2500 files per scan, `node_modules`/`.git` skipped, entries visited newest-first by mtime.
+Unreadable files, invalid JSON, and records without a string `runId` are skipped; a record missing `namespace` inherits its directory name. Sort order is `endedAt ?? startedAt ?? file mtime`, newest first. Usage fields accept both `input`/`output` and `inputTokens`/`outputTokens` spellings. Scan caps: 2500 records.
 
 ## Configuration
 
@@ -78,11 +83,11 @@ No config files are read. No per-run options.
 
 Environment variables:
 
-- `PI_CODING_AGENT_DIR` — pi agent directory. Defaults to `~/.pi/agent`. A leading `~/` is expanded. This determines where `sessions/` is scanned.
+- `PI_CODING_AGENT_DIR` — pi agent directory. Defaults to `~/.pi/agent`. A leading `~/` is expanded. This determines where `subagent-runs/` is scanned.
 
 Constants (hardcoded in `index.ts`):
 
-- `MAX_SCAN_FILES = 2500` — per-scan file cap
+- `MAX_SCAN_FILES = 2500` — record cap per scan
 - `DEFAULT_LIMIT = 20` — runs listed by default (tool clamps `limit` to 1–100)
 - `DEFAULT_MAX_LINES = 500` — rendered line cap for reads (tool clamps `maxLines` to 20–5000)
 
@@ -93,9 +98,8 @@ Constants (hardcoded in `index.ts`):
 
 ## Caveats
 
-- Depends on pi-internal file layouts that are not a stable API: the session JSONL schema (`session`/`message` entries, content block types `text`/`toolCall`/`thinking`), the `sessions/<runId>/run-<n>/` directory naming, and pi-subagents' tmpdir layout (`pi-subagents-uid-<uid>/async-subagent-runs`, `chain-runs`) and `status.json` shape. Any of these changing across pi or pi-subagents versions silently reduces discovery to partial or empty results (all parse failures are swallowed).
-- Async/chain run discovery is POSIX-flavored: it uses `process.getuid()` (falls back to the literal string `user` when unavailable) to build the tmpdir path.
-- Run ids are assumed to be 8 lowercase hex chars (`[0-9a-f]{8}`); runs with other id formats are invisible.
-- Discovery is synchronous filesystem I/O on every command/tool call; very large `~/.pi/agent/sessions` trees are mitigated only by the depth/file caps.
-- `history://` rendering drops `thinking` blocks and non-message entries; truncated reads append a `[truncated: N more line(s) in <file>]` marker.
+- Depends on the shared runtime's on-disk record layout (`~/.pi/agent/subagent-runs/<namespace>/<runId>.json` and the `RunRecord` shape), which is not a stable API; a schema change silently reduces discovery to partial or empty results (all parse failures are swallowed).
+- Records carry bounded output, not transcripts — there is no equivalent of the old `history://` rendered-session reads.
+- Discovery is synchronous filesystem I/O on every command/tool call; very large `subagent-runs/` trees are mitigated only by the record cap.
+- Truncated reads append a `[truncated: N more line(s)]` marker.
 - Results of `/agent` are injected as custom `agent-url` messages with `display: true`; themes or UIs that don't handle unknown custom message types may render them differently.

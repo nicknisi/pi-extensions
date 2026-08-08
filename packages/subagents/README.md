@@ -30,6 +30,24 @@ or directly:
 /fleet
 ```
 
+### Worktree isolation
+
+Builder tasks should prefer `worktree: true` over `allowTreeMutation: true`:
+
+```json
+{
+  "tasks": [
+    {
+      "task": "Implement the parser in packages/foo",
+      "tools": ["read", "edit", "write", "bash", "grep"],
+      "worktree": true
+    }
+  ]
+}
+```
+
+The child runs in a detached worktree at `~/.pi/agent/subagent-worktrees/<runId>` from current `HEAD`. Its writes never touch your working tree, mutating tools stay **parallel** (no `allowTreeMutation`, no serialization), and on completion the full change set — **including new untracked files** — is captured as an untruncated patch at `~/.pi/agent/subagent-runs/subagents/<runId>.patch`. Integration is your call (the central-integrator pattern): inspect the patch, `git apply` what you want. The worktree itself is kept until artifact GC (7 days) for manual inspection; `fleet` `action: 'result'` shows the worktree path, patch path, and changed-file count. Fails fast if the cwd isn't a git repo.
+
 ## How it works
 
 `dispatch` maps each task to a `spawn()` call on a shared in-process runtime (`namespace: "subagents"`). Foreground tasks run concurrently (the runtime caps parallelism, default 4) and their results return as the tool output. Background tasks use `spawnDetached()` and report completion via a transcript message.
@@ -48,6 +66,7 @@ None. No config files, no environment variables.
 
 - **In-process means no crash isolation.** Children share the parent session's event loop and memory; a pathological child can hurt the host. Untrusted or heavy parallel work should stay on pi-subagents (or a future RPC transport) until this platform grows an isolation option.
 - **Background completion is a notification, not a turn.** The completion message lands in the transcript but doesn't drive the agent — the model learns results when it next acts (or when asked to check `fleet`).
-- **The fleet is per-machine, per-agent-dir.** Records live under `~/.pi/agent/subagent-runs/`; nothing prunes old records yet.
-- **Background runs live only as long as the host session.** They are detached in-process children with no cancel mechanism yet; when the session ends, so do they.
+- **The fleet is per-machine, per-agent-dir.** Records live under `~/.pi/agent/subagent-runs/` and are garbage-collected at startup after 7 days (along with their patches and worktrees).
+- **Background runs live only as long as the host session.** They are detached in-process children; cancel them via the `fleet` tool (`action: 'cancel'`), and when the host exits, running children die with it — their persisted records are reaped as `aborted` on next startup.
 - Depends on pi SDK internals (`createAgentSession`, `DefaultResourceLoader` flags, `SessionManager.inMemory`) that could change across pi versions — runtime-aliased to the host at load time, but type-level drift would surface at extension load.
+- **The recursion guard has a hole.** The in-process depth guard only covers spawns made through the shared runtime; a child that itself shells out to `pi -p` via bash starts a fresh process with none of that context — the same exposure as any pi session with bash access.
