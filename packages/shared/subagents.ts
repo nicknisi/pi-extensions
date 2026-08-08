@@ -25,6 +25,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
   createAgentSession,
@@ -99,6 +100,10 @@ export interface SpawnOptions {
   timeoutMs?: number;
   /** Aborts the child session (session.abort()) when fired. */
   signal?: AbortSignal;
+  /** Abort after this many agent turns (budget exceeded → kind 'aborted'). */
+  maxTurns?: number;
+  /** Abort after this many tool executions (budget exceeded → kind 'aborted'). */
+  maxToolCalls?: number;
 }
 
 export interface SpawnUsage {
@@ -140,6 +145,8 @@ export interface RunRecord {
 export interface SubagentRuntime {
   readonly namespace: string;
   spawn(options: SpawnOptions): Promise<SpawnResult>;
+  /** Launch without awaiting; track via listRuns()/artifacts or the returned promise. */
+  spawnDetached(options: SpawnOptions): { runId: string; done: Promise<SpawnResult> };
   /** Snapshot of recent runs, newest first. */
   listRuns(): RunRecord[];
   /** Currently executing (not queued) spawns. */
@@ -151,6 +158,8 @@ export interface SubagentRuntime {
 const DEFAULT_MAX_CONCURRENT = 4;
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_RETAINED_RUNS = 200;
+const MAX_ARTIFACT_OUTPUT_CHARS = 64 * 1024;
+const MAX_ARTIFACT_FILES_READ = 500;
 
 function fail(runId: string, kind: SpawnFailureKind, error: string, startedAt: number): SpawnFailure {
   return {
@@ -254,11 +263,63 @@ export function resolveContainedAgentResource(
   return resolved;
 }
 
+/** A RunRecord persisted to disk, optionally carrying the run's output text. */
+export interface RunArtifact extends RunRecord {
+  output?: string | undefined;
+}
+
+/**
+ * Read persisted run artifacts from a shared root ("<root>/<namespace>/<runId>.json").
+ * Cross-extension by design: every runtime persisting to the same root is
+ * visible here, which is what a fleet view needs given pi's per-extension
+ * module isolation. Defensive against partial/garbage files.
+ */
+export function readRunArtifacts(rootDir: string): RunArtifact[] {
+  const out: RunArtifact[] = [];
+  let namespaces: fs.Dirent[];
+  try {
+    namespaces = fs.readdirSync(rootDir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  let read = 0;
+  for (const ns of namespaces) {
+    if (!ns.isDirectory()) continue;
+    const dir = path.join(rootDir, ns.name);
+    let files: fs.Dirent[];
+    try {
+      files = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const file of files) {
+      if (read >= MAX_ARTIFACT_FILES_READ) return out;
+      if (!file.isFile() || !file.name.endsWith('.json')) continue;
+      read++;
+      try {
+        const parsed = JSON.parse(fs.readFileSync(path.join(dir, file.name), 'utf8'));
+        if (parsed && typeof parsed.runId === 'string' && typeof parsed.status === 'string') {
+          out.push(parsed as RunArtifact);
+        }
+      } catch {
+        // skip unreadable artifact
+      }
+    }
+  }
+  return out.sort((a, b) => b.startedAt - a.startedAt);
+}
+
 // ── Runtime ────────────────────────────────────────────────────────────────
 
-export function createSubagentRuntime(options: { namespace: string; maxConcurrent?: number }): SubagentRuntime {
+export function createSubagentRuntime(options: {
+  namespace: string;
+  maxConcurrent?: number;
+  /** When set, run records (plus bounded output) persist to "<dir>/<namespace>/<runId>.json". */
+  artifactsDir?: string;
+}): SubagentRuntime {
   const namespace = options.namespace;
   const maxConcurrent = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
+  const artifactsDir = options.artifactsDir;
   const toolNamespace = namespace.replace(/[^a-zA-Z0-9]/g, '_');
 
   const runs: RunRecord[] = [];
@@ -288,13 +349,38 @@ export function createSubagentRuntime(options: { namespace: string; maxConcurren
     }
   }
 
+  function persist(record: RunRecord, output?: string): void {
+    if (!artifactsDir) return;
+    try {
+      const dir = path.join(artifactsDir, namespace);
+      fs.mkdirSync(dir, { recursive: true });
+      const artifact: RunArtifact = { ...record };
+      if (output !== undefined) artifact.output = output.slice(0, MAX_ARTIFACT_OUTPUT_CHARS);
+      const file = path.join(dir, `${record.runId}.json`);
+      const tmp = `${file}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(artifact, null, 2));
+      fs.renameSync(tmp, file);
+    } catch {
+      // artifact persistence is best-effort; never fail a run over it
+    }
+  }
+
   function recordRun(record: RunRecord): void {
     runs.unshift(record);
     if (runs.length > MAX_RETAINED_RUNS) runs.length = MAX_RETAINED_RUNS;
+    persist(record);
   }
 
-  async function spawn(opts: SpawnOptions): Promise<SpawnResult> {
+  function spawn(opts: SpawnOptions): Promise<SpawnResult> {
+    return spawnDetached(opts).done;
+  }
+
+  function spawnDetached(opts: SpawnOptions): { runId: string; done: Promise<SpawnResult> } {
     const runId = randomUUID();
+    return { runId, done: spawnChild(runId, opts) };
+  }
+
+  async function spawnChild(runId: string, opts: SpawnOptions): Promise<SpawnResult> {
     const startedAt = Date.now();
     const record: RunRecord = {
       runId,
@@ -339,6 +425,7 @@ export function createSubagentRuntime(options: { namespace: string; maxConcurren
 
     await acquire();
     record.status = 'running';
+    persist(record);
     try {
       return await runChild(runId, opts, startedAt, record);
     } finally {
@@ -437,11 +524,13 @@ export function createSubagentRuntime(options: { namespace: string; maxConcurren
       settingsManager: SettingsManager.inMemory(),
     });
 
-    let abortedBy: 'signal' | 'timeout' | undefined;
-    const onSignalAbort = () => {
-      abortedBy = 'signal';
+    let abortReason: string | undefined;
+    const abortOnce = (reason: string) => {
+      if (abortReason !== undefined) return;
+      abortReason = reason;
       void session.abort();
     };
+    const onSignalAbort = () => abortOnce('Aborted by caller');
     if (opts.signal) {
       if (opts.signal.aborted) onSignalAbort();
       else opts.signal.addEventListener('abort', onSignalAbort, { once: true });
@@ -449,10 +538,28 @@ export function createSubagentRuntime(options: { namespace: string; maxConcurren
     const timer =
       timeoutMs > 0
         ? setTimeout(() => {
-            abortedBy = 'timeout';
-            void session.abort();
+            abortOnce(`Timed out after ${timeoutMs}ms`);
           }, timeoutMs)
         : undefined;
+
+    let turnCount = 0;
+    let toolCallCount = 0;
+    if (opts.maxTurns !== undefined || opts.maxToolCalls !== undefined) {
+      session.subscribe((event: any) => {
+        if (event.type === 'turn_start') {
+          turnCount++;
+          if (opts.maxTurns !== undefined && turnCount > opts.maxTurns) {
+            abortOnce(`Turn budget exceeded (${opts.maxTurns})`);
+          }
+        }
+        if (event.type === 'tool_execution_start') {
+          toolCallCount++;
+          if (opts.maxToolCalls !== undefined && toolCallCount > opts.maxToolCalls) {
+            abortOnce(`Tool-call budget exceeded (${opts.maxToolCalls})`);
+          }
+        }
+      });
+    }
 
     let promptError: unknown;
     try {
@@ -481,15 +588,16 @@ export function createSubagentRuntime(options: { namespace: string; maxConcurren
         record.status = result.kind === 'aborted' ? 'aborted' : 'failed';
         record.error = result.error;
       }
+      persist(record, result.text);
       return result;
     };
 
-    if (abortedBy) {
+    if (abortReason !== undefined) {
       return finish({
         ok: false,
         runId,
         kind: 'aborted',
-        error: abortedBy === 'timeout' ? `Timed out after ${timeoutMs}ms` : 'Aborted by caller',
+        error: abortReason,
         text,
         usage,
         durationMs,
@@ -542,6 +650,7 @@ export function createSubagentRuntime(options: { namespace: string; maxConcurren
   return {
     namespace,
     spawn,
+    spawnDetached,
     listRuns: () => runs.map((r) => ({ ...r })),
     activeCount: () => active,
   };
