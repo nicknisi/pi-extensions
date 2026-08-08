@@ -18,7 +18,13 @@
  */
 
 import * as path from 'node:path';
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionUIContext, Theme } from '@earendil-works/pi-coding-agent';
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+  ExtensionUIContext,
+  Theme,
+} from '@earendil-works/pi-coding-agent';
 import { getAgentDir, getSelectListTheme } from '@earendil-works/pi-coding-agent';
 import {
   getKeybindings,
@@ -48,6 +54,10 @@ import {
 import { Type } from 'typebox';
 
 const ARTIFACTS_ROOT = path.join(getAgentDir(), 'subagent-runs');
+const STATUS_KEY = 'subagents';
+/** Toggle the fleet radar overlay. Rebind via ~/.pi/agent/keybindings.json. */
+const RADAR_SHORTCUT = 'alt+ctrl+f';
+const STATUS_INTERVAL = 2000;
 const MAX_TASKS = 8;
 const DEFAULT_TOOLS = ['read', 'grep', 'find', 'ls'];
 const TREE_MUTATING_TOOLS = new Set(['edit', 'write', 'bash']);
@@ -331,6 +341,31 @@ function runIcon(run: RunArtifact, theme: Theme): string {
   }
 }
 
+/** Most recent transcript entry (turn N or tool name) — the run's "current tool" / last activity. */
+function lastActivity(run: RunArtifact): { kind: 'turn' | 'tool'; label: string } | undefined {
+  const t = run.transcript;
+  if (!t || t.length === 0) return undefined;
+  return t[t.length - 1];
+}
+
+/**
+ * Per-run radar lane: status icon + identity in the label, and a one-line
+ * digest (model · current tool · token burn · last activity) in the
+ * description — the tmux-choose-tree row analogue.
+ */
+function runLane(run: RunArtifact, theme: Theme): { label: string; description: string } {
+  const model = run.model ? ` ${theme.fg('dim', run.model)}` : '';
+  const activity = lastActivity(run);
+  const tool = activity?.kind === 'tool' ? `${theme.fg('muted', '⚙')} ${activity.label}` : '';
+  const tokens = run.usage ? `${(run.usage.totalTokens / 1000).toFixed(1)}k tok` : '';
+  const bits = [tool, tokens, relativeTime(run.startedAt)].filter(Boolean).join(theme.fg('dim', ' · '));
+  const prompt = short(sanitizeTerminalLabel(run.promptPreview ?? ''), 56);
+  return {
+    label: `${runIcon(run, theme)} ${sanitizeTerminalLabel(runTitle(run))}${model}`,
+    description: `${bits ? `${bits}${theme.fg('dim', ' · ')}${prompt}` : prompt}`,
+  };
+}
+
 class FleetOverlay implements Component, Focusable {
   focused = false;
 
@@ -351,12 +386,9 @@ class FleetOverlay implements Component, Focusable {
     private readonly theme: Theme,
     private readonly refresh: () => RunArtifact[],
     private readonly close: () => void,
+    private readonly cancelRun: (runId: string) => void,
   ) {
-    const items: SelectItem[] = runs.map((run) => ({
-      value: run.runId,
-      label: `${runIcon(run, theme)} ${sanitizeTerminalLabel(runTitle(run))}`,
-      description: `${relativeTime(run.startedAt)} · ${short(sanitizeTerminalLabel(run.promptPreview ?? ''), 60)}`,
-    }));
+    const items: SelectItem[] = runs.map((run) => ({ value: run.runId, ...runLane(run, theme) }));
     this.list = new SearchableSelectList(items, Math.min(Math.max(items.length, 1), 12), getSelectListTheme());
     this.list.onSelect = (item) => {
       const run = this.runs.find((r) => r.runId === item.value);
@@ -391,6 +423,19 @@ class FleetOverlay implements Component, Focusable {
     this.tui.requestRender();
   }
 
+  /** Cancel the run under the cursor (list) or the open one (detail). */
+  private cancelCurrent(): void {
+    let run: RunArtifact | null = null;
+    if (this.mode === 'detail') run = this.detail;
+    else {
+      const item = this.list.selectList.getSelectedItem();
+      if (item) run = this.runs.find((r) => r.runId === item.value) ?? null;
+    }
+    if (!run) return;
+    this.cancelRun(run.runId);
+    this.tui.requestRender();
+  }
+
   handleInput(data: string): void {
     if (this.mode === 'detail') {
       if (matchesKey(data, Key.escape) || matchesKey(data, Key.left)) {
@@ -404,9 +449,17 @@ class FleetOverlay implements Component, Focusable {
         this.scrollTop = Math.max(0, this.scrollTop - this.viewport);
       } else if (matchesKey(data, Key.pageDown)) {
         this.scrollTop = Math.min(Math.max(0, this.contentTotal - this.viewport), this.scrollTop + this.viewport);
+      } else if (matchesKey(data, 'c')) {
+        this.cancelCurrent();
       } else {
         return;
       }
+      this.invalidate();
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, 'c')) {
+      this.cancelCurrent();
       this.invalidate();
       this.tui.requestRender();
       return;
@@ -481,12 +534,22 @@ class FleetOverlay implements Component, Focusable {
     lines.push(this.border(`╭${'─'.repeat(innerWidth)}╮`));
 
     if (this.mode === 'list') {
+      const working = this.runs.filter((r) => r.status === 'running' || r.status === 'queued').length;
+      const done = this.runs.filter((r) => r.status === 'completed').length;
+      const failed = this.runs.filter((r) => r.status === 'failed' || r.status === 'aborted').length;
+      const counts =
+        working + done + failed > 0
+          ? this.theme.fg(
+              'dim',
+              `  ${this.theme.fg('accent', String(working))} working · ${this.theme.fg('success', String(done))} done · ${this.theme.fg('error', String(failed))} failed`,
+            )
+          : '';
       pushBoxLine(
-        ` ${this.theme.fg('accent', this.theme.bold('Fleet'))}${this.theme.fg('dim', ` — ${this.runs.length} run${this.runs.length === 1 ? '' : 's'}`)}`,
+        ` ${this.theme.fg('accent', this.theme.bold('Fleet'))}${this.theme.fg('dim', ` — ${this.runs.length} run${this.runs.length === 1 ? '' : 's'}`)}${counts}`,
       );
       for (const line of this.list.render(contentWidth)) pushBoxLine(` ${line}`);
       pushBoxLine();
-      pushBoxLine(this.theme.fg('dim', ' type to filter • Enter details • Esc close'));
+      pushBoxLine(this.theme.fg('dim', ' type to filter • Enter inspect • c cancel • Esc close'));
     } else if (this.detail) {
       pushBoxLine(
         ` ${this.theme.fg('accent', this.theme.bold('Run'))}${this.theme.fg('dim', ` ${this.detail.runId.slice(0, 8)}`)}`,
@@ -504,7 +567,7 @@ class FleetOverlay implements Component, Focusable {
         all.length > viewport
           ? ` ${this.scrollTop + 1}–${Math.min(all.length, this.scrollTop + viewport)}/${all.length} •`
           : '';
-      pushBoxLine(this.theme.fg('dim', `${scrollInfo} ↑↓ scroll • PgUp/PgDn page • Esc back`));
+      pushBoxLine(this.theme.fg('dim', `${scrollInfo} ↑↓ scroll • PgUp/PgDn page • c cancel • Esc back`));
     }
 
     lines.push(this.border(`╰${'─'.repeat(innerWidth)}╯`));
@@ -547,11 +610,97 @@ function spawnCancellable(
   return Object.assign(done, { runId }) as Promise<SpawnResult>;
 }
 
+// ── Fleet radar: shared overlay opener + ambient statusline ─────────────
+
+/**
+ * Open the fleet radar overlay (the /fleet and the keyboard shortcut share
+ * this path). The overlay lists every run as a per-child lane — status,
+ * model, current tool, token burn, last activity — with `c` cancelling the
+ * focused run via the cascading-cancellation registry and Enter drilling
+ * into the live transcript.
+ */
+function openFleetOverlay(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext | ExtensionContext,
+  runtime: SubagentRuntime,
+  initial: RunArtifact | undefined,
+): Promise<void> {
+  const all = collectFleet(runtime.listRuns() as RunArtifact[]);
+  const cancelRun = (runId: string) => {
+    const controller = cancellables.get(runId);
+    if (!controller) {
+      const fresh = collectFleet(runtime.listRuns() as RunArtifact[]);
+      const run = fresh.find((r) => r.runId === runId);
+      ctx.ui.notify(
+        run && (run.status === 'running' || run.status === 'queued')
+          ? `Run ${runId.slice(0, 8)} isn't cancellable from here (it belongs to a different host process).`
+          : `Run ${runId.slice(0, 8)} already finished.`,
+        'warning',
+      );
+      return;
+    }
+    controller.abort();
+    ctx.ui.notify(`Cancelled run ${runId.slice(0, 8)}`, 'info');
+  };
+  void pi;
+  return ctx.ui.custom<void>(
+    (tui, theme, _kb, done) => {
+      widgetTheme = theme;
+      return new FleetOverlay(
+        all,
+        initial,
+        tui,
+        theme,
+        () => collectFleet(runtime.listRuns() as RunArtifact[]),
+        () => done(undefined),
+        cancelRun,
+      );
+    },
+    { overlay: true, overlayOptions: { width: '80%', maxHeight: '70%', anchor: 'center' } },
+  );
+}
+
+/** Recompute working/done/failed counts and reflect them in the footer statusline. */
+function refreshStatusline(ui: ExtensionUIContext, theme: Theme | null, runtime: SubagentRuntime): void {
+  let all: RunArtifact[];
+  try {
+    all = collectFleet(runtime.listRuns() as RunArtifact[]);
+  } catch {
+    return;
+  }
+  const working = all.filter((r) => r.status === 'running' || r.status === 'queued').length;
+  const done = all.filter((r) => r.status === 'completed').length;
+  const failed = all.filter((r) => r.status === 'failed' || r.status === 'aborted').length;
+  if (working === 0) {
+    ui.setStatus(STATUS_KEY, undefined);
+    return;
+  }
+  const text = theme
+    ? `${theme.fg('accent', '●')} ${theme.fg('dim', 'fleet ')}${theme.fg('accent', String(working))}${theme.fg('dim', ' working · ')}${theme.fg('success', String(done))}${theme.fg('dim', ' done · ')}${theme.fg('error', String(failed))}${theme.fg('dim', ' failed')}`
+    : `fleet ${working} working · ${done} done · ${failed} failed`;
+  ui.setStatus(STATUS_KEY, text);
+}
+
+let statusTimer: ReturnType<typeof setInterval> | undefined;
+let statusUi: ExtensionUIContext | null = null;
+let statusTheme: Theme | null = null;
+
 export default function subagents(pi: ExtensionAPI) {
   const runtime = createSubagentRuntime({ namespace: 'subagents', artifactsDir: ARTIFACTS_ROOT });
   // GC old artifacts (7d retention, incl. worktrees + patches) and reap
   // ghost 'running' records left by dead host processes. Once per process.
   sweepRunArtifactsOnce(ARTIFACTS_ROOT);
+
+  pi.on('session_start', (_event, ctx) => {
+    if (!ctx.hasUI) return;
+    statusUi = ctx.ui;
+    statusTheme = (ctx.ui as ExtensionUIContext).theme ?? null;
+    refreshStatusline(statusUi, statusTheme, runtime);
+    if (statusTimer) clearInterval(statusTimer);
+    statusTimer = setInterval(() => {
+      if (statusUi) refreshStatusline(statusUi, statusTheme ?? widgetTheme, runtime);
+    }, STATUS_INTERVAL);
+  });
 
   // Deterministic cascading cancellation: Esc/quit/reload/session-replacement
   // must not orphan in-process children. Foreground tasks are already aborted
@@ -564,6 +713,12 @@ export default function subagents(pi: ExtensionAPI) {
   // startup by sweepRunArtifactsOnce, which reaps ghost runs AND their
   // worktrees.
   pi.on('session_shutdown', () => {
+    if (statusTimer) {
+      clearInterval(statusTimer);
+      statusTimer = undefined;
+    }
+    statusUi?.setStatus(STATUS_KEY, undefined);
+    statusUi = null;
     for (const controller of cancellables.values()) {
       try {
         controller.abort();
@@ -940,20 +1095,24 @@ export default function subagents(pi: ExtensionAPI) {
         }
       }
 
-      await ctx.ui.custom<void>(
-        (tui, theme, _kb, done) => {
-          widgetTheme = theme;
-          return new FleetOverlay(
-            all,
-            initial,
-            tui,
-            theme,
-            () => collectFleet(runtime.listRuns() as RunArtifact[]),
-            () => done(undefined),
-          );
-        },
-        { overlay: true, overlayOptions: { width: '80%', maxHeight: '70%', anchor: 'center' } },
-      );
+      await openFleetOverlay(pi, ctx, runtime, initial);
+    },
+  });
+
+  // Fleet radar overlay — one keyboard shortcut (rebind via keybindings.json).
+  pi.registerShortcut(RADAR_SHORTCUT, {
+    description: 'Open the subagent fleet radar overlay',
+    handler: async (ctx) => {
+      if (!ctx.hasUI) {
+        ctx.ui.notify('The fleet radar overlay needs the TUI.', 'warning');
+        return;
+      }
+      const all = collectFleet(runtime.listRuns() as RunArtifact[]);
+      if (all.length === 0) {
+        ctx.ui.notify('No subagent runs found.', 'info');
+        return;
+      }
+      await openFleetOverlay(pi, ctx, runtime, undefined);
     },
   });
 }

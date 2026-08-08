@@ -7,6 +7,7 @@ First-party subagent dispatch and fleet for pi — fan out parallel child agents
 - **`dispatch` tool** (model-facing) — fan out up to 8 child agents in parallel. Each task gets its own prompt, optional label/model/system-prompt, and a tool allowlist (default read-only: `read`, `grep`, `find`, `ls`). Typed per-task results aggregate into one tool result. `background: true` runs detached and surfaces completion via a transcript message. Tasks whose allowlist includes `edit`, `write`, or `bash` mutate the shared working tree: they must declare `allowTreeMutation: true` (otherwise that task is refused) and always run **sequentially**, one at a time, after the parallel read-only batch completes — never concurrently with each other or the read-only batch.
 - **`fleet` tool** (model-facing) — `list` recent runs (live + persisted, across extensions using the shared runtime) or fetch a `result` by runId. This is how the model checks on background dispatches.
 - **`/fleet` command** — user-facing run table.
+- **Fleet radar overlay + statusline** — `Alt+Ctrl+F` (rebind via `~/.pi/agent/keybindings.json`) opens a tmux-choose-tree-style overlay listing every run as a per-child lane: status, model, current tool, token burn, last activity. `Enter` inspects the live run transcript; `c` cancels the focused run (wired into the cascading-cancellation registry); `Esc` closes. While any run is in flight, an ambient footer segment (`ctx.ui.setStatus`) shows live `working · done · failed` counts.
 
 ## Usage
 
