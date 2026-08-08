@@ -16,8 +16,9 @@ log(...args: unknown[]): void;
 
 - `spawn` launches a hermetic in-process child agent through the shared runtime (namespace `codemode`). Children are version-matched to the host, cannot themselves spawn, and honor the ecosystem recursion guard. Run artifacts persist to `~/.pi/agent/subagent-runs/codemode/`, so codemode children appear in the `fleet` tool / `/fleet` command from `@nicknisi/pi-subagents`.
 - `spawn` **never rejects**. Check `result.ok`; failures carry `kind: 'crashed' | 'empty' | 'schema_invalid' | 'aborted'` plus `error`.
+- **Output contracts (breaking).** Every `spawn()` must declare its contract explicitly: either `outputSchema` (validated; parsed JSON lands in `result.data`) **or** `text: true` (raw text opt-in). A `spawn()` with **neither** throws immediately with an error naming the missing contract — it does _not_ return unparsed text. This prevents the silent failure mode where a schema-less spawn returns text, a caller reads a field off it (`result.someField`), gets `undefined`, and a whole parallel fleet reports success while every result is unusable. A schema-validating spawn that fails validation after one bounded repair attempt (a normalize-and-recheck pass) returns a loud recoverable failure: `{ ok: false, kind: 'schema_invalid', error, text }` — never a silently-empty string. **Migration:** add `text: true` to existing text-mode spawns, or define an `outputSchema`.
 - `runWorkflow` runs a declarative multi-stage DAG over `spawn` (from `@nicknisi/pi-shared`'s engine): per-stage `needs` deps (default linear), `foreach` fan-out, `gate` revise-feedback loops, `retries`, `tokenBudget`, and `sharesTree` stages that never overlap other work and hand their bounded `git diff HEAD` to dependents. Control artifacts land in `~/.pi/agent/workflow-runs/`; `opts.resumeFrom` skips previously-ok stages. Also never rejects — per-stage outcomes carry `ok`/`kind`. Prefer it over hand-rolled `Promise.all` when stages depend on each other, need gates/retries, or edit the working tree.
-- `SpawnOptions` highlights: `prompt` (required), `agent` (label), `model` (`'provider/id'`), `tools` (allowlist — `undefined` defaults to read-only `['read','grep','find','ls']`; pass `['read','bash','edit','write']` explicitly for builders), `systemPrompt`, `outputSchema` (validated; parsed JSON lands in `result.data`), `cwd`, `timeoutMs`, `maxTurns`, `maxToolCalls`, `thinkingLevel`.
+- `SpawnOptions` highlights: `prompt` (required), `agent` (label), `model` (`'provider/id'`), `tools` (allowlist — `undefined` defaults to read-only `['read','grep','find','ls']`; pass `['read','bash','edit','write']` explicitly for builders), `systemPrompt`, `outputSchema` (validated; parsed JSON lands in `result.data`), `text` (boolean — opt into raw text mode; required when `outputSchema` is omitted), `cwd`, `timeoutMs`, `maxTurns`, `maxToolCalls`, `thinkingLevel`.
 - `log` output comes back in the tool result's `details.logs`.
 
 The snippet executes **in the host process with full Node access** — `process`, `require`, and `fs` are all reachable, the same trust boundary as the `bash` tool (see Security model). `spawn`, `runWorkflow`, and `log` are the injected codemode API. Composition is plain code: that's the point.
@@ -32,7 +33,9 @@ const questions = [
   'Where are sessions persisted?',
   'What breaks if the token endpoint 500s?',
 ];
-const results = await Promise.all(questions.map((q) => spawn({ prompt: q, tools: ['read', 'grep', 'find', 'ls'] })));
+const results = await Promise.all(
+  questions.map((q) => spawn({ prompt: q, tools: ['read', 'grep', 'find', 'ls'], text: true })),
+);
 export default results.map((r, i) => ({
   question: questions[i],
   answer: r.ok ? r.text.slice(0, 500) : `FAILED (${r.kind}): ${r.error}`,
@@ -45,12 +48,13 @@ Map/reduce over files with a pipeline:
 const files = ['src/a.ts', 'src/b.ts', 'src/c.ts'];
 const summaries = [];
 for (const f of files) {
-  const r = await spawn({ prompt: `Summarize the public API of ${f} in 3 bullets.`, tools: ['read'] });
+  const r = await spawn({ prompt: `Summarize the public API of ${f} in 3 bullets.`, tools: ['read'], text: true });
   summaries.push({ file: f, summary: r.ok ? r.text : `failed: ${r.error}` });
 }
 const rollup = await spawn({
   prompt: `Combine these module summaries into one architecture paragraph:\n${JSON.stringify(summaries)}`,
   tools: [],
+  text: true,
 });
 export default { rollup: rollup.ok ? rollup.text : 'rollup failed', summaries };
 ```

@@ -48,6 +48,9 @@ const MAX_STACK_CHARS = 4000;
 const MAX_LOG_ENTRIES = 200;
 const MAX_LOG_CHARS = 2000;
 
+/** Spawn options as exposed to the codemode snippet: the shared runtime's set, plus `text` — an explicit raw-text opt-in. */
+type CodemodeSpawnOptions = SpawnOptions & { text?: boolean };
+
 const BINDINGS_PRELUDE = 'const { spawn, log, runWorkflow } = (globalThis as any).__piCodemode;\n';
 const GLOBAL_KEY = '__piCodemode';
 
@@ -195,7 +198,11 @@ export default function codemode(pi: ExtensionAPI) {
       '[read, grep, find, ls]; pass [read, bash, edit, write] explicitly for builders); systemPrompt?:',
       'string; replaceSystemPrompt?: boolean; extensionPaths?: string[]; skillPaths?: string[];',
       'includeContextFiles?: boolean; outputSchema?: TypeBox-like JSON schema object (validated;',
-      'parsed JSON lands in result.data); cwd?: string; timeoutMs?: number (default 15 min);',
+      'parsed JSON lands in result.data; a schema-validating spawn that fails validation after one',
+      "bounded repair attempt returns ok:false kind:'schema_invalid' — never a silently-empty string);",
+      'text?: boolean (opt into raw text mode; REQUIRED when outputSchema is omitted — a spawn with',
+      'neither outputSchema nor text:true is rejected immediately); cwd?: string; timeoutMs?: number',
+      '(default 15 min);',
       'maxTurns?: number; maxToolCalls?: number; thinkingLevel?: string }. Composition — Promise.all',
       'Composition — Promise.all',
       'fan-out, sequential pipelines, map/reduce over files — is your code. For dependent multi-stage',
@@ -215,6 +222,7 @@ export default function codemode(pi: ExtensionAPI) {
       'spawn never rejects: check result.ok and read result.error/result.kind on failure instead of try/catch around spawn.',
       'Fan out independent work with Promise.all([...]) and pass read-only tool allowlists (read, grep, find, ls) to research children.',
       'Wrap risky non-spawn steps (parsing, arithmetic on untrusted shapes) in try/catch — a thrown error fails the whole run.',
+      'Every spawn() must declare its output contract: pass outputSchema for structured data (validated; lands in result.data) or text:true for raw text. A spawn with NEITHER throws immediately — it does not return unparsed text.',
       'Prefer runWorkflow over hand-rolled Promise.all when stages depend on each other, need gates/retries, or edit the working tree.',
       'Use log(...) for progress notes; they come back in the result details.',
       'Do not attempt imports — the snippet is bundled standalone and only spawn/runWorkflow/log are available.',
@@ -247,9 +255,24 @@ export default function codemode(pi: ExtensionAPI) {
         logs.push(truncate(line, MAX_LOG_CHARS));
       };
 
-      const spawn = (options: SpawnOptions): Promise<SpawnResult> => {
+      const spawn = (options: CodemodeSpawnOptions): Promise<SpawnResult> => {
+        // Output contract: a schema-less spawn returns raw text, and reading a
+        // field off unparsed text fails silently (undefined, not an error) — a
+        // whole fan-out can look successful while every result is unusable.
+        // Require EITHER an outputSchema OR an explicit `text: true` opt-in.
+        // This throws synchronously and loudly rather than returning ok:false,
+        // so the run cannot be mistaken for a success.
+        if (!options.outputSchema && !options.text) {
+          throw new Error(
+            'spawn() requires an explicit output contract: pass `outputSchema` ' +
+              'for validated structured output (parsed JSON lands in result.data) ' +
+              'or `text: true` to opt into raw text mode. A schema-less spawn ' +
+              'without `text: true` is rejected to prevent silently-unusable ' +
+              'results (reading a field off unparsed text yields undefined, not an error).',
+          );
+        }
         const merged = mergeSignals(options.signal, signal ?? undefined, controller.signal);
-        const { signal: _userSignal, ...rest } = options;
+        const { signal: _userSignal, text: _text, ...rest } = options;
         const opts: SpawnOptions = { ...rest, cwd: options.cwd ?? ctx.cwd };
         // Default children to read-only, matching dispatch; pi's own default
         // (read/bash/edit/write) would apply otherwise.
