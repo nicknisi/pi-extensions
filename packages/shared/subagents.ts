@@ -447,10 +447,17 @@ export function sweepRunArtifacts(
         record.hostPid !== process.pid;
       if (isGhost) {
         try {
+          // A ghost run's host died before runChild could clean up — remove
+          // its worktree now so a hard exit (SIGKILL/crash) can't leak one.
+          // .patch siblings are reaped by the age-based GC below when their
+          // artifact ages out; an aborted run captures no patch, so there is
+          // usually nothing to reap here.
+          if (record.worktree?.path) removeWorktree(record.worktree.repoRoot ?? null, record.worktree.path);
           record.status = 'aborted';
           record.endedAt = now;
           record.error =
             'Host pi process exited while this run was active (in-process children cannot outlive their host).';
+          if (record.worktree?.path) record.worktree = undefined;
           fs.writeFileSync(filePath, JSON.stringify(record, null, 2));
           reaped++;
         } catch {
@@ -785,16 +792,31 @@ export function createSubagentRuntime(options: {
     const stateError = childSessionError(session);
     session.dispose();
 
-    // Worktree handoff: full patch (incl. untracked files) beside the artifact.
-    if (record.worktree && artifactsDir) {
-      try {
-        const dir = path.join(artifactsDir, namespace);
-        fs.mkdirSync(dir, { recursive: true });
-        const handoff = captureHandoff(record.worktree.path, path.join(dir, `${runId}.patch`));
-        if (handoff.patchPath) record.worktree.patchPath = handoff.patchPath;
-        record.worktree.changedFiles = handoff.changedFiles;
-      } catch {
-        // handoff capture is best-effort; the worktree path on the record is the fallback
+    // Worktree handoff/cleanup policy:
+    // - A run that did NOT abort (completed/failed/empty/schema_invalid)
+    //   captures its full patch (incl. untracked files) beside the artifact;
+    //   the worktree itself is kept on disk for the 7-day inspection window
+    //   and removed by sweepRunArtifacts alongside the aged-out artifact.
+    // - An aborted run (signal/cancel/host-shutdown) never captures a patch:
+    //   the child did not complete, so its partial tree is not a reliable
+    //   handoff. Its worktree is removed immediately so an interrupt or
+    //   parent exit can never leak a detached worktree. The worktree path is
+    //   dropped from the record so /fleet never advertises a path that no
+    //   longer exists.
+    if (record.worktree) {
+      if (abortReason !== undefined) {
+        removeWorktree(record.worktree.repoRoot ?? null, record.worktree.path);
+        record.worktree = undefined;
+      } else if (artifactsDir) {
+        try {
+          const dir = path.join(artifactsDir, namespace);
+          fs.mkdirSync(dir, { recursive: true });
+          const handoff = captureHandoff(record.worktree.path, path.join(dir, `${runId}.patch`));
+          if (handoff.patchPath) record.worktree.patchPath = handoff.patchPath;
+          record.worktree.changedFiles = handoff.changedFiles;
+        } catch {
+          // handoff capture is best-effort; the worktree path on the record is the fallback
+        }
       }
     }
 

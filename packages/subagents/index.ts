@@ -552,6 +552,26 @@ export default function subagents(pi: ExtensionAPI) {
   // ghost 'running' records left by dead host processes. Once per process.
   sweepRunArtifactsOnce(ARTIFACTS_ROOT);
 
+  // Deterministic cascading cancellation: Esc/quit/reload/session-replacement
+  // must not orphan in-process children. Foreground tasks are already aborted
+  // via the tool signal pi passes to execute(), but background runs deliberately
+  // carry no tool signal (pi aborts tool signals after execute returns, which
+  // would kill them prematurely) — they only die here. Aborting a controller
+  // triggers session.abort() in runChild, which tears down the child and, for
+  // worktree runs, removes the worktree immediately (no patch captured). A
+  // hard exit (SIGKILL) that skips this handler is caught on the next host
+  // startup by sweepRunArtifactsOnce, which reaps ghost runs AND their
+  // worktrees.
+  pi.on('session_shutdown', () => {
+    for (const controller of cancellables.values()) {
+      try {
+        controller.abort();
+      } catch {
+        // best-effort; one failing abort must not skip the rest
+      }
+    }
+  });
+
   pi.registerTool({
     name: 'dispatch',
     label: 'Dispatch Subagents',

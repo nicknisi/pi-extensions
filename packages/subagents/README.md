@@ -46,7 +46,25 @@ Builder tasks should prefer `worktree: true` over `allowTreeMutation: true`:
 }
 ```
 
-The child runs in a detached worktree at `~/.pi/agent/subagent-worktrees/<runId>` from current `HEAD`. Its writes never touch your working tree, mutating tools stay **parallel** (no `allowTreeMutation`, no serialization), and on completion the full change set — **including new untracked files** — is captured as an untruncated patch at `~/.pi/agent/subagent-runs/subagents/<runId>.patch`. Integration is your call (the central-integrator pattern): inspect the patch, `git apply` what you want. The worktree itself is kept until artifact GC (7 days) for manual inspection; `fleet` `action: 'result'` shows the worktree path, patch path, and changed-file count. Fails fast if the cwd isn't a git repo.
+The child runs in a detached worktree at `~/.pi/agent/subagent-worktrees/<runId>` from current `HEAD`. Its writes never touch your working tree, mutating tools stay **parallel** (no `allowTreeMutation`, no serialization), and on completion the full change set — **including new untracked files** — is captured as an untruncated patch at `~/.pi/agent/subagent-runs/subagents/<runId>.patch`. Integration is your call (the central-integrator pattern): inspect the patch, `git apply` what you want. `fleet` `action: 'result'` shows the worktree path, patch path, and changed-file count. Fails fast if the cwd isn't a git repo.
+
+#### Worktree cleanup policy
+
+- **Completed / failed / empty / schema-invalid runs** (the child finished): the worktree and its `.patch` are kept side-by-side under `~/.pi/agent/subagent-runs/subagents/` for a **7-day inspection window**, then removed together by the startup GC sweep (the `.json` artifact, the `.patch`, and the worktree itself). This is the "kept until artifact GC" window the fleet result view refers to.
+- **Aborted runs** (Esc/interrupt, `fleet` `cancel`, or host shutdown): the child did not complete, so no `.patch` is captured and the worktree is **removed immediately** — an interrupt or parent exit can never leak a detached worktree. The worktree path is dropped from the run record, so `/fleet` never advertises a path that no longer exists.
+- **Hard exit** (SIGKILL, crash, power loss) that skips the graceful shutdown handler: any `running`/`queued` record whose `hostPid` is no longer alive is reaped as `aborted` on the next host startup, and **its worktree is removed at reap time** — so even an ungraceful kill cannot strand a worktree long-term (the 7-day age GC is the final backstop).
+- **Unclaimed `.patch` files**: a `.patch` only exists for a finished run that changed files, and is always a sibling of its `<runId>.json` artifact. It is removed exactly when its artifact is removed — either by the 7-day age GC, or never (if the artifact is still fresh). There is no code path that deletes an artifact but leaves its patch behind, and no code path that writes a patch without an artifact.
+
+#### Cascading cancellation
+
+Esc/interrupt deterministically kills **all** running children — foreground and background alike:
+
+- **Foreground tasks** are aborted through the tool `signal` pi passes to `dispatch`'s `execute()`; the abort propagates to the child `AgentSession.abort()`.
+- **Background tasks** deliberately carry no tool signal (pi aborts tool signals once `execute()` returns, which would kill them prematurely), so they are tracked in a single live `runId → AbortController` registry. A `session_shutdown` handler (quit / reload / `/new` / `/resume` / `/fork`) walks that registry and aborts every active controller, so quitting pi or replacing the session cannot orphan a background run.
+- The `fleet` tool's `cancel` action aborts a single run by runId prefix.
+- Worktree runs that are aborted tear their worktree down immediately (see the cleanup policy above); completed runs keep theirs for the inspection window.
+
+The one residual exposure is a hard `SIGKILL` of the host: in-process children die instantly (they share the host's event loop), but their worktrees and `running` records linger until the next host startup reaps them. There is no way to intercept `SIGKILL` from an extension; the startup reap + 7-day GC are the backstop.
 
 ## How it works
 
@@ -67,6 +85,6 @@ None. No config files, no environment variables.
 - **In-process means no crash isolation.** Children share the parent session's event loop and memory; a pathological child can hurt the host. Untrusted or heavy parallel work should stay on pi-subagents (or a future RPC transport) until this platform grows an isolation option.
 - **Background completion is a notification, not a turn.** The completion message lands in the transcript but doesn't drive the agent — the model learns results when it next acts (or when asked to check `fleet`).
 - **The fleet is per-machine, per-agent-dir.** Records live under `~/.pi/agent/subagent-runs/` and are garbage-collected at startup after 7 days (along with their patches and worktrees).
-- **Background runs live only as long as the host session.** They are detached in-process children; cancel them via the `fleet` tool (`action: 'cancel'`), and when the host exits, running children die with it — their persisted records are reaped as `aborted` on next startup.
+- **Background runs live only as long as the host session.** They are detached in-process children; cancel them via the `fleet` tool (`action: 'cancel'`), or let the `session_shutdown` handler abort them deterministically on quit/reload/session-replacement (see **Cascading cancellation** above). Running records left by a hard exit are reaped as `aborted` (and their worktrees removed) on the next host startup.
 - Depends on pi SDK internals (`createAgentSession`, `DefaultResourceLoader` flags, `SessionManager.inMemory`) that could change across pi versions — runtime-aliased to the host at load time, but type-level drift would surface at extension load.
 - **The recursion guard has a hole.** The in-process depth guard only covers spawns made through the shared runtime; a child that itself shells out to `pi -p` via bash starts a fresh process with none of that context — the same exposure as any pi session with bash access.

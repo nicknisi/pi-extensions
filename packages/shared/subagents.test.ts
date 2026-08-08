@@ -41,6 +41,14 @@ function writeArtifact(root: string, ns: string, record: Partial<RunArtifact> & 
   return file;
 }
 
+function gitRepo(): string {
+  const repo = tmpRoot();
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' });
+  git('init', '-q');
+  git('-c', 'user.email=test@test', '-c', 'user.name=test', 'commit', '-q', '--allow-empty', '-m', 'init');
+  return repo;
+}
+
 describe('sweepRunArtifacts', () => {
   it('deletes records older than the retention window, plus patch siblings', () => {
     const root = tmpRoot();
@@ -81,6 +89,28 @@ describe('sweepRunArtifacts', () => {
     expect(JSON.parse(fs.readFileSync(ours, 'utf8')).status).toBe('running');
   });
 
+  it("removes a ghost run's worktree when reaping (no leak on hard exit)", () => {
+    const root = tmpRoot();
+    const repo = gitRepo();
+    const added = addWorktree(repo, 'ghost-wt');
+    if (!('path' in added)) throw new Error('setup failed');
+    expect(fs.existsSync(added.path)).toBe(true);
+
+    writeArtifact(root, 'subagents', {
+      runId: 'ghost-wt-run',
+      status: 'running',
+      hostPid: 999999999,
+      worktree: { path: added.path, repoRoot: repo },
+    });
+
+    const result = sweepRunArtifacts(root);
+    expect(result.reaped).toBe(1);
+    expect(fs.existsSync(added.path)).toBe(false);
+    const reaped = JSON.parse(fs.readFileSync(path.join(root, 'subagents', 'ghost-wt-run.json'), 'utf8'));
+    expect(reaped.status).toBe('aborted');
+    expect(reaped.worktree).toBeUndefined();
+  });
+
   it('does not reap records without a hostPid (pre-field artifacts)', () => {
     const root = tmpRoot();
     writeArtifact(root, 'subagents', { runId: 'legacy-run', status: 'running' });
@@ -94,14 +124,6 @@ describe('sweepRunArtifacts', () => {
 });
 
 describe('worktree primitives', () => {
-  function gitRepo(): string {
-    const repo = tmpRoot();
-    const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' });
-    git('init', '-q');
-    git('-c', 'user.email=test@test', '-c', 'user.name=test', 'commit', '-q', '--allow-empty', '-m', 'init');
-    return repo;
-  }
-
   it('findRepoRoot finds the toplevel and returns null outside a repo', () => {
     const repo = gitRepo();
     expect(findRepoRoot(path.join(repo))).toBe(fs.realpathSync(repo));
