@@ -118,12 +118,64 @@ Design rules baked in:
 - **Never rejects.** `spawn()` resolves a discriminated union. `schema_invalid` (unparseable/invalid JSON) is deliberately distinct from a schema-valid answer whose _content_ reports failure — engines with retry loops key off that distinction.
 - **The supervisor channel is a closure.** `onSupervisorRequest` registers a `<namespace>_contact_supervisor` tool in the child wired straight to the parent handler — no filesystem protocol, no polling.
 - **Ecosystem recursion guard, honored not namespaced.** Spawning is refused when `PI_SUBAGENT_DEPTH` / `PI_SUBAGENT_CHILD` are set (i.e. your extension is itself running inside a pi-subagents child).
-- **Run registry.** `listRuns()` returns recent runs (newest first, capped at 200); `activeCount()` reports in-flight spawns. Concurrency is capped per runtime (`maxConcurrent`, default 4). pi's loader gives every extension its own evaluated copy of this module, so a _cross-extension_ limiter is impossible — size each runtime accordingly.
-- **Timeout/abort.** `timeoutMs` (default 15 min, `0` disables) and `signal` both map to `session.abort()`; both produce `kind: 'aborted'`.
+- **Run registry + background.** `listRuns()` returns recent runs (newest first, capped at 200); `activeCount()` reports in-flight spawns. `spawnDetached()` launches without awaiting, returning `{ runId, done }` for background work. Concurrency is capped per runtime (`maxConcurrent`, default 4). pi's loader gives every extension its own evaluated copy of this module, so a _cross-extension_ limiter is impossible — size each runtime accordingly.
+- **Persisted run artifacts.** With `artifactsDir` on `createSubagentRuntime`, every run persists its record (status, timing, usage, bounded output) to `<dir>/<namespace>/<runId>.json` on each status transition — the cross-extension fleet view, since the on-disk root is the only layer pi's module isolation leaves shared. `readRunArtifacts(rootDir)` reads records across namespaces.
+- **Timeout/abort/budgets.** `timeoutMs` (default 15 min, `0` disables) and `signal` both map to `session.abort()`; `maxTurns` / `maxToolCalls` abort the child when exceeded. All three produce `kind: 'aborted'` with a reason-specific error.
 
 Also exported: `resolveContainedAgentResource(kind, name, leaf)` — containment-checked resolution of a bare name under the agent dir (`~/.pi/agent/extensions/<name>/<leaf>` etc.) for untrusted config input; returns `null` for anything with path separators or `..`.
 
-Non-goals for now: background/detached runs, persisted run artifacts, worktree isolation, and orchestration (chains/workflows) are deliberately out of this module — the registry is in-memory and children share the parent's event loop and memory (no crash isolation; a pathological child can hurt the host session).
+Non-goals for now: worktree isolation and orchestration UI are deliberately out of this module — children share the parent's event loop and memory (no crash isolation; a pathological child can hurt the host session). Orchestration itself lives in `workflow.ts` (below).
+
+### Workflow engine (`workflow.ts`)
+
+```ts
+import { runWorkflow } from '@nicknisi/pi-shared';
+```
+
+Declarative multi-stage workflows over a `SubagentRuntime`. A workflow is a list of stages with explicit (`needs`) or implicit (linear chain — each stage depends on the previously declared one) dependencies; the engine schedules them over the runtime and resolves a `WorkflowResult` (never rejects).
+
+```ts
+const result = await runWorkflow(
+  {
+    name: 'review-pipeline',
+    concurrency: 4, // scheduler cap; default 4
+    tokenBudget: 500_000, // stop starting new stages once exceeded
+    stages: [
+      { id: 'scout', needs: [], agent: 'scout', prompt: 'Map the auth module…' },
+      {
+        id: 'reviewers',
+        needs: ['scout'],
+        foreach: ['correctness', 'tests', 'simplicity'], // one spawn per item
+        prompt: (ctx, lens) => `Review as ${lens}. Context: ${(ctx.results.scout as any)?.output}`,
+        gate: (outcome) => (outcome.output.length > 200 ? true : { revise: 'Too thin — be specific.' }),
+      },
+      {
+        id: 'fix',
+        needs: ['reviewers'],
+        sharesTree: true, // declares it edits the shared working tree
+        tools: ['read', 'edit', 'bash'],
+        prompt: (ctx) => `Apply the feedback. Diff so far:\n${ctx.treeDiffs['fix'] ?? ''}`,
+      },
+    ],
+  },
+  runtime,
+  { cwd: process.cwd(), resumeFrom: previousRunDir },
+);
+```
+
+Full stage schema: `{ id, agent?, prompt (string | (ctx, item?, index?) => string), model?, tools?, systemPrompt?, outputSchema?, needs?, sharesTree?, foreach?, gate?, maxGateAttempts?, retries?, maxTurns?, maxToolCalls?, timeoutMs? }`. `prompt`/`gate` receive a `StageContext`: `results` (typed outcomes of completed stages), `treeDiffs`, `cwd`, `runDir`.
+
+Semantics:
+
+- **Two-channel handoff.** (1) Typed results flow via `ctx.results`. (2) When a `sharesTree` stage completes ok in a git repo, its bounded (64KB) `git diff HEAD` snapshot flows to dependents via `ctx.treeDiffs[stageId]`.
+- **Resource exclusion.** A `sharesTree` stage never runs concurrently with ANY other stage: while one is queued the scheduler pauses new starts and waits for the running set to drain. Non-tree stages overlap freely up to `concurrency`. Conservative by design — declare `sharesTree` on anything that reads or writes the working tree.
+- **Failure containment.** A failed dependency transitively skips dependents (`kind: 'skipped'`). An exhausted `tokenBudget` skips unstarted stages (`kind: 'budget_exceeded'`). Workflow `ok` = every stage ok.
+- **`foreach`.** Static array or `{ from: stageId, pick? }` resolving items from a dependency's ok outcome (`pick` defaults to the outcome's `data`). Each item is an independent spawn counting individually against concurrency; the stage outcome's `output` is the JSON array of per-item outputs (`data` is the array of validated per-item data when `outputSchema` is set). One failed item fails the stage.
+- **`gate` — the vacuous-pass defense.** Runs on each ok outcome; `{ revise: feedback }` re-spawns with the feedback appended (up to `maxGateAttempts`, default 2), exhaustion or a gate exception fails the stage as `gate_failed`. The engine treats runtime `empty` outcomes as failures; use gates to enforce real content contracts ("PASS with no findings" is not a pass).
+- **`retries`.** Re-spawns on `crashed`/`empty` only — `aborted` and `schema_invalid` fail immediately.
+- **Control artifacts + resume.** Every run writes `status.json` and `stages/<id>.json` (outcome + treeDiff) under its runDir — default `<agentDir>/workflow-runs/<name>-<timestamp>` — enabling `resumeFrom` to skip previously-ok stages and reload their outcomes (and tree diffs) from disk.
+
+The engine depends only on the `SubagentRuntime` **type**, so tests drive it with a hand-rolled fake — see `workflow.test.ts` (run: `pnpm test`).
 
 ## Usage
 

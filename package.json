@@ -11,6 +11,7 @@
     "lint": "oxlint .",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
+    "test": "vitest run",
     "fmt": "oxfmt .",
     "fmt:check": "oxfmt --check .",
     "changeset": "changeset",
@@ -25,7 +26,8 @@
     "@types/node": "^24.0.0",
     "@typescript/native-preview": "7.0.0-dev.20260707.2",
     "oxfmt": "^0.62.0",
-    "oxlint": "^1.77.0"
+    "oxlint": "^1.77.0",
+    "vitest": "^3.2.4"
   },
   "packageManager": "pnpm@11.20.0"
 }

@@ -3,3 +3,4 @@ dist/
 .tsconfig.build.json
 *.log
 .DS_Store
+.pi-subagents/

@@ -55,9 +55,9 @@ Local paths are added to pi's settings without copying — edits in the repo are
 
 ### Library
 
-| Package                    | What it does                                                                                                                                                                                                                                                                                                                                          |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [shared](packages/shared/) | `@nicknisi/pi-shared` — helper library (not an extension): `getModelProvider` for one-off LLM calls, TUI utilities (gradient text, tree section removal, two-column layout, escape sanitization, render dispatcher), `SearchableSelectList`, and the in-process subagent runtime (`createSubagentRuntime`). Consumed via `workspace:*` by 7 packages. |
+| Package                    | What it does                                                                                                                                                                                                                                                                                                                                                                                           |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [shared](packages/shared/) | `@nicknisi/pi-shared` — helper library (not an extension): `getModelProvider` for one-off LLM calls, TUI utilities (gradient text, tree section removal, two-column layout, escape sanitization, render dispatcher), `SearchableSelectList`, the in-process subagent runtime (`createSubagentRuntime`), and the declarative workflow engine (`runWorkflow`). Consumed via `workspace:*` by 7 packages. |
 
 ## Development
 
