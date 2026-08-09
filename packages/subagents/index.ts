@@ -1551,12 +1551,11 @@ export default function subagents(pi: ExtensionAPI) {
           ? `${count} task${count === 1 ? '' : 's'}`
           : '...';
       const spinner = `${theme.fg('muted', SPINNER_FRAMES[frame % SPINNER_FRAMES.length]!)} `;
-      const lines = [dispatchHeader(summary, theme, spinner)];
-      if (details && details.tasks.length > 0) {
-        lines.push('');
-        lines.push(...renderTaskTree(details.tasks, theme, frame));
-      }
-      return makeText(ctx.lastComponent, lines.join('\n'));
+      // Header only — the tree is rendered solely by renderResult. pi keeps
+      // the renderCall component on screen alongside renderResult once the
+      // first onUpdate fires, and emit() populates liveDispatches and fires
+      // onUpdate together — so rendering the tree here too shows it twice.
+      return makeText(ctx.lastComponent, dispatchHeader(summary, theme, spinner));
     },
 
     renderResult(result, options, theme, ctx) {
