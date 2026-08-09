@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-subagents",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "First-party subagent dispatch and fleet: fan out parallel child agents and inspect their runs — no pi-subagents dependency",
   "keywords": [
     "pi",

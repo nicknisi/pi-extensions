@@ -1,5 +1,12 @@
 # @nicknisi/pi-codemode
 
+## 0.2.1
+
+### Patch Changes
+
+- Updated dependencies [9cd49ce]
+  - @nicknisi/pi-shared@0.4.0
+
 ## 0.2.0
 
 ### Minor Changes

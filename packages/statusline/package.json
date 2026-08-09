@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-statusline",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Custom footer: model, cost, context usage, git branch, lines changed, tmux status files",
   "keywords": [
     "pi",
