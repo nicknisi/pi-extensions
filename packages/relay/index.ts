@@ -38,6 +38,7 @@ import {
   previewBody,
   readAudit,
   readOutgoingAsk,
+  resolveAskByRef,
   trackIncomingAsk,
   trackOutgoingAsk,
   unreadCount,
@@ -49,6 +50,7 @@ import {
   claimAlias,
   deriveAddr,
   ensureRoot,
+  isValidAliasName,
   listAliases,
   listRecords,
   presenceOf,
@@ -187,17 +189,19 @@ export default function relay(pi: ExtensionAPI) {
 
   /** Hand a letter to pi (or to a waiting ask). Returns false if the session refused every delivery attempt. */
   function deliver(letter: Letter): boolean {
-    // Receive-side choke point: every letter that reaches this session goes
-    // through here, so the audit log captures delivery, not just deposit.
-    appendAudit(root, {
-      ts: Date.now(),
-      event: 'deliver',
-      kind: letter.kind,
-      from: letter.from.addr,
-      to: self!.addr,
-      messageId: letter.id,
-      preview: previewBody(letter.body),
-    });
+    // Audited after the delivery attempts below: a 'deliver' record means the
+    // session actually accepted the letter; refusal records 'deliver-failed'
+    // (the caller re-deposits, so logging here would duplicate every retry).
+    const auditDelivery = (event: 'deliver' | 'deliver-failed') =>
+      appendAudit(root, {
+        ts: Date.now(),
+        event,
+        kind: letter.kind,
+        from: letter.from.addr,
+        to: self!.addr,
+        messageId: letter.id,
+        preview: previewBody(letter.body),
+      });
     // Route replies/cancels for our own outstanding asks to their waiters.
     if ((letter.kind === 'reply' || letter.kind === 'cancel') && letter.replyTo) {
       const waiter = askWaiters.get(letter.replyTo);
@@ -209,6 +213,7 @@ export default function relay(pi: ExtensionAPI) {
             ? { replied: true, body: letter.body, from: letter.from.name }
             : { replied: false, reason: `cancelled by ${letter.from.name}` },
         );
+        auditDelivery('deliver');
         return true;
       }
     }
@@ -235,18 +240,22 @@ export default function relay(pi: ExtensionAPI) {
     // losing the letter.
     try {
       pi.sendMessage(message, { triggerTurn: true, deliverAs: 'steer' });
+      auditDelivery('deliver');
       return true;
     } catch {
       try {
         pi.sendMessage(message, { triggerTurn: true, deliverAs: 'followUp' });
+        auditDelivery('deliver');
         return true;
       } catch {
         try {
           pi.sendMessage(message, { triggerTurn: false });
+          auditDelivery('deliver');
           return true;
         } catch {
           // session is shutting down or otherwise undeliverable — the caller
           // re-deposits the letter so a future drain retries
+          auditDelivery('deliver-failed');
           return false;
         }
       }
@@ -322,6 +331,7 @@ export default function relay(pi: ExtensionAPI) {
     // distinct namespace from session display names.
     if (to.startsWith('@')) {
       const name = to.slice(1);
+      if (!isValidAliasName(name)) return { error: `No alias '@${name}' is claimed (invalid alias name).` };
       const alias = readAlias(root, name);
       if (!alias)
         return { error: `No alias '@${name}' is claimed. Claim it with relay { action: "claim", to: "@${name}" }.` };
@@ -398,8 +408,7 @@ export default function relay(pi: ExtensionAPI) {
    * No inference — identical calls must not change semantics based on
    * invisible broker state (the old single-pending-ask fallback did). */
   function resolvePendingAsk(replyTo: string): { ask?: Letter; error?: string } {
-    const asks = pendingAsks(root, self!.addr);
-    const found = asks.find((a) => a.id === replyTo || a.id.startsWith(replyTo));
+    const found = resolveAskByRef(root, self!.addr, replyTo);
     return found ? { ask: found } : { error: `No pending ask matches '${replyTo}'. Use 'pending' to list them.` };
   }
 
@@ -613,7 +622,7 @@ export default function relay(pi: ExtensionAPI) {
         case 'claim': {
           if (!params.to) return toolResult("claim requires 'to' (an @alias, e.g. '@ci').");
           const name = params.to.startsWith('@') ? params.to.slice(1) : params.to;
-          if (!/^[a-z0-9][a-z0-9_-]{0,31}$/i.test(name)) {
+          if (!isValidAliasName(name)) {
             return toolResult(`Alias '@${name}' is invalid: letters/digits/_/-, 1-32 chars, leading alnum.`);
           }
           claimAlias(root, name, self.addr, self.sessionId);

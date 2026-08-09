@@ -17,6 +17,7 @@ import {
 } from './format.js';
 import {
   appendAudit,
+  auditLogPath,
   awaitReceipt,
   clearAsk,
   deposit,
@@ -25,6 +26,7 @@ import {
   previewBody,
   readAudit,
   readOutgoingAsk,
+  resolveAskByRef,
   trackIncomingAsk,
   trackOutgoingAsk,
   unreadCount,
@@ -36,6 +38,7 @@ import {
   claimAlias,
   clearAlias,
   deriveAddr,
+  isValidAliasName,
   listAliases,
   listRecords,
   presenceOf,
@@ -287,6 +290,20 @@ describe('aliases', () => {
     expect(readAlias(root, 'ci')).toBeNull();
     expect(readRecord(root, 'aaaa1111bbbb')).toBeNull(); // sanity: readRecord on missing → null
   });
+
+  it('alias names are validated — traversal never reaches the filesystem', () => {
+    const root = tmpRoot();
+    expect(isValidAliasName('ci')).toBe(true);
+    expect(isValidAliasName('dotfiles-2')).toBe(true);
+    expect(isValidAliasName('../../tmp/x')).toBe(false);
+    expect(isValidAliasName('..')).toBe(false);
+    expect(isValidAliasName('a/b')).toBe(false);
+    expect(isValidAliasName('UPPER')).toBe(false); // case-sensitive storage, lowercase-only names
+    expect(isValidAliasName('')).toBe(false);
+    // readAlias refuses invalid names outright (defense in depth behind resolveTarget)
+    expect(readAlias(root, '../../../../etc/passwd')).toBeNull();
+    expect(readAlias(root, 'UPPER')).toBeNull();
+  });
 });
 
 describe('audit log', () => {
@@ -338,6 +355,46 @@ describe('audit log', () => {
     });
     const after = readAudit(root).filter((e) => e.messageId === 'd-1');
     expect(after.map((e) => e.event)).toEqual(['deposit', 'deliver']);
+  });
+
+  it('audit log rotates at the 1 MB cap, keeping one previous generation', () => {
+    const root = tmpRoot();
+    const big = 'y'.repeat(1024);
+    // ~1.1 MB of audit records
+    for (let i = 0; i < 1100; i++) {
+      appendAudit(root, {
+        ts: 1000 + i,
+        event: 'deposit',
+        kind: 'message',
+        from: 'from-addr',
+        to: 'to-addr',
+        messageId: `m-${i}`,
+        preview: big,
+      });
+    }
+    const file = auditLogPath(root);
+    expect(fs.existsSync(`${file}.1`)).toBe(true); // rotated generation exists
+    expect(fs.statSync(file).size).toBeLessThan(1024 * 1024); // fresh log is small
+    expect(readAudit(root, 10).length).toBeGreaterThan(0); // still readable after rotation
+  });
+
+  it('previewBody strips ANSI/CSI escapes (peer-controlled text reaches raw terminals)', () => {
+    expect(previewBody('hello \x1b[31mred\x1b[0m world')).toBe('hello red world');
+    expect(previewBody('\x1b[2J\x1b[Hbye')).toBe('bye');
+  });
+
+  it('resolveAskByRef matches by id or unique prefix, never by inference', () => {
+    const root = tmpRoot();
+    const addr = 'ask00000001';
+    const a1 = letter({ id: 'aaaa1111-0000-0000-0000-000000000001', kind: 'ask' });
+    const a2 = letter({ id: 'bbbb2222-0000-0000-0000-000000000002', kind: 'ask' });
+    trackIncomingAsk(root, addr, a1);
+    trackIncomingAsk(root, addr, a2);
+    expect(resolveAskByRef(root, addr, a1.id)?.id).toBe(a1.id); // exact id
+    expect(resolveAskByRef(root, addr, 'bbbb2222')?.id).toBe(a2.id); // prefix
+    expect(resolveAskByRef(root, addr, 'nope')).toBeNull(); // no match
+    // one pending ask alone is NOT implicitly the reply target — caller must pass its ref
+    expect(resolveAskByRef(root, addr, '')).toBeNull();
   });
 
   it('formatAudit renders entries and handles the empty case', () => {

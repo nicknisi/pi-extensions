@@ -223,7 +223,7 @@ export function clearAsk(root: string, addr: string, askId: string): void {
 
 export interface AuditRecord {
   ts: number;
-  event: 'deposit' | 'deliver';
+  event: 'deposit' | 'deliver' | 'deliver-failed';
   kind: Letter['kind'];
   from: string;
   to: string;
@@ -235,12 +235,22 @@ const AUDIT_PREVIEW_CHARS = 80;
 
 /** Whitespace-collapsed body preview — never the full payload. */
 export function previewBody(body: string): string {
-  return body.replace(/\s+/g, ' ').trim().slice(0, AUDIT_PREVIEW_CHARS);
+  // Strip ANSI/CSI escapes — the preview is peer-controlled text that can
+  // reach a raw terminal via the non-UI /relay log print path.
+  // eslint-disable-next-line no-control-regex
+  return body
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]|\x1b./g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, AUDIT_PREVIEW_CHARS);
 }
 
 export function auditLogPath(root: string): string {
   return path.join(root, 'audit.log');
 }
+
+/** Audit log cap: at ~1 MB the current log becomes audit.log.1 (single generation) and a fresh log starts. */
+const AUDIT_MAX_BYTES = 1024 * 1024;
 
 /** Append one audit record. Best-effort: never throws (audit must not break delivery). */
 export function appendAudit(root: string, record: AuditRecord): void {
@@ -248,6 +258,10 @@ export function appendAudit(root: string, record: AuditRecord): void {
     const file = auditLogPath(root);
     if (!fs.existsSync(file)) fs.writeFileSync(file, '', { mode: 0o600 });
     fs.appendFileSync(file, `${JSON.stringify(record)}\n`);
+    // Bounded growth: rotate once past the cap, keeping one previous generation.
+    if (fs.statSync(file).size > AUDIT_MAX_BYTES) {
+      fs.renameSync(file, `${file}.1`);
+    }
   } catch {
     // audit failure never breaks the mail path
   }
@@ -274,6 +288,12 @@ export function readAudit(root: string, limit = 50): AuditRecord[] {
     }
   }
   return out.slice(-limit);
+}
+
+/** Resolve a pending ask by explicit replyTo id or unique prefix. No inference. */
+export function resolveAskByRef(root: string, addr: string, replyTo: string): Letter | null {
+  if (!replyTo) return null; // empty prefix matches every id — an explicit ref is required
+  return pendingAsks(root, addr).find((a) => a.id === replyTo || a.id.startsWith(replyTo)) ?? null;
 }
 
 /** Asks we have received and not yet answered, oldest first. */

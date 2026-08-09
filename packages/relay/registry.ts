@@ -91,7 +91,15 @@ export function writeAlias(root: string, alias: AliasRecord): void {
   fs.renameSync(tmp, file);
 }
 
+/** Alias names: lowercase alnum start, then alnum/_/-, 1-32 chars. */
+export function isValidAliasName(name: string): boolean {
+  return /^[a-z0-9][a-z0-9_-]{0,31}$/.test(name);
+}
+
 export function readAlias(root: string, name: string): AliasRecord | null {
+  // The name can come from LLM-controlled tool input — never let it reach
+  // the filesystem unvalidated (e.g. '@../../../../tmp/x').
+  if (!isValidAliasName(name)) return null;
   try {
     const parsed = JSON.parse(fs.readFileSync(aliasPath(root, name), 'utf8'));
     if (parsed && typeof parsed.name === 'string' && typeof parsed.addr === 'string') {
