@@ -48,6 +48,10 @@ import {
   sweepRunArtifactsOnce,
   sanitizeTerminalLabel,
   SearchableSelectList,
+  parseAmpDispatch,
+  parseUnifiedDiff,
+  type PatchHunk,
+  type ParsedPatch,
   type RunArtifact,
   type SpawnOptions,
   type SpawnResult,
@@ -464,7 +468,9 @@ class FleetOverlay implements Component, Focusable {
       this.tui.requestRender();
       return;
     }
-    if (matchesKey(data, 'c')) {
+    // 'c' cancels only when the filter is empty — otherwise the keystroke
+    // belongs to the SearchableSelectList's type-to-filter input.
+    if (matchesKey(data, 'c') && this.list.filterValue === '') {
       this.cancelCurrent();
       this.invalidate();
       this.tui.requestRender();
@@ -597,24 +603,6 @@ class FleetOverlay implements Component, Focusable {
 // discard, and an expandable full-diff view. Apply/discard decisions persist
 // to ~/.pi/agent/subagent-patches/state.json so /patches survives restart.
 
-interface PatchFileStat {
-  path: string;
-  added: number;
-  removed: number;
-  created: boolean;
-  header: string[];
-}
-interface PatchHunk {
-  fileIndex: number;
-  header: string;
-  body: string[];
-}
-interface ParsedPatch {
-  files: PatchFileStat[];
-  hunks: PatchHunk[];
-  totalAdded: number;
-  totalRemoved: number;
-}
 interface PatchState {
   version: 1;
   decisions: Record<string, { decision: 'applied' | 'discarded'; at: number }>;
@@ -632,72 +620,6 @@ interface PatchEntry {
 }
 
 const PATCH_DIFF_CAP = 2000;
-
-function parseUnifiedDiff(text: string): ParsedPatch {
-  const lines = text.split('\n');
-  const files: PatchFileStat[] = [];
-  const hunks: PatchHunk[] = [];
-  let totalAdded = 0;
-  let totalRemoved = 0;
-  let fileIndex = -1;
-  let header: string[] | null = null;
-  let hunk: PatchHunk | null = null;
-  const flushHunk = () => {
-    if (hunk) {
-      hunks.push(hunk);
-      hunk = null;
-    }
-  };
-  for (const line of lines) {
-    if (line.startsWith('diff --git ')) {
-      flushHunk();
-      fileIndex = files.length;
-      header = [line];
-      files.push({ path: '', added: 0, removed: 0, created: false, header: [] });
-      continue;
-    }
-    if (header) {
-      if (line.startsWith('--- ')) {
-        header.push(line);
-        if (line.slice(4).trim() === '/dev/null') files[fileIndex]!.created = true;
-        continue;
-      }
-      if (line.startsWith('+++ ')) {
-        header.push(line);
-        const dst = line.slice(4).trim().replace(/^b\//, '');
-        if (dst !== '/dev/null') files[fileIndex]!.path = dst;
-        continue;
-      }
-      if (line.startsWith('@@')) {
-        files[fileIndex]!.header = header;
-        header = null;
-        flushHunk();
-        hunk = { fileIndex, header: line, body: [] };
-        continue;
-      }
-      header.push(line);
-      continue;
-    }
-    if (hunk) {
-      if (line.startsWith('@@')) {
-        flushHunk();
-        hunk = { fileIndex, header: line, body: [] };
-        continue;
-      }
-      if (line.startsWith('+') && !line.startsWith('+++')) {
-        files[fileIndex]!.added++;
-        totalAdded++;
-      } else if (line.startsWith('-') && !line.startsWith('---')) {
-        files[fileIndex]!.removed++;
-        totalRemoved++;
-      }
-      hunk.body.push(line);
-    }
-  }
-  flushHunk();
-  if (header && fileIndex >= 0) files[fileIndex]!.header = header;
-  return { files, hunks, totalAdded, totalRemoved };
-}
 
 function loadPatchState(): PatchState {
   try {
@@ -736,6 +658,8 @@ async function stampPatch(
   }
   for (const f of parsed.files) {
     if (f.created) continue;
+    if (!f.path) continue;
+    // Deletions carry their source path, so an already-deleted target reads stale.
     if (!fs.existsSync(path.resolve(cwd, f.path))) return 'stale';
   }
   return 'conflicts';
@@ -1828,25 +1752,12 @@ export default function subagents(pi: ExtensionAPI) {
     if (event.source === 'extension') return { action: 'continue' };
     if (!event.text.startsWith('&')) return { action: 'continue' };
     if (!ctx.hasUI) return { action: 'continue' };
-    const rest = event.text.slice(1);
-    const sp = rest.search(/\s/);
-    let agentType: string | undefined;
-    let prompt: string;
-    if (sp === -1) {
-      prompt = rest.trim();
-    } else {
-      agentType = rest.slice(0, sp);
-      prompt = rest.slice(sp + 1).trim();
-    }
-    if (!prompt && agentType) {
-      prompt = agentType;
-      agentType = undefined;
-    }
-    if (!prompt) {
+    const parsed = parseAmpDispatch(event.text);
+    if (!parsed) {
       ctx.ui.notify('Usage: &<agent> <prompt> (e.g. &scout how does auth work)', 'warning');
       return { action: 'handled' };
     }
-    const spec: TaskSpec = { task: prompt, agent: agentType };
+    const spec: TaskSpec = { task: parsed.prompt, agent: parsed.agentType };
     void dispatchInline(pi, ctx, runtime, spec);
     return { action: 'handled' };
   });

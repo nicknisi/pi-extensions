@@ -25,6 +25,11 @@ export class SearchableSelectList implements Component {
   onSelect?: (item: SelectItem) => void;
   onCancel?: () => void;
 
+  /** Current filter text — lets hosts gate action keys (e.g. bare `c`) so they don't eat type-to-filter keystrokes. */
+  get filterValue(): string {
+    return this.searchInput.getValue();
+  }
+
   constructor(items: SelectItem[], maxVisible: number, theme: SelectListTheme) {
     this.selectList = new SelectList(items, maxVisible, theme);
     this.selectList.onSelect = (item) => this.onSelect?.(item);

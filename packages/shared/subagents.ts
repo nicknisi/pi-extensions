@@ -54,6 +54,31 @@ export interface SupervisorRequest {
 
 export type SupervisorHandler = (request: SupervisorRequest) => string | Promise<string>;
 
+/**
+ * Parse the editor `&` dispatch prefix: `&<agent> <prompt>`. The first token is
+ * the agent type only when a prompt follows it (`&scout` alone is the prompt
+ * 'scout', not an agent). Returns null when there is no dispatchable prompt.
+ */
+export function parseAmpDispatch(text: string): { agentType?: string; prompt: string } | null {
+  if (!text.startsWith('&')) return null;
+  const rest = text.slice(1);
+  const sp = rest.search(/\s/);
+  let agentType: string | undefined;
+  let prompt: string;
+  if (sp === -1) {
+    prompt = rest.trim();
+  } else {
+    agentType = rest.slice(0, sp) || undefined; // `& foo` — no agent token
+    prompt = rest.slice(sp + 1).trim();
+  }
+  if (!prompt && agentType) {
+    prompt = agentType;
+    agentType = undefined;
+  }
+  if (!prompt) return null;
+  return agentType ? { agentType, prompt } : { prompt };
+}
+
 export interface SpawnOptions {
   /** The task prompt sent to the child. */
   prompt: string;
