@@ -41,6 +41,7 @@ import type { Message } from '@earendil-works/pi-ai';
 import { getModelProvider } from '@nicknisi/pi-shared';
 import {
   getAgentDir,
+  getPackageDir,
   SessionManager,
   type ExtensionAPI,
   type ExtensionContext,
@@ -65,7 +66,7 @@ interface SessionNameConfig {
   notifyOnAutoName: boolean;
   /** Set the terminal/window title to reflect the session summary. */
   setTitle: boolean;
-  /** Title template using {summary} and {dir} placeholders. */
+  /** Title template using {summary}, {dir} and {app} placeholders. */
   titleFormat: string;
 }
 
@@ -170,11 +171,36 @@ function formatSessionLine(s: SessionInfo): string {
   return `${marker} ${title}  — ${s.messageCount} msgs — ${relativeTime(s.modified)} — ${s.id.slice(0, 8)}`;
 }
 
+/**
+ * What the host calls itself, following pi's own `APP_TITLE` rule:
+ * `piConfig.name` from the package dir when a distribution rebrands pi
+ * (arc, tau, …), and the bare glyph otherwise.
+ *
+ * pi computes this internally but does not re-export `APP_TITLE`, so read the
+ * same manifest it reads. `getPackageDir()` honours `PI_PACKAGE_DIR`, which is
+ * how rebranded distributions point pi at their own manifest.
+ */
+function appTitle(): string {
+  try {
+    const manifest = JSON.parse(readFileSync(join(getPackageDir(), 'package.json'), 'utf8')) as {
+      piConfig?: { name?: unknown };
+    };
+    const name = manifest.piConfig?.name;
+    return typeof name === 'string' && name.length > 0 ? name : 'π';
+  } catch {
+    return 'π';
+  }
+}
+
 /** Build a terminal title from the session summary and working directory. */
-function buildTitle(name: string | undefined, cwd: string, format: string): string {
+export function buildTitle(name: string | undefined, cwd: string, format: string): string {
   const dir = basename(cwd) || cwd;
-  if (!name) return `Pi — ${dir}`;
-  return format.replace(/\{summary\}/g, name).replace(/\{dir\}/g, dir);
+  const app = appTitle();
+  if (!name) return `${app} — ${dir}`;
+  return format
+    .replace(/\{summary\}/g, name)
+    .replace(/\{dir\}/g, dir)
+    .replace(/\{app\}/g, app);
 }
 
 // ── Extension ─────────────────────────────────────────────────────────────
