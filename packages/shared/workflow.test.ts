@@ -550,6 +550,59 @@ describe('runWorkflow', () => {
     expect(r2.outcomes['a']?.ok && r2.outcomes['a']?.output).toBe('reran');
   });
 
+  it('re-runs a stage whose agent changed on resume (agent is part of the content key)', async () => {
+    const runDir = tmpRunDir();
+    const first = makeFake(() => ok('reviewed'));
+    const r1 = await run(
+      {
+        name: 'agent-drift',
+        stages: [{ id: 'a', needs: [], prompt: 'same prompt', agent: 'reviewer' }],
+      },
+      first,
+      { runDir },
+    );
+    expect(r1.ok).toBe(true);
+
+    const second = makeFake(() => ok('coded'));
+    const r2 = await run(
+      {
+        name: 'agent-drift',
+        stages: [{ id: 'a', needs: [], prompt: 'same prompt', agent: 'coder' }],
+      },
+      second,
+      { runDir: tmpRunDir(), resumeFrom: runDir },
+    );
+    expect(r2.ok).toBe(true);
+    expect(second.calls.map((c) => c.prompt)).toEqual(['same prompt']);
+    expect(r2.outcomes['a']?.ok && r2.outcomes['a']?.output).toBe('coded');
+  });
+
+  it('forward-referenced needs chain the real upstream key (no <unresolved> poison)', async () => {
+    const runDir = tmpRunDir();
+    // 'a' is declared FIRST but depends on 'b', declared second — the key
+    // chain must resolve b's key before hashing a.
+    const spec = (bPrompt: string) => ({
+      name: 'forward-needs',
+      stages: [
+        { id: 'a', needs: ['b'], prompt: 'a prompt' },
+        { id: 'b', needs: [], prompt: bPrompt },
+      ],
+    });
+    const first = makeFake(() => ok('v1'));
+    const r1 = await run(spec('b prompt v1'), first, { runDir });
+    expect(r1.ok).toBe(true);
+
+    // Changing the FORWARD-referenced upstream must invalidate the dependent.
+    const second = makeFake(() => ok('v2'));
+    const r2 = await run(spec('b prompt v2'), second, {
+      runDir: tmpRunDir(),
+      resumeFrom: runDir,
+    });
+    expect(r2.ok).toBe(true);
+    // Both stages re-ran: b changed, and a's key changed via the upstream chain.
+    expect(second.calls).toHaveLength(2);
+  });
+
   it('replays an unchanged spec on resume with ZERO stage executions', async () => {
     const runDir = tmpRunDir();
     const first = makeFake(() => ok('good'));

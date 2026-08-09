@@ -254,6 +254,7 @@ function computeSpecHash(stages: WorkflowStage[]): string {
   const encoded = stages.map((s) => ({
     id: s.id,
     model: s.model ?? null,
+    agent: s.agent ?? null,
     tools: s.tools ?? null,
     needs: s.needs ?? null,
     retries: s.retries ?? 0,
@@ -286,9 +287,22 @@ function computeSpecHash(stages: WorkflowStage[]): string {
  */
 function computeStageKeys(stages: WorkflowStage[]): Record<string, string> {
   const keys: Record<string, string> = {};
-  for (let i = 0; i < stages.length; i++) {
-    const stage = stages[i]!;
-    const needs = stage.needs ?? (i === 0 ? [] : [stages[i - 1]!.id]);
+  const byId = new Map<string, number>();
+  stages.forEach((stage, index) => byId.set(stage.id, index));
+  const visiting = new Set<string>();
+  // Memoized recursion, not declaration order: explicit `needs` may reference
+  // stages declared LATER in the array (the scheduler resolves deps by id, not
+  // position), and a forward reference must chain the real upstream key —
+  // hashing an '<unresolved>' placeholder would poison the Merkle chain.
+  const keyFor = (id: string): string => {
+    const existing = keys[id];
+    if (existing) return existing;
+    const index = byId.get(id);
+    if (index === undefined) return '<unknown>'; // dangling needs ref — scheduler reports it separately
+    if (visiting.has(id)) throw new Error(`workflow spec has a needs cycle at stage '${id}'`);
+    visiting.add(id);
+    const stage = stages[index]!;
+    const needs = stage.needs ?? (index === 0 ? [] : [stages[index - 1]!.id]);
     const prompt = typeof stage.prompt === 'string' ? stage.prompt : stage.prompt.toString();
     const foreach =
       stage.foreach === undefined
@@ -305,6 +319,7 @@ function computeStageKeys(stages: WorkflowStage[]): Record<string, string> {
       prompt,
       model: stage.model ?? null,
       tools: stage.tools ?? null,
+      agent: stage.agent ?? null,
       systemPrompt: stage.systemPrompt ?? null,
       outputSchema: stage.outputSchema ?? null,
       needs,
@@ -316,10 +331,14 @@ function computeStageKeys(stages: WorkflowStage[]): Record<string, string> {
       hasGate: !!stage.gate,
       sharesTree: !!stage.sharesTree,
       worktree: !!stage.worktree,
-      needsKeys: needs.map((id) => keys[id] ?? '<unresolved>'),
+      needsKeys: needs.map(keyFor),
     };
-    keys[stage.id] = createHash('sha256').update(JSON.stringify(encoded)).digest('hex');
-  }
+    visiting.delete(id);
+    const key = createHash('sha256').update(JSON.stringify(encoded)).digest('hex');
+    keys[id] = key;
+    return key;
+  };
+  for (const stage of stages) keyFor(stage.id);
   return keys;
 }
 
