@@ -1,34 +1,22 @@
-/** Whiteboard extension — voice-driven Mermaid diagram generation integrated with the pi session. */
+/** Whiteboard extension — voice-driven Mermaid diagrams rendered inline in the TUI session. */
 
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import type { Model, Api } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
-import { spawn } from 'node:child_process';
+import { matchesKey, Key, type Component, type TUI } from '@earendil-works/pi-tui';
+import { type ChildProcessByStdio } from 'node:child_process';
+import type { Readable } from 'node:stream';
 
-import {
-  startWhiteboardServer,
-  stopWhiteboardServer,
-  isWhiteboardRunning,
-  getCurrentMermaid,
-  pushMermaid,
-  type ServerCallbacks,
-} from './server.js';
+import { RealtimeTranscriber, transcribeBlob } from './transcription.js';
+import { startRecording, stopRecording, checkAudioTool } from './audio.js';
 import { MERMAID_SYSTEM_PROMPT, stripMermaidFences, buildGenerationMessages, shouldRouteToAgent } from './generate.js';
 
 const ENTRY_TYPE = 'whiteboard';
 
-/** Open a URL in the default browser (cross-platform). */
-function openInBrowser(url: string): void {
-  const [cmd, args] =
-    process.platform === 'darwin'
-      ? ['open', [url]]
-      : process.platform === 'win32'
-        ? ['rundll32', ['url.dll,FileProtocolHandler', url]]
-        : ['xdg-open', [url]];
-  spawn(cmd, args, { detached: true, stdio: 'ignore' })
-    .on('error', () => {})
-    .unref();
-}
+let piRef: ExtensionAPI | null = null;
+let currentMermaid: string | null = null;
+let generatingController: AbortController | null = null;
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /** Extract text from an AssistantMessage content array. */
 function extractAssistantText(content: Array<{ type: string; text?: string }>): string {
@@ -38,274 +26,461 @@ function extractAssistantText(content: Array<{ type: string; text?: string }>): 
     .join('');
 }
 
-interface CapturedContext {
-  modelRegistry: ExtensionContext['modelRegistry'];
-  sessionManager: ExtensionContext['sessionManager'];
-  model: Model<Api> | undefined;
+/** Generate Mermaid from a prompt using the active model + session context. */
+async function generateMermaid(ctx: ExtensionContext, prompt: string): Promise<string> {
+  const model = ctx.model;
+  if (!model) throw new Error('No active model available for diagram generation');
+
+  const messages = buildGenerationMessages(ctx.sessionManager, currentMermaid, prompt);
+
+  const result = await ctx.modelRegistry.complete(
+    model,
+    { systemPrompt: MERMAID_SYSTEM_PROMPT, messages },
+    { reasoningEffort: 'low' },
+  );
+
+  return stripMermaidFences(extractAssistantText(result.content));
 }
 
-let capturedCtx: CapturedContext | null = null;
-let piRef: ExtensionAPI | null = null;
+/** Inject a Mermaid diagram into the session (pi renders it inline via mermaid transformer). */
+function injectDiagram(mermaid: string, prompt: string): void {
+  currentMermaid = mermaid;
 
-/** Build the ServerCallbacks from the captured session context. */
-function buildCallbacks(ctx: ExtensionContext): ServerCallbacks {
-  // Capture for use outside event handlers
-  capturedCtx = {
-    modelRegistry: ctx.modelRegistry,
-    sessionManager: ctx.sessionManager,
-    model: ctx.model,
-  };
-
-  return {
-    transcriptionApiKey: '', // set below after auth resolution
-    transcriptionBaseUrl: 'https://api.openai.com/v1',
-
-    async generate(prompt: string, currentMermaid: string | null): Promise<string> {
-      if (!capturedCtx?.model) {
-        throw new Error('No active model available for diagram generation');
-      }
-
-      const messages = buildGenerationMessages(capturedCtx.sessionManager, currentMermaid, prompt);
-
-      const result = await capturedCtx.modelRegistry.complete(
-        capturedCtx.model,
-        {
-          systemPrompt: MERMAID_SYSTEM_PROMPT,
-          messages,
-        },
-        { reasoningEffort: 'low' },
-      );
-
-      const text = extractAssistantText(result.content);
-      return stripMermaidFences(text);
+  // sendMessage with display: true → pi renders the mermaid block in the TUI
+  // and the message participates in LLM context
+  piRef?.sendMessage(
+    {
+      customType: ENTRY_TYPE,
+      content: `**Whiteboard:** ${prompt}\n\n\`\`\`mermaid\n${mermaid}\n\`\`\``,
+      display: true,
     },
+    { deliverAs: 'nextTurn' },
+  );
 
-    onDiagramGenerated(mermaid: string, prompt: string): void {
-      // Inject into session as a custom message (participates in LLM context)
-      // Use nextTurn so it's available when the user types their next prompt,
-      // but doesn't trigger the agent on its own.
-      piRef?.sendMessage(
-        {
-          customType: ENTRY_TYPE,
-          content: `Whiteboard update: "${prompt}"\n\n\`\`\`mermaid\n${mermaid}\n\`\`\``,
-          display: true,
-        },
-        { deliverAs: 'nextTurn' },
-      );
-
-      // Persist for session restore
-      piRef?.appendEntry(ENTRY_TYPE, { mermaid, prompt, ts: Date.now() });
-    },
-
-    shouldRouteToAgent,
-
-    routeToAgent(transcript: string): void {
-      // Send as a user message — triggers the agent with full context
-      piRef?.sendUserMessage(transcript, { deliverAs: 'followUp' });
-    },
-  };
+  // Persist for session restore
+  piRef?.appendEntry(ENTRY_TYPE, { mermaid, prompt, ts: Date.now() });
 }
+
+/** Route a transcript to the agent as a user message. */
+function routeToAgent(transcript: string): void {
+  piRef?.sendUserMessage(transcript, { deliverAs: 'followUp' });
+}
+
+/** Resolve OpenAI API key + base URL from the model registry. */
+async function resolveOpenAiAuth(ctx: ExtensionContext): Promise<{ apiKey: string; baseUrl: string } | null> {
+  const result = await ctx.modelRegistry.getProviderAuth('openai');
+  const apiKey = result?.auth.apiKey;
+  if (!apiKey) return null;
+  return { apiKey, baseUrl: result.auth.baseUrl ?? 'https://api.openai.com/v1' };
+}
+
+// ─── TUI Overlay Component ────────────────────────────────────────────────────
+
+interface OverlayState {
+  status: 'idle' | 'listening' | 'transcribing' | 'generating' | 'routing' | 'error';
+  transcript: string;
+  partial: string;
+  errorMsg: string;
+}
+
+type ThemeLike = {
+  fg: (color: string, text: string) => string;
+  bold: (text: string) => string;
+};
+
+type OverlayAction = 'talk' | 'continuous' | 'text' | 'clear';
+
+class WhiteboardOverlay implements Component {
+  private state: OverlayState;
+  private tui: TUI | null = null;
+  private readonly theme: ThemeLike;
+
+  constructor(
+    private readonly onAction: (action: OverlayAction) => void,
+    theme: ThemeLike,
+  ) {
+    this.state = { status: 'idle', transcript: '', partial: '', errorMsg: '' };
+    this.theme = theme;
+  }
+
+  setTui(tui: TUI): void {
+    this.tui = tui;
+  }
+
+  setState(updates: Partial<OverlayState>): void {
+    this.state = { ...this.state, ...updates };
+    this.tui?.requestRender();
+  }
+
+  render(_width: number): string[] {
+    const lines: string[] = [];
+    const t = this.theme;
+
+    lines.push(t.bold('📋 Whiteboard'));
+    lines.push('');
+
+    const statusLabels: Record<OverlayState['status'], string> = {
+      idle: t.fg('dim', '● Ready'),
+      listening: t.fg('accent', '◉ Listening...'),
+      transcribing: t.fg('accent', '◌ Transcribing...'),
+      generating: t.fg('accent', '✦ Generating diagram...'),
+      routing: t.fg('accent', '→ Routing to agent...'),
+      error: t.fg('error', '✗ Error'),
+    };
+    lines.push(statusLabels[this.state.status]);
+
+    if (this.state.errorMsg) {
+      lines.push(t.fg('error', `  ${this.state.errorMsg}`));
+    }
+
+    lines.push('');
+
+    if (this.state.partial) {
+      lines.push(t.fg('dim', `  ${this.state.partial}...`));
+    }
+    if (this.state.transcript) {
+      lines.push(`  "${this.state.transcript}"`);
+    }
+
+    lines.push('');
+
+    if (currentMermaid) {
+      lines.push(t.fg('dim', `  Current diagram: ${currentMermaid.length} chars`));
+    } else {
+      lines.push(t.fg('dim', '  No diagram yet'));
+    }
+
+    lines.push('');
+    lines.push(t.fg('dim', '  [space] push to talk  [c] continuous  [t] text  [x] clear  [q] quit'));
+
+    return lines;
+  }
+
+  handleInput(data: string): void {
+    if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl('c')) || matchesKey(data, 'q')) {
+      this.onAction('quit' as OverlayAction);
+    } else if (matchesKey(data, Key.space)) {
+      this.onAction('talk');
+    } else if (matchesKey(data, 'c')) {
+      this.onAction('continuous');
+    } else if (matchesKey(data, 't')) {
+      this.onAction('text');
+    } else if (matchesKey(data, 'x')) {
+      this.onAction('clear');
+    }
+  }
+
+  invalidate(): void {
+    // No cached state to invalidate
+  }
+}
+
+// ─── Extension ────────────────────────────────────────────────────────────────
 
 export default function whiteboard(pi: ExtensionAPI) {
   piRef = pi;
 
   pi.on('session_shutdown', () => {
-    stopWhiteboardServer();
-    capturedCtx = null;
+    piRef = null;
+    currentMermaid = null;
   });
 
   // ─── Restore whiteboard state on session start ───────────────────────────
   pi.on('session_start', async (_event, ctx) => {
-    // Look for the latest persisted whiteboard entry
     const entries = ctx.sessionManager.getEntries();
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i]!;
       if (entry.type === 'custom' && entry.customType === ENTRY_TYPE) {
         const data = entry.data as { mermaid?: string } | undefined;
         if (data?.mermaid) {
-          // If the server is running, push the restored diagram
-          if (isWhiteboardRunning()) {
-            pushMermaid(data.mermaid);
-          }
+          currentMermaid = data.mermaid;
         }
         break;
       }
     }
   });
 
-  // ─── Inject current whiteboard into agent context ────────────────────────
-  // When the user types a prompt, inject the current diagram so the agent
-  // has it in context. display: false keeps it out of the TUI transcript.
-  pi.on('before_agent_start', async (_event, _ctx) => {
-    const mermaid = getCurrentMermaid();
-    if (!mermaid) return;
-
+  // ─── Inject current diagram into agent context ───────────────────────────
+  pi.on('before_agent_start', async () => {
+    if (!currentMermaid) return;
     return {
       message: {
         customType: `${ENTRY_TYPE}-context`,
-        content: `Current whiteboard diagram:\n\`\`\`mermaid\n${mermaid}\n\`\`\`\n\nThe user has been iterating on this diagram via voice/text. Use it as context for their next request.`,
+        content: `Current whiteboard diagram:\n\`\`\`mermaid\n${currentMermaid}\n\`\`\`\n\nThe user has been iterating on this diagram via voice/text. Use it as context.`,
         display: false,
       },
     };
   });
 
-  // ─── /whiteboard command — opens the browser UI ──────────────────────────
+  // ─── /whiteboard command — opens TUI overlay ─────────────────────────────
   pi.registerCommand('whiteboard', {
-    description: 'Open the voice-driven whiteboard (Mermaid diagram generator in the browser)',
+    description: 'Open the voice-driven whiteboard (Mermaid diagrams rendered in the terminal)',
     handler: async (_args, ctx) => {
-      if (ctx.mode !== 'tui' && ctx.mode !== 'rpc') {
-        if (ctx.hasUI) ctx.ui.notify('Whiteboard requires an interactive session', 'error');
+      if (ctx.mode !== 'tui') {
+        if (ctx.hasUI) ctx.ui.notify('Whiteboard requires interactive TUI mode', 'error');
         return;
       }
 
-      // Resolve OpenAI auth for transcription
-      const openaiAuth = await ctx.modelRegistry.getProviderAuth('openai');
-      const transcriptionApiKey = openaiAuth?.auth.apiKey;
-      if (!transcriptionApiKey) {
+      const auth = await resolveOpenAiAuth(ctx);
+      if (!auth) {
         if (ctx.hasUI) ctx.ui.notify('Whiteboard requires an OpenAI API key for transcription', 'error');
         return;
       }
 
-      const callbacks = buildCallbacks(ctx);
-      callbacks.transcriptionApiKey = transcriptionApiKey;
-      callbacks.transcriptionBaseUrl = openaiAuth?.auth.baseUrl ?? 'https://api.openai.com/v1';
+      const audioTool = await checkAudioTool();
+      if (!audioTool) {
+        if (ctx.hasUI)
+          ctx.ui.notify('Whiteboard requires ffmpeg (macOS) or arecord (Linux) for audio capture', 'error');
+        return;
+      }
 
-      const url = await startWhiteboardServer(callbacks);
-      openInBrowser(url);
-      if (ctx.hasUI) ctx.ui.notify(`Whiteboard: ${url}`, 'info');
+      // State for this overlay session
+      let recordingProc: ChildProcessByStdio<null, Readable, Readable> | null = null;
+      let audioChunks: Buffer[] = [];
+      let transcriber: RealtimeTranscriber | null = null;
+      let isContinuous = false;
+      let overlay: WhiteboardOverlay | null = null;
+
+      const generate = async (prompt: string) => {
+        if (!prompt.trim()) return;
+
+        if (generatingController) generatingController.abort();
+        generatingController = new AbortController();
+
+        overlay?.setState({ status: 'generating', errorMsg: '' });
+
+        try {
+          const mermaid = await generateMermaid(ctx, prompt);
+          injectDiagram(mermaid, prompt);
+          overlay?.setState({ status: 'idle', transcript: prompt, partial: '', errorMsg: '' });
+        } catch (err) {
+          overlay?.setState({ status: 'error', errorMsg: String(err) });
+        } finally {
+          generatingController = null;
+        }
+      };
+
+      const handleTranscript = async (transcript: string) => {
+        overlay?.setState({ status: 'transcribing', transcript, partial: '' });
+
+        if (shouldRouteToAgent(transcript)) {
+          overlay?.setState({ status: 'routing' });
+          routeToAgent(transcript);
+          overlay?.setState({ status: 'idle' });
+        } else {
+          await generate(transcript);
+        }
+      };
+
+      const startTalk = () => {
+        if (recordingProc || isContinuous) return;
+        audioChunks = [];
+        overlay?.setState({ status: 'listening', partial: '', errorMsg: '' });
+        recordingProc = startRecording((chunk: Buffer) => audioChunks.push(chunk));
+      };
+
+      const stopTalk = async () => {
+        if (!recordingProc) return;
+        const proc = recordingProc;
+        recordingProc = null;
+        const audioData = await stopRecording(proc);
+
+        if (audioData.length === 0) {
+          overlay?.setState({ status: 'idle' });
+          return;
+        }
+
+        overlay?.setState({ status: 'transcribing' });
+        try {
+          const transcript = await transcribeBlob(audioData, 'raw', {
+            apiKey: auth.apiKey,
+            baseUrl: auth.baseUrl,
+          });
+          await handleTranscript(transcript);
+        } catch (err) {
+          overlay?.setState({ status: 'error', errorMsg: String(err) });
+        }
+      };
+
+      const toggleContinuous = async () => {
+        if (isContinuous) {
+          if (transcriber) {
+            await transcriber.stop();
+            transcriber = null;
+          }
+          if (recordingProc) {
+            recordingProc.kill('SIGINT');
+            recordingProc = null;
+          }
+          isContinuous = false;
+          overlay?.setState({ status: 'idle' });
+          return;
+        }
+
+        isContinuous = true;
+        overlay?.setState({ status: 'listening', partial: '', errorMsg: '' });
+
+        transcriber = new RealtimeTranscriber({
+          apiKey: auth.apiKey,
+          onPartial: (text) => overlay?.setState({ partial: text }),
+          onFinal: (text) => {
+            overlay?.setState({ transcript: text, partial: '' });
+            handleTranscript(text).catch(() => {});
+          },
+          onError: (err) => overlay?.setState({ status: 'error', errorMsg: String(err) }),
+        });
+
+        try {
+          await transcriber.connect();
+          recordingProc = startRecording((chunk: Buffer) => {
+            transcriber?.sendAudio(chunk);
+          });
+        } catch (err) {
+          overlay?.setState({ status: 'error', errorMsg: String(err) });
+          isContinuous = false;
+        }
+      };
+
+      const textInput = async () => {
+        const text = await ctx.ui.input('Diagram description:', '');
+        if (text) {
+          overlay?.setState({ transcript: text });
+          await generate(text);
+        }
+      };
+
+      const clearBoard = () => {
+        currentMermaid = null;
+        overlay?.setState({ transcript: '', partial: '', status: 'idle' });
+      };
+
+      const cleanup = () => {
+        if (recordingProc) recordingProc.kill('SIGINT');
+        if (transcriber) transcriber.stop().catch(() => {});
+      };
+
+      const handleAction = (action: OverlayAction) => {
+        if (action === ('quit' as OverlayAction)) {
+          cleanup();
+          return;
+        }
+        switch (action) {
+          case 'talk':
+            if (recordingProc) stopTalk();
+            else startTalk();
+            break;
+          case 'continuous':
+            toggleContinuous();
+            break;
+          case 'text':
+            textInput();
+            break;
+          case 'clear':
+            clearBoard();
+            break;
+        }
+      };
+
+      await ctx.ui.custom<void>(
+        (tui, theme, _keybindings, done) => {
+          overlay = new WhiteboardOverlay(handleAction, {
+            fg: (color: string, text: string) => theme.fg(color as never, text),
+            bold: (text: string) => theme.bold(text),
+          });
+          overlay.setTui(tui);
+
+          // Wrap done to ensure cleanup
+          const cleanupAndDone = () => {
+            cleanup();
+            done();
+          };
+
+          // Override handleInput to intercept quit
+          const origHandleInput = overlay.handleInput.bind(overlay);
+          overlay.handleInput = (data: string) => {
+            if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl('c')) || matchesKey(data, 'q')) {
+              cleanupAndDone();
+            } else {
+              origHandleInput(data);
+            }
+          };
+
+          return overlay;
+        },
+        { overlay: true },
+      );
     },
   });
 
-  // ─── whiteboard tool — agent can open, update, snapshot, or check status ──
+  // ─── whiteboard tool — agent can update, snapshot, or check status ───────
   pi.registerTool({
     name: 'whiteboard',
     label: 'Whiteboard',
     description:
-      'Voice-driven whiteboard that renders Mermaid diagrams in real-time in the browser and integrates with the pi session. ' +
+      'Voice-driven whiteboard that renders Mermaid diagrams inline in the terminal session. ' +
       'The user can type or speak descriptions and the diagram updates live using the active model with session context. ' +
-      'Actions: "open" to launch the whiteboard, "update" to push a Mermaid diagram to the whiteboard (requires content), ' +
-      '"snapshot" to read the current diagram back, "status" to check if it is running. ' +
-      'Use "update" when you want to show the user a diagram based on codebase analysis. ' +
-      'Use "snapshot" when you need to reference what the user has drawn.',
-    promptSnippet: 'Open or interact with the voice-driven whiteboard (Mermaid diagrams)',
+      'Actions: "update" to push a Mermaid diagram (requires content) — renders inline in the session, ' +
+      '"snapshot" to read the current diagram back, "status" to check if a diagram exists.',
+    promptSnippet: 'Push or read Mermaid diagrams on the whiteboard',
     parameters: Type.Object({
       action: Type.Optional(
-        Type.Union([Type.Literal('open'), Type.Literal('update'), Type.Literal('snapshot'), Type.Literal('status')], {
-          description:
-            'Action: "open" (default) to launch, "update" to push Mermaid, "snapshot" to read current, "status" to check.',
+        Type.Union([Type.Literal('update'), Type.Literal('snapshot'), Type.Literal('status')], {
+          description: 'Action: "update" (default) to push Mermaid, "snapshot" to read current, "status" to check.',
         }),
       ),
       content: Type.Optional(
         Type.String({
-          description:
-            'Mermaid diagram code for action "update". The diagram is pushed to the browser and injected into session context.',
+          description: 'Mermaid diagram code for action "update". Rendered inline in the session.',
         }),
       ),
     }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const action = params.action ?? 'open';
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      const action = params.action ?? 'update';
 
-      // ── status ──────────────────────────────────────────────────────────
       if (action === 'status') {
-        const running = isWhiteboardRunning();
-        const mermaid = getCurrentMermaid();
         return {
           content: [
             {
               type: 'text' as const,
-              text: running
-                ? `Whiteboard is running${mermaid ? ` with a current diagram (${mermaid.length} chars)` : ''}`
-                : 'Whiteboard is not running',
+              text: currentMermaid
+                ? `Whiteboard has a diagram (${currentMermaid.length} chars)`
+                : 'Whiteboard is empty',
             },
           ],
-          details: { running, hasDiagram: mermaid !== null },
+          details: { hasDiagram: currentMermaid !== null },
         };
       }
 
-      // ── snapshot ────────────────────────────────────────────────────────
       if (action === 'snapshot') {
-        const mermaid = getCurrentMermaid();
-        if (!mermaid) {
+        if (!currentMermaid) {
           return {
-            content: [{ type: 'text' as const, text: 'No diagram on the whiteboard yet.' }],
+            content: [{ type: 'text' as const, text: 'No diagram on the whiteboard.' }],
             details: {},
           };
         }
         return {
-          content: [{ type: 'text' as const, text: `Current whiteboard diagram:\n\`\`\`mermaid\n${mermaid}\n\`\`\`` }],
-          details: { mermaid },
+          content: [
+            { type: 'text' as const, text: `Current whiteboard diagram:\n\`\`\`mermaid\n${currentMermaid}\n\`\`\`` },
+          ],
+          details: { mermaid: currentMermaid },
         };
       }
 
-      // ── update (agent pushes a diagram) ──────────────────────────────────
-      if (action === 'update') {
-        const content = params.content?.trim();
-        if (!content) {
-          return {
-            content: [
-              { type: 'text' as const, text: 'Error: `content` (Mermaid code) is required for action "update"' },
-            ],
-            isError: true,
-            details: {},
-          };
-        }
-
-        // Start the server if not running (need auth for future voice input)
-        if (!isWhiteboardRunning()) {
-          const openaiAuth = await ctx.modelRegistry.getProviderAuth('openai');
-          if (!openaiAuth?.auth.apiKey) {
-            return {
-              content: [{ type: 'text' as const, text: 'Error: OpenAI API key required for whiteboard' }],
-              isError: true,
-              details: {},
-            };
-          }
-          const callbacks = buildCallbacks(ctx);
-          callbacks.transcriptionApiKey = openaiAuth.auth.apiKey;
-          callbacks.transcriptionBaseUrl = openaiAuth.auth.baseUrl ?? 'https://api.openai.com/v1';
-          await startWhiteboardServer(callbacks);
-        }
-
-        pushMermaid(content);
-
-        // Inject into session so the agent's context includes the pushed diagram
-        pi.sendMessage(
-          {
-            customType: ENTRY_TYPE,
-            content: `Agent pushed diagram to whiteboard:\n\`\`\`mermaid\n${content}\n\`\`\``,
-            display: true,
-          },
-          { deliverAs: 'nextTurn' },
-        );
-
-        pi.appendEntry(ENTRY_TYPE, { mermaid: content, prompt: 'agent', ts: Date.now() });
-
+      // action === 'update'
+      const content = params.content?.trim();
+      if (!content) {
         return {
-          content: [{ type: 'text' as const, text: 'Diagram pushed to whiteboard.' }],
-          details: { action: 'update', chars: content.length },
-        };
-      }
-
-      // ── open ─────────────────────────────────────────────────────────────
-      const openaiAuth = await ctx.modelRegistry.getProviderAuth('openai');
-      if (!openaiAuth?.auth.apiKey) {
-        return {
-          content: [{ type: 'text' as const, text: 'Error: OpenAI API key required for whiteboard' }],
+          content: [{ type: 'text' as const, text: 'Error: `content` (Mermaid code) is required for action "update"' }],
           isError: true,
           details: {},
         };
       }
 
-      const callbacks = buildCallbacks(ctx);
-      callbacks.transcriptionApiKey = openaiAuth.auth.apiKey;
-      callbacks.transcriptionBaseUrl = openaiAuth.auth.baseUrl ?? 'https://api.openai.com/v1';
-
-      const url = await startWhiteboardServer(callbacks);
-      openInBrowser(url);
+      injectDiagram(content, 'agent');
 
       return {
-        content: [{ type: 'text' as const, text: `Whiteboard opened at ${url}` }],
-        details: { url },
+        content: [{ type: 'text' as const, text: 'Diagram pushed to whiteboard and rendered in session.' }],
+        details: { action: 'update', chars: content.length },
       };
     },
   });

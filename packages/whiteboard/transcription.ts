@@ -44,7 +44,6 @@ export class RealtimeTranscriber {
       }
 
       this.ws.on('open', () => {
-        // Configure the transcription session
         this.ws!.send(
           JSON.stringify({
             type: 'transcription_session.update',
