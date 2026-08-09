@@ -145,6 +145,83 @@ Events:
 
 Read the ledger back by scanning `ctx.sessionManager.getEntries()` for `entry.type === 'custom' && entry.customType === 'codemode-runscope'` (e.g. on `session_start` to reconstruct a run view). Entries are not rendered in the transcript unless you register a renderer via `pi.registerEntryRenderer('codemode-runscope', ...)`.
 
+## Recipes
+
+### Adversarial gauntlet
+
+A self-contained quality gate: one **builder** stage (`sharesTree: true`) edits the tree, a synchronous **critic gate** reads the _real_ resulting `git diff HEAD` and forces the builder to revise up to `maxGateAttempts: 3` times. A second, independent **critic** stage then reviews the captured `treeDiffs['builder']` — the ground-truth diff that `sharesTree` hands to dependents — and emits a final pass/fail. No new runtime code; this is plain `runWorkflow` over the existing engine.
+
+```ts
+import { execSync } from 'node:child_process';
+
+const TARGET = 'src/auth.ts';
+const MAX_ADDED_LINES = 400;
+
+function critic(diff: string): string[] {
+  const issues: string[] = [];
+  if (!new RegExp(`diff --git a/${TARGET}`).test(diff)) issues.push(`did not touch ${TARGET}`);
+  if (!/\.test\.ts\b/.test(diff)) issues.push('no test file changed');
+  if (/console\.log|debugger/.test(diff)) issues.push('contains console.log / debugger');
+  const added = diff.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).length;
+  if (added > MAX_ADDED_LINES) issues.push(`diff is ${added} added lines (>${MAX_ADDED_LINES})`);
+  return issues;
+}
+
+const result = await runWorkflow({
+  name: 'adversarial-gauntlet',
+  stages: [
+    {
+      id: 'builder',
+      agent: 'builder',
+      sharesTree: true,
+      tools: ['read', 'bash', 'edit', 'write'],
+      prompt: `Implement the refresh-token rotation fix in ${TARGET}. Add or update a test. Keep the diff tight.`,
+      maxGateAttempts: 3,
+      gate: (outcome) => {
+        // The builder's spawn has resolved, so the working tree holds its edits.
+        // Read the REAL resulting diff synchronously and critique it.
+        let diff = '';
+        try {
+          diff = execSync('git diff HEAD', { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
+        } catch {
+          return { revise: 'Could not read `git diff HEAD` — is this a git repo?' };
+        }
+        if (!diff.trim()) return { revise: 'Working tree is clean — no changes to critique.' };
+        const issues = critic(diff);
+        return issues.length === 0 ? true : { revise: 'Critic issues:\n- ' + issues.join('\n- ') };
+      },
+    },
+    {
+      id: 'critic',
+      agent: 'critic',
+      tools: ['read', 'grep', 'find', 'ls'],
+      needs: ['builder'],
+      prompt: (ctx) =>
+        `Review this diff for correctness and security. Report pass/fail with concrete issues.\n\n${ctx.treeDiffs['builder'] ?? '(no diff captured)'}`,
+    },
+  ],
+});
+
+const b = result.outcomes['builder'];
+const c = result.outcomes['critic'];
+export default {
+  ok: result.ok,
+  builderAttempts: b?.attempts,
+  builder: result.ok ? 'passed the gauntlet' : `failed (${b && !b.ok ? b.kind : '?'}): ${b && !b.ok ? b.error : ''}`,
+  critic: c && c.ok ? c.output : `critic did not run (${c && !c.ok ? c.kind : '?'}): ${c && !c.ok ? c.error : ''}`,
+  runDir: result.runDir,
+};
+```
+
+**When to use.** You have a concrete, checkable contract for a change (must touch a file, must add a test, must stay under N lines, must not reintroduce a banned pattern) and want the builder to iterate against it autonomously instead of you hand-holding each round. The `sharesTree` diff also flows downstream, so the independent critic stage reviews ground truth rather than the builder's self-report.
+
+**Pitfalls.**
+
+- **The gate runs synchronously, before the engine captures `treeDiffs`.** It cannot be an `async` LLM call — `runWorkflow` does not await the gate, so a Promise would be treated as a non-`true` object with an undefined `revise`. The critic gate is therefore deterministic (regex/structural checks over the real diff). For an LLM critic over the captured diff, use a downstream stage like `critic` above — but note downstream stages **do not loop back** into the builder, so the autonomous revise loop lives entirely in the builder's own `gate`/`maxGateAttempts`.
+- **`execSync` blocks the host event loop.** `git diff HEAD` is fast, but keep the gate's work bounded — never shell out to anything slow. The codemode timeout cannot preempt synchronous JS.
+- **Node builtins import fine; `node_modules` does not.** `import { execSync } from 'node:child_process'` is externalized by bundle-require and resolves at runtime; bare package imports fail (no `node_modules` near the temp dir). The snippet API (`spawn`/`runWorkflow`/`log`) is injected globals, not imports.
+- **The gate sees the real diff, not the bounded 64 KB `treeDiffs` handoff.** A builder producing a huge diff passes the gate's line cap but still truncates for downstream stages — keep `MAX_ADDED_LINES` under the 64 KB budget if downstream consumers need the full diff.
+
 ## Security model
 
 The snippet executes **in-process with the host's full privileges**. This is the same trust boundary as any `bash` tool call and as the original pi-codemode: it's your model, writing code for your session, on your machine. There is no sandbox. Do not point it at untrusted prompt sources.
