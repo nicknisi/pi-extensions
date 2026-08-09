@@ -20,7 +20,13 @@
  *   (kind 'gate_failed'). Runtime 'empty' outcomes are failures — use a
  *   `gate` to enforce content contracts and avoid vacuous passes.
  * - Control artifacts: every run persists status.json + stages/<id>.json
- *   under its runDir, enabling `resumeFrom` to skip previously-ok stages.
+ *   under its runDir. Each stage artifact carries a per-stage content key
+ *   (Merkle-style: the stage's own content plus its upstream needs' keys),
+ *   and status.json carries a `stageKeys` map plus a whole-spec `specHash`
+ *   (back-compat). `resumeFrom` replays a previously-ok stage ONLY if its
+ *   content key still matches — an unchanged prefix replays free; a changed
+ *   stage re-runs itself and (via upstream chaining) everything downstream.
+ *   Old runDirs without `stageKeys` fall back to the whole-spec `specHash`.
  *
  * The engine depends only on the SubagentRuntime TYPE (never pi runtime
  * modules), so tests drive it with a fake runtime.
@@ -120,9 +126,13 @@ export interface WorkflowResult {
 }
 
 export interface WorkflowEvent {
-  type: 'stage_start' | 'stage_complete' | 'stage_failed' | 'stage_skipped' | 'workflow_complete';
+  type: 'stage_start' | 'stage_complete' | 'stage_failed' | 'stage_skipped' | 'workflow_complete' | 'resume_summary';
   stageId?: string;
   outcome?: StageOutcome;
+  /** `resume_summary` only: stages reused from the prior run. */
+  replayed?: number;
+  /** `resume_summary` only: stages still pending (to execute) this run. */
+  rerun?: number;
 }
 
 export interface RunWorkflowOptions {
@@ -232,10 +242,12 @@ async function captureTreeDiff(cwd: string): Promise<string> {
 }
 
 /**
- * Stable sha256 of the stage definitions that affect outcomes, persisted in
- * status.json so resumeFrom can refuse to reuse stale recorded outcomes after
- * the spec changed. NOTE: function-valued prompts hash as '<function>' —
- * edits to prompt closures are NOT covered by the hash.
+ * Stable sha256 of the whole stage list, persisted in status.json for
+ * back-compat (old runDirs without per-stage `stageKeys` resume iff this
+ * matches). Function-valued prompts hash via `.toString()` (their source
+ * text), so edits to prompt closures ARE covered. Resume no longer refuses
+ * on a specHash mismatch — per-stage `stageKeys` (see computeStageKeys)
+ * decide reuse, and a changed spec simply re-runs the changed stages.
  */
 function computeSpecHash(stages: WorkflowStage[]): string {
   // Keys are built in a fixed literal order, so JSON.stringify is deterministic.
@@ -248,13 +260,67 @@ function computeSpecHash(stages: WorkflowStage[]): string {
     maxTurns: s.maxTurns ?? null,
     maxToolCalls: s.maxToolCalls ?? null,
     timeoutMs: s.timeoutMs ?? null,
-    prompt: typeof s.prompt === 'string' ? s.prompt : '<function>',
+    prompt: typeof s.prompt === 'string' ? s.prompt : s.prompt.toString(),
     foreach: s.foreach ? (Array.isArray(s.foreach) ? 'static' : { from: s.foreach.from }) : null,
     hasGate: !!s.gate,
     sharesTree: !!s.sharesTree,
     worktree: !!s.worktree,
   }));
   return createHash('sha256').update(JSON.stringify(encoded)).digest('hex');
+}
+
+/**
+ * Per-stage content-addressed key (Merkle-style): sha256 over a deterministic
+ * JSON encoding of the stage's own content PLUS the content keys of its
+ * upstream (`needs`) stages. Editing one stage changes its key, which changes
+ * every downstream key transitively — so a changed stage invalidates itself
+ * and its dependents, and an unchanged prefix replays free.
+ *
+ * Function-valued prompts hash via `.toString()` (their source text), closing
+ * the '<function>' gap in computeSpecHash. Static foreach arrays include
+ * their item values; computed foreach ({from, pick}) is shape-only here —
+ * the items depend on upstream outcomes, and the upstream keys already cover
+ * that dependency (plus pick.toString()). gate bodies are intentionally NOT
+ * hashed (only `hasGate`); revise a stage's prompt/model/tools to force a
+ * re-run when a gate's contract changes.
+ */
+function computeStageKeys(stages: WorkflowStage[]): Record<string, string> {
+  const keys: Record<string, string> = {};
+  for (let i = 0; i < stages.length; i++) {
+    const stage = stages[i]!;
+    const needs = stage.needs ?? (i === 0 ? [] : [stages[i - 1]!.id]);
+    const prompt = typeof stage.prompt === 'string' ? stage.prompt : stage.prompt.toString();
+    const foreach =
+      stage.foreach === undefined
+        ? null
+        : Array.isArray(stage.foreach)
+          ? { kind: 'static', items: stage.foreach }
+          : {
+              kind: 'computed',
+              from: stage.foreach.from,
+              pick: stage.foreach.pick ? stage.foreach.pick.toString() : null,
+            };
+    const encoded = {
+      id: stage.id,
+      prompt,
+      model: stage.model ?? null,
+      tools: stage.tools ?? null,
+      systemPrompt: stage.systemPrompt ?? null,
+      outputSchema: stage.outputSchema ?? null,
+      needs,
+      retries: stage.retries ?? 0,
+      maxTurns: stage.maxTurns ?? null,
+      maxToolCalls: stage.maxToolCalls ?? null,
+      timeoutMs: stage.timeoutMs ?? null,
+      foreach,
+      hasGate: !!stage.gate,
+      sharesTree: !!stage.sharesTree,
+      worktree: !!stage.worktree,
+      needsKeys: needs.map((id) => keys[id] ?? '<unresolved>'),
+    };
+    keys[stage.id] = createHash('sha256').update(JSON.stringify(encoded)).digest('hex');
+  }
+  return keys;
 }
 
 export async function runWorkflow(
@@ -276,6 +342,7 @@ export async function runWorkflow(
 
   const stages = spec.stages;
   const specHash = computeSpecHash(stages);
+  const stageKeys = computeStageKeys(stages);
   const stageById = new Map<string, WorkflowStage>();
   const state = new Map<string, 'pending' | 'running' | 'settled'>();
   const outcomes: Record<string, StageOutcome> = {};
@@ -313,6 +380,7 @@ export async function runWorkflow(
           {
             name: spec.name,
             specHash,
+            stageKeys,
             startedAt,
             updatedAt: Date.now(),
             done,
@@ -338,6 +406,7 @@ export async function runWorkflow(
         JSON.stringify(
           {
             stageId,
+            contentKey: stageKeys[stageId],
             outcome: outcomes[stageId],
             ...(treeDiffs[stageId] !== undefined ? { treeDiff: treeDiffs[stageId] } : {}),
           },
@@ -553,23 +622,22 @@ export async function runWorkflow(
     }
   }
 
-  // Resume: preload previously-ok stages from a prior run's artifacts.
+  // Resume: preload previously-ok stages from a prior run's artifacts. A
+  // stage is reused ONLY if its content key matches the current key — an
+  // unchanged prefix replays free; a changed stage invalidates itself and
+  // everything downstream (their keys differ via upstream chaining). Old
+  // runDirs without stageKeys fall back to the whole-spec specHash.
   if (opts.resumeFrom) {
-    // Refuse to reuse outcomes recorded under a different spec.
+    let priorStageKeys: Record<string, string> | undefined;
+    let priorSpecHash: string | undefined;
     try {
       const prior = JSON.parse(fs.readFileSync(path.join(opts.resumeFrom, 'status.json'), 'utf8'));
-      if (prior?.specHash !== specHash) {
-        const priorShort = String(prior?.specHash ?? 'none').slice(0, 12);
-        throw new Error(
-          `workflow spec changed since the recorded run at ${opts.resumeFrom} ` +
-            `(specHash ${priorShort} -> ${specHash.slice(0, 12)}); ` +
-            'resume would reuse stale outcomes. Start a fresh run instead.',
-        );
-      }
-    } catch (err) {
-      if (err instanceof Error && err.message.includes('spec changed since the recorded run')) throw err;
+      priorSpecHash = prior?.specHash;
+      priorStageKeys = prior?.stageKeys;
+    } catch {
       // no readable status.json — nothing to compare against, run fresh
     }
+    let replayed = 0;
     try {
       const dir = path.join(opts.resumeFrom, 'stages');
       for (const file of fs.readdirSync(dir)) {
@@ -579,9 +647,20 @@ export async function runWorkflow(
           const stageId = parsed?.stageId;
           if (typeof stageId !== 'string' || parsed?.outcome?.ok !== true) continue;
           if (state.get(stageId) !== 'pending') continue;
-          state.set(stageId, 'settled');
-          outcomes[stageId] = parsed.outcome as StageOutcome;
-          if (typeof parsed.treeDiff === 'string' && parsed.treeDiff) treeDiffs[stageId] = parsed.treeDiff;
+          const currentKey = stageKeys[stageId];
+          const priorKey = priorStageKeys?.[stageId];
+          const reuse =
+            priorKey !== undefined && currentKey !== undefined
+              ? priorKey === currentKey
+              : priorStageKeys === undefined
+                ? priorSpecHash === specHash
+                : false;
+          if (reuse) {
+            state.set(stageId, 'settled');
+            outcomes[stageId] = parsed.outcome as StageOutcome;
+            if (typeof parsed.treeDiff === 'string' && parsed.treeDiff) treeDiffs[stageId] = parsed.treeDiff;
+            replayed++;
+          }
         } catch {
           // skip unreadable stage artifact
         }
@@ -589,6 +668,8 @@ export async function runWorkflow(
     } catch {
       // no resumable artifacts — run fresh
     }
+    const rerun = stages.filter((s) => state.get(s.id) === 'pending').length;
+    emit({ type: 'resume_summary', replayed, rerun });
   }
 
   const budgetExceeded = (): boolean => spec.tokenBudget !== undefined && budgetUsed >= spec.tokenBudget;

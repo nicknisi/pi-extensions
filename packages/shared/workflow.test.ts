@@ -523,7 +523,7 @@ describe('runWorkflow', () => {
     expect(r2.outcomes['a']?.ok).toBe(true);
   });
 
-  it('rejects resumeFrom when the spec changed since the recorded run', async () => {
+  it('re-runs changed stages on resume instead of refusing (content-addressed)', async () => {
     const runDir = tmpRunDir();
     const first = makeFake(() => ok('good'));
     const r1 = await run(
@@ -536,18 +536,210 @@ describe('runWorkflow', () => {
     );
     expect(r1.ok).toBe(true);
 
-    const second = makeFake(() => ok('unused'));
-    await expect(
-      run(
-        {
-          name: 'spec-drift',
-          stages: [{ id: 'a', needs: [], prompt: 'changed prompt' }],
-        },
-        second,
-        { runDir: tmpRunDir(), resumeFrom: runDir },
-      ),
-    ).rejects.toThrow(/spec changed since the recorded run.*stale outcomes/s);
+    const second = makeFake(() => ok('reran'));
+    const r2 = await run(
+      {
+        name: 'spec-drift',
+        stages: [{ id: 'a', needs: [], prompt: 'changed prompt' }],
+      },
+      second,
+      { runDir: tmpRunDir(), resumeFrom: runDir },
+    );
+    expect(r2.ok).toBe(true);
+    expect(second.calls.map((c) => c.prompt)).toEqual(['changed prompt']);
+    expect(r2.outcomes['a']?.ok && r2.outcomes['a']?.output).toBe('reran');
+  });
+
+  it('replays an unchanged spec on resume with ZERO stage executions', async () => {
+    const runDir = tmpRunDir();
+    const first = makeFake(() => ok('good'));
+    const r1 = await run(
+      {
+        name: 'replay-all',
+        stages: [
+          { id: 'a', needs: [], prompt: 'a' },
+          { id: 'b', needs: ['a'], prompt: 'b' },
+          { id: 'c', needs: ['b'], prompt: 'c' },
+        ],
+      },
+      first,
+      { runDir },
+    );
+    expect(r1.ok).toBe(true);
+    expect(first.calls).toHaveLength(3);
+
+    const events: { type: string; replayed?: number; rerun?: number }[] = [];
+    const second = makeFake(() => ok('should-not-run'));
+    const r2 = await runWorkflow(
+      {
+        name: 'replay-all',
+        stages: [
+          { id: 'a', needs: [], prompt: 'a' },
+          { id: 'b', needs: ['a'], prompt: 'b' },
+          { id: 'c', needs: ['b'], prompt: 'c' },
+        ],
+      },
+      second,
+      { cwd: '/tmp', runDir: tmpRunDir(), resumeFrom: runDir, onProgress: (e) => events.push(e) },
+    );
+    expect(r2.ok).toBe(true);
     expect(second.calls).toHaveLength(0);
+    const summary = events.find((e) => e.type === 'resume_summary');
+    expect(summary?.replayed).toBe(3);
+    expect(summary?.rerun).toBe(0);
+  });
+
+  it('re-runs a changed stage and its transitive dependents, replaying unrelated branches', async () => {
+    const runDir = tmpRunDir();
+    const first = makeFake(() => ok('good'));
+    const r1 = await run(
+      {
+        name: 'partial-replay',
+        stages: [
+          { id: 'root-a', needs: [], prompt: 'ra' },
+          { id: 'branch-a1', needs: ['root-a'], prompt: 'a1' },
+          { id: 'branch-a2', needs: ['branch-a1'], prompt: 'a2' },
+          { id: 'root-b', needs: [], prompt: 'rb' },
+          { id: 'branch-b1', needs: ['root-b'], prompt: 'b1' },
+        ],
+      },
+      first,
+      { runDir },
+    );
+    expect(r1.ok).toBe(true);
+
+    // Edit only branch-a1's prompt. branch-a2 depends on it transitively, so
+    // both must re-run. root-a, root-b, branch-b1 are untouched → replayed.
+    const second = makeFake((opts) => ok(`reran:${opts.prompt}`));
+    const r2 = await run(
+      {
+        name: 'partial-replay',
+        stages: [
+          { id: 'root-a', needs: [], prompt: 'ra' },
+          { id: 'branch-a1', needs: ['root-a'], prompt: 'a1 CHANGED' },
+          { id: 'branch-a2', needs: ['branch-a1'], prompt: 'a2' },
+          { id: 'root-b', needs: [], prompt: 'rb' },
+          { id: 'branch-b1', needs: ['root-b'], prompt: 'b1' },
+        ],
+      },
+      second,
+      { runDir: tmpRunDir(), resumeFrom: runDir },
+    );
+    expect(r2.ok).toBe(true);
+    expect(second.calls.map((c) => c.prompt).sort()).toEqual(['a1 CHANGED', 'a2'].sort());
+    expect(r2.outcomes['root-a']?.ok && r2.outcomes['root-a']?.output).toBe('good');
+    expect(r2.outcomes['root-b']?.ok && r2.outcomes['root-b']?.output).toBe('good');
+    expect(r2.outcomes['branch-b1']?.ok && r2.outcomes['branch-b1']?.output).toBe('good');
+    expect(r2.outcomes['branch-a1']?.ok && r2.outcomes['branch-a1']?.output).toBe('reran:a1 CHANGED');
+    expect(r2.outcomes['branch-a2']?.ok && r2.outcomes['branch-a2']?.output).toBe('reran:a2');
+  });
+
+  it('editing a function-valued prompt body changes its stage key (closes the <function> gap)', async () => {
+    const runDir = tmpRunDir();
+    const first = makeFake(() => ok('good'));
+    const r1 = await run(
+      {
+        name: 'fn-prompt',
+        stages: [{ id: 'a', needs: [], prompt: () => 'build it' }],
+      },
+      first,
+      { runDir },
+    );
+    expect(r1.ok).toBe(true);
+
+    // Same observable return value, different closure body text → key must
+    // differ, so the stage re-runs instead of being silently replayed. (A
+    // body like `'build' + ' it'` would be constant-folded back to the same
+    // source by the TS transform, so use a structurally distinct body.)
+    const second = makeFake(() => ok('reran'));
+    const r2 = await run(
+      {
+        name: 'fn-prompt',
+        stages: [
+          {
+            id: 'a',
+            needs: [],
+            prompt: (_ctx) => {
+              return 'build it';
+            },
+          },
+        ],
+      },
+      second,
+      { runDir: tmpRunDir(), resumeFrom: runDir },
+    );
+    expect(r2.ok).toBe(true);
+    expect(second.calls).toHaveLength(1);
+    expect(r2.outcomes['a']?.ok && r2.outcomes['a']?.output).toBe('reran');
+  });
+
+  it('back-compat: a prior runDir without stageKeys resumes when specHash matches', async () => {
+    const runDir = tmpRunDir();
+    const first = makeFake(() => ok('good'));
+    const r1 = await run(
+      {
+        name: 'old-format',
+        stages: [
+          { id: 'a', needs: [], prompt: 'a' },
+          { id: 'b', needs: ['a'], prompt: 'b' },
+        ],
+      },
+      first,
+      { runDir },
+    );
+    expect(r1.ok).toBe(true);
+
+    // Strip the per-stage keys to simulate an old-format runDir.
+    const statusPath = path.join(runDir, 'status.json');
+    const status = JSON.parse(fs.readFileSync(statusPath, 'utf8'));
+    delete status.stageKeys;
+    fs.writeFileSync(statusPath, JSON.stringify(status, null, 2));
+
+    const second = makeFake(() => ok('should-not-run'));
+    const r2 = await run(
+      {
+        name: 'old-format',
+        stages: [
+          { id: 'a', needs: [], prompt: 'a' },
+          { id: 'b', needs: ['a'], prompt: 'b' },
+        ],
+      },
+      second,
+      { runDir: tmpRunDir(), resumeFrom: runDir },
+    );
+    expect(r2.ok).toBe(true);
+    expect(second.calls).toHaveLength(0);
+  });
+
+  it('back-compat: a prior runDir without stageKeys runs fresh (no crash) when specHash differs', async () => {
+    const runDir = tmpRunDir();
+    const first = makeFake(() => ok('good'));
+    const r1 = await run(
+      {
+        name: 'old-format-drift',
+        stages: [{ id: 'a', needs: [], prompt: 'original' }],
+      },
+      first,
+      { runDir },
+    );
+    expect(r1.ok).toBe(true);
+
+    const statusPath = path.join(runDir, 'status.json');
+    const status = JSON.parse(fs.readFileSync(statusPath, 'utf8'));
+    delete status.stageKeys;
+    fs.writeFileSync(statusPath, JSON.stringify(status, null, 2));
+
+    const second = makeFake(() => ok('reran'));
+    const r2 = await run(
+      {
+        name: 'old-format-drift',
+        stages: [{ id: 'a', needs: [], prompt: 'changed' }],
+      },
+      second,
+      { runDir: tmpRunDir(), resumeFrom: runDir },
+    );
+    expect(r2.ok).toBe(true);
+    expect(second.calls).toHaveLength(1);
   });
 
   it('threads opts.signal into every stage spawn', async () => {
