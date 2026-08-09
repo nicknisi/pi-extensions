@@ -129,6 +129,8 @@ interface CodemodeOutcome {
   text: string;
   details: CodemodeDetails;
   value: unknown;
+  /** 1-indexed $N slot the value was bound to (only when bindResult and the run succeeded). */
+  boundN?: number | undefined;
 }
 
 /** Persisted shape of a console (`=` or `/cx`) run, rendered as a custom entry. */
@@ -290,7 +292,9 @@ export default function codemode(pi: ExtensionAPI) {
       for (const entry of ctx.sessionManager.getEntries()) {
         if (entry.type === 'custom' && entry.customType === CONSOLE_TYPE) {
           const data = entry.data as ConsoleEntryData | undefined;
-          if (data) sessionResults.push(data.value);
+          // Errored runs are never bound live, so they must not occupy a $N
+          // slot on rebuild either — otherwise every $N after an error shifts.
+          if (data && !data.details?.error) sessionResults.push(data.value);
         }
       }
     } catch {
@@ -499,8 +503,14 @@ export default function codemode(pi: ExtensionAPI) {
           : value === undefined
             ? '(undefined — did you forget `export default`?)'
             : truncate(JSON.stringify(value, null, 2) ?? String(value), MAX_RESULT_CHARS);
-      if (bindResult) sessionResults.push(value);
-      return { text, details: { label, logs, durationMs: Date.now() - startedAt }, value };
+      // Bind inside the serialized section and report the slot actually taken —
+      // computing it before the exec-chain lock races overlapping submissions.
+      let boundN: number | undefined;
+      if (bindResult) {
+        sessionResults.push(value);
+        boundN = sessionResults.length;
+      }
+      return { text, details: { label, logs, durationMs: Date.now() - startedAt }, value, boundN };
     } catch (err) {
       const logText = logs.length > 0 ? `\n\nCaptured logs (${logs.length}):\n${logs.join('\n')}` : '';
       return {
@@ -674,14 +684,21 @@ export default function codemode(pi: ExtensionAPI) {
     const stripped = event.text.trimStart();
     if (!stripped.startsWith('=') || stripped.length <= 1) return { action: 'continue' };
     const code = event.text.slice(event.text.indexOf('=') + 1);
-    const n = sessionResults.length + 1;
-    const outcome = await runCodemode({
-      code,
-      label: 'console',
-      timeoutMs: DEFAULT_TIMEOUT_MS,
-      cwd: ctx.cwd,
-      bindResult: true,
-    });
+    ctx.ui.setStatus('codemode', 'running console…');
+    let outcome: CodemodeOutcome;
+    try {
+      outcome = await runCodemode({
+        code,
+        label: 'console',
+        timeoutMs: DEFAULT_TIMEOUT_MS,
+        cwd: ctx.cwd,
+        externalSignal: ctx.signal ?? undefined,
+        bindResult: true,
+      });
+    } finally {
+      ctx.ui.setStatus('codemode', undefined);
+    }
+    const n = outcome.boundN ?? sessionResults.length + 1;
     pi.appendEntry<ConsoleEntryData>(CONSOLE_TYPE, {
       n,
       label: 'console',
@@ -708,6 +725,9 @@ export default function codemode(pi: ExtensionAPI) {
   }
 
   function findSnippet(name: string, cwd: string, trusted: boolean): string | undefined {
+    // Snippet names are bare file stems — never a path (defends against
+    // `/cx ../../foo` escaping the snippets dirs).
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name)) return undefined;
     for (const dir of snippetDirs(cwd, trusted)) {
       for (const ext of ['.ts', '.js'] as const) {
         const f = path.join(dir, `${name}${ext}`);
@@ -797,16 +817,21 @@ export default function codemode(pi: ExtensionAPI) {
         return;
       }
       const code = substituteArgs(body, argList);
-      const n = sessionResults.length + 1;
       ctx.ui.setStatus('codemode', `running ${name}…`);
-      const outcome = await runCodemode({
-        code,
-        label: name,
-        timeoutMs: DEFAULT_TIMEOUT_MS,
-        cwd: ctx.cwd,
-        bindResult: true,
-      });
-      ctx.ui.setStatus('codemode', undefined);
+      let outcome: CodemodeOutcome;
+      try {
+        outcome = await runCodemode({
+          code,
+          label: name,
+          timeoutMs: DEFAULT_TIMEOUT_MS,
+          cwd: ctx.cwd,
+          externalSignal: ctx.signal ?? undefined,
+          bindResult: true,
+        });
+      } finally {
+        ctx.ui.setStatus('codemode', undefined);
+      }
+      const n = outcome.boundN ?? sessionResults.length + 1;
       pi.appendEntry<ConsoleEntryData>(CONSOLE_TYPE, {
         n,
         label: name,
