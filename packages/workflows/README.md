@@ -36,7 +36,7 @@ return { answered: results.length, results };
 | `budget`                     | `{ total, spent, remaining }` over the run's token usage. `total` defaults to `Infinity`; `spent` accumulates across `agent()` calls. Read-only.                                                                                                                                                                                     |
 | `cwd`                        | The session working directory.                                                                                                                                                                                                                                                                                                       |
 
-`agent()` opts: `model` (`'provider/id'`), `tools` (allowlist — default read-only `['read','grep','find','ls']`; pass `['read','bash','edit','write']` for builders), `label` (child agent label), `systemPrompt`, `schema` (validated; parsed JSON lands in `result.data`), `effort` (thinking level), `timeoutMs`, `maxTurns`, `agentType` (accepted but ignored — no agent-type registry; resolve `systemPrompt` in the script itself).
+`agent()` opts: `model` (`'provider/id'`), `tools` (allowlist — default read-only `['read','grep','find','ls']`; pass `['read','bash','edit','write']` for builders), `label` (child agent label), `systemPrompt`, `schema` (validated; parsed JSON lands in `result.data`), `effort` (thinking level), `timeoutMs`, `maxTurns`, `worktree` (run the child in an isolated git worktree; on settle the change set is captured to a `.patch` and `agent()` returns `{ value, patchPath, runId }` instead of the bare value — opt-in, so non-worktree calls are unchanged), `agentType` (accepted but ignored — no agent-type registry; resolve `systemPrompt` in the script itself).
 
 The script executes **in the host process with full Node access** — `process`, `require`, and `fs` are all reachable, the same trust boundary as the `bash` tool. Keep the returned value small: summaries, counts, key findings — never raw file dumps.
 
@@ -63,6 +63,14 @@ Every `agent()` call spawns through `@nicknisi/pi-shared`'s subagent runtime wit
 | Trigger-word arming (the tool activates on keywords) | The model calls the `workflow` tool when intent warrants — no arming, no keyword matching.                                                                                                                     |
 | Phases with per-phase budgets                        | `phase(name)` is a logging marker only. Budget is a single run-level `{ total, spent, remaining }`; per-stage budgets are the `workflow.ts` engine's `tokenBudget` (use `runWorkflow` from codemode for that). |
 | The third-party engine's script globals              | Unchanged: `args`, `agent`, `parallel`, `pipeline`, `phase`, `log`, `budget`, `cwd`. Existing scripts run as-is.                                                                                               |
+
+## Recipes
+
+The `examples/` directory ships standalone, copy-and-adapt workflow scripts — the registry is `ls`, so these are code you read and copy, never APIs you import (no index re-exports them). Drop any of them into `~/.pi/agent/workflows/` and run via `/wf run <name>`.
+
+- **`lanes.js`** — N parallel agents editing FILE-DISJOINT lanes of one repo under a hard-rules preamble (each lane owns a fixed file set; no git, no installs; the parent integrates centrally). Use it when a task splits into independent edits that don't overlap on files. Adapt by setting `VERIFY` to your typecheck command and filling the `LANES` array with `{ name, files, brief }` per lane.
+- **`gates.js`** — three judge/verify prompt builders returning prompt strings: adversarial refutation (defeats confirmation bias), deep-research coverage (defeats silent source omission), and a 3-way code-review verdict (defeats verdict collapse). Use it when you need a reliable gate inside your own workflow. Adapt by copying the builder whose failure mode you need and calling it from an `agent()` with a JSON schema. Prompt patterns distilled from `@quintinshaw/pi-dynamic-workflows`.
+- **`bake-off.js`** — race N models on the SAME task in isolated worktrees (`worktree: true`), then an advisory judge reads each contender's `.patch` and picks a winner. Use it on hard build tasks where a single GLM-5.2-class builder produces decent-but-flawed code; the 2x token cost buys a measurably better hit rate. Adapt by setting `CONTENDERS` to the models to race and passing `task` in `args`; the workflow returns the winner's `patchPath` to apply via `/patches`.
 
 ## Dependencies
 

@@ -33,6 +33,10 @@ export interface EngineSpawnOk {
   text: string;
   data?: unknown;
   usage: EngineSpawnUsage;
+  /** Run id of the child spawn, when the spawn fn attaches it. */
+  runId?: string;
+  /** Path to the worktree `.patch` file, for `worktree: true` runs that changed files. */
+  patchPath?: string;
 }
 
 export interface EngineSpawnFail {
@@ -55,6 +59,8 @@ export interface EngineSpawnOptions {
   timeoutMs?: number;
   maxTurns?: number;
   outputSchema?: unknown;
+  /** Run the child in an isolated git worktree; its change set is captured to a `.patch`. */
+  worktree?: boolean;
 }
 
 export type EngineSpawnFn = (opts: EngineSpawnOptions) => Promise<EngineSpawnResult>;
@@ -172,10 +178,16 @@ export async function runScript(opts: RunScriptOptions): Promise<RunScriptResult
       ...(typeof agentOpts.timeoutMs === 'number' ? { timeoutMs: agentOpts.timeoutMs } : {}),
       ...(typeof agentOpts.maxTurns === 'number' ? { maxTurns: agentOpts.maxTurns } : {}),
       ...(agentOpts.schema !== undefined ? { outputSchema: agentOpts.schema } : {}),
+      ...(agentOpts.worktree === true ? { worktree: true } : {}),
     };
     const res = await spawn(spawnOpts);
     addUsage(usage, res.usage);
     if (!res.ok) throw new Error(`${res.kind}: ${res.error}`);
+    // A worktree run that changed files produces a `.patch`; surface it
+    // alongside the value so the script can hand the path to a judge or
+    // return it for the `/patches` apply flow. Opt-in: only when patchPath is
+    // present, so non-worktree scripts see the unchanged `data ?? text` return.
+    if (res.patchPath) return { value: res.data ?? res.text ?? null, patchPath: res.patchPath, runId: res.runId };
     return res.data ?? res.text ?? null;
   };
 
@@ -191,16 +203,50 @@ export async function runScript(opts: RunScriptOptions): Promise<RunScriptResult
     return values as U[];
   };
 
-  // Compile: rewrite `export const meta =` so the vm compiles (a stranded
-  // `export` fails loudly) AND meta is captured into a holder passed as a
-  // function parameter — runInThisContext cannot see a closure variable, so
-  // the holder rides the call. The body keeps a local `meta` binding too, so
-  // scripts that reference `meta` later still work. The body is wrapped in an
-  // async function so a top-level `return` compiles.
+  // Compile + run. compileScript is extracted so callers (tests, future
+  // tooling) can compile + read `meta` without a real spawn.
+  const compiled = compileScript(script);
+  const value = await compiled.fn(args, agent, parallel, pipeline, phase, log, budget, cwd);
+  return { value, meta: compiled.meta, logs, usage, durationMs: Date.now() - startedAt };
+}
+
+// ── Compile-only entry ────────────────────────────────────────────────────
+
+/** The compiled async body; invoking it runs the script with injected globals. */
+export type CompiledFn = (
+  args: unknown,
+  agent: unknown,
+  parallel: unknown,
+  pipeline: unknown,
+  phase: unknown,
+  log: unknown,
+  budget: unknown,
+  cwd: string,
+) => Promise<unknown>;
+
+export interface CompiledScript {
+  /** The script's `meta` export, read via a stub dry-run (no real spawn). */
+  meta: ScriptMeta | undefined;
+  /** Invoke to run the script; spawn-backed globals must be supplied. */
+  fn: CompiledFn;
+}
+
+/**
+ * Compile a workflow script and read its `meta` export WITHOUT a real spawn.
+ *
+ * `export const meta =` is rewritten to an outer-binding assignment so the vm
+ * compiles (a stranded `export` fails loudly) and `meta` is captured into a
+ * holder. The body is wrapped in an async function so a top-level `return`
+ * compiles. `meta` is populated by a stub dry-run — `agent` returns `null`,
+ * `parallel`/`pipeline` are `Promise.all`-style folds over those stubs — so the
+ * script's `meta` declaration (which well-formed scripts place first) is read
+ * without spawning any child sessions. A syntax error throws here.
+ */
+export function compileScript(script: string): CompiledScript {
   const metaHolder: { value: ScriptMeta | undefined } = { value: undefined };
   const stripped = script.replace(STRIP_META, 'const meta = metaHolder.value =');
   const wrapped = `(async function(args, agent, parallel, pipeline, phase, log, budget, cwd, metaHolder){\n${stripped}\n})`;
-  const fn = new vm.Script(wrapped, { filename: 'workflow.js' }).runInThisContext() as (
+  const raw = new vm.Script(wrapped, { filename: 'workflow.js' }).runInThisContext() as (
     args: unknown,
     agent: unknown,
     parallel: unknown,
@@ -211,7 +257,39 @@ export async function runScript(opts: RunScriptOptions): Promise<RunScriptResult
     cwd: string,
     metaHolder: { value: ScriptMeta | undefined },
   ) => Promise<unknown>;
+  // Bind metaHolder so callers invoke an 8-arg fn; the holder rides the call
+  // (runInThisContext cannot see a closure variable, so it must be a parameter).
+  const fn: CompiledFn = (args, agent, parallel, pipeline, phase, log, budget, cwd) =>
+    raw(args, agent, parallel, pipeline, phase, log, budget, cwd, metaHolder);
 
-  const value = await fn(args, agent, parallel, pipeline, phase, log, budget, cwd, metaHolder);
-  return { value, meta: metaHolder.value, logs, usage, durationMs: Date.now() - startedAt };
+  // Stub dry-run to read `meta`. Well-formed scripts declare `meta` first, so
+  // it is assigned synchronously before the first `await`; we await the whole
+  // stubbed body anyway so a script that computes meta from `args` works too.
+  // Any throw is swallowed — we only care that it compiled + set meta.
+  const stubAgent = async (): Promise<null> => null;
+  const stubParallel = <T>(thunks: Array<() => Promise<T>>): Promise<T[]> => Promise.all(thunks.map((t) => t()));
+  const stubPipeline = async <T, U>(items: T[], ...stages: Array<(item: T) => Promise<U>>): Promise<U[]> => {
+    let values: unknown[] = [...items];
+    for (const stage of stages) values = await stubParallel((values as T[]).map((v) => () => stage(v)));
+    return values as U[];
+  };
+  const stubBudget = { total: Infinity, spent: 0, remaining: Infinity };
+  void fn(
+    undefined,
+    stubAgent,
+    stubParallel,
+    stubPipeline,
+    () => {},
+    () => {},
+    stubBudget,
+    '/tmp',
+  ).catch(() => {});
+
+  // `meta` is a getter so a caller that re-runs `fn` with real globals sees
+  // the post-run meta (the stub dry-run may have thrown on args-derived meta;
+  // the real run sets it). For static meta the stub already populated it.
+  return Object.defineProperty({ fn }, 'meta', {
+    get: () => metaHolder.value,
+    enumerable: true,
+  }) as CompiledScript;
 }

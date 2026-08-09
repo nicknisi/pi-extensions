@@ -39,7 +39,13 @@ import {
   type SubagentRuntime,
 } from '@nicknisi/pi-shared';
 import { Type } from 'typebox';
-import { runScript, type EngineSpawnFn, type EngineSpawnOptions, type RunScriptResult } from './engine.js';
+import {
+  runScript,
+  type EngineSpawnFn,
+  type EngineSpawnOptions,
+  type EngineSpawnResult,
+  type RunScriptResult,
+} from './engine.js';
 
 const ARTIFACTS_ROOT = path.join(getAgentDir(), 'subagent-runs');
 const NAMESPACE = 'workflows';
@@ -84,7 +90,7 @@ function makeSpawnFn(
   cwd: string,
   externalSignal: AbortSignal | undefined,
 ): EngineSpawnFn {
-  return async (opts: EngineSpawnOptions): Promise<SpawnResult> => {
+  return async (opts: EngineSpawnOptions): Promise<EngineSpawnResult> => {
     const spawnOpts: SpawnOptions = {
       prompt: opts.prompt,
       cwd,
@@ -95,12 +101,23 @@ function makeSpawnFn(
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       ...(opts.maxTurns !== undefined ? { maxTurns: opts.maxTurns } : {}),
       ...(opts.outputSchema !== undefined ? { outputSchema: opts.outputSchema as never } : {}),
+      ...(opts.worktree === true ? { worktree: true } : {}),
     };
     // Default children to read-only, matching codemode/dispatch; pi's own
     // default (read/bash/edit/write) would apply otherwise.
     if (opts.tools !== undefined) spawnOpts.tools = opts.tools;
     else spawnOpts.tools = ['read', 'grep', 'find', 'ls'];
-    return spawnCancellable(cancellables, runtime, spawnOpts, externalSignal);
+    const res = await spawnCancellable(cancellables, runtime, spawnOpts, externalSignal);
+    // Surface the worktree `.patch` path (recorded on the run record after
+    // settle) so workflow scripts can return it for the `/patches` apply flow.
+    if (res.ok) {
+      const record = runtime.listRuns().find((r) => r.runId === res.runId);
+      const patchPath = record?.worktree?.patchPath;
+      if (patchPath) {
+        return { ok: true, text: res.text, data: res.data, usage: res.usage, runId: res.runId, patchPath };
+      }
+    }
+    return res;
   };
 }
 
