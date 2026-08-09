@@ -204,6 +204,15 @@ function formatTimeUntil(resetsAt: string): string {
   }
 }
 
+// ── Context bar ──────────────────────────────────────────────────────────────
+
+/**
+ * Widest the context bar may grow. It is elastic filler — it takes whatever
+ * columns the real segments leave behind — so this cap is really a limit on
+ * how much of the line pure decoration may claim.
+ */
+const CONTEXT_BAR_MAX = 20;
+
 // ── Helper: build a progress bar ─────────────────────────────────────────────
 
 function buildBar(percent: number, width: number, theme: Pick<Theme, 'fg'>): string {
@@ -214,6 +223,20 @@ function buildBar(percent: number, width: number, theme: Pick<Theme, 'fg'>): str
   for (let i = 0; i < filled; i++) bar += '━';
   for (let i = 0; i < empty; i++) bar += '╌';
   return theme.fg(color, bar);
+}
+
+// ── Helper: keep an extension status on one line ─────────────────────────────
+
+/**
+ * Statuses are arbitrary extension text: fold whitespace so a stray newline
+ * cannot break the footer. Matches pi's own footer sanitiser — notably it
+ * leaves SGR escapes intact, because extensions colour their own indicators.
+ */
+function sanitizeStatusText(text: string): string {
+  return text
+    .replace(/[\r\n\t]/g, ' ')
+    .replace(/ +/g, ' ')
+    .trim();
 }
 
 // ── Helper: format token count ───────────────────────────────────────────────
@@ -448,9 +471,21 @@ export default function (pi: ExtensionAPI) {
             segments.push(`${ICON_USAGE} ${fiveStr} ${theme.fg('dim', '╱')} ${sevenStr}`);
           }
 
+          // Extension statuses (ctx.ui.setStatus). Replacing pi's footer means
+          // this line is the only place they can appear — without this, every
+          // extension's status indicator is silently dropped.
+          const extensionStatuses = Array.from(footerData.getExtensionStatuses().entries())
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([, text]) => sanitizeStatusText(text))
+            .filter((text) => text.length > 0);
+          // Each status is its own segment, so multiple extensions read as
+          // distinct items rather than one run-on string.
+          for (const status of extensionStatuses) segments.push(status);
+
           // Context bar — stretch to fill whatever width remains on the line.
           // Build a placeholder context segment, measure all segments + the right
-          // side, then give the bar the leftover columns (clamped 5..40).
+          // side, then give the bar the leftover columns (clamped 5..CONTEXT_BAR_MAX).
+          // The bar is elastic filler, so it yields to real information first.
           const tokenStr = tokensUsed > 0 ? theme.fg('dim', ` (${formatTokens(tokensUsed)})`) : '';
           const ctxLabel = `${ICON_CONTEXT} `;
           const ctxTail = ` ${remaining}% ctx${tokenStr}`;
@@ -471,7 +506,7 @@ export default function (pi: ExtensionAPI) {
             visibleWidth(ctxTail) +
             visibleWidth(right) +
             1; // min 1 gap between left and right
-          const barWidth = Math.max(5, Math.min(40, innerWidth - otherWidth));
+          const barWidth = Math.max(5, Math.min(CONTEXT_BAR_MAX, innerWidth - otherWidth));
           const contextBar = buildBar(remaining, barWidth, theme);
           segments.push(`${ctxLabel}${contextBar}${ctxTail}`);
 
