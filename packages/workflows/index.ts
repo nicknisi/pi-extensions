@@ -53,9 +53,12 @@ const MAX_LOG_CHARS = 2000;
 // agent() call spawns detached and registers its controller here; stop(runId)
 // aborts it. Runs from other hosts show up via readRunArtifacts but are not
 // cancellable here (they belong to a different process).
-const cancellables = new Map<string, AbortController>();
+// Scoped per factory invocation (session) — two concurrent sessions in one
+// process must never share (or cross-abort) each other's runs.
+type Cancellables = Map<string, AbortController>;
 
 function spawnCancellable(
+  cancellables: Cancellables,
   runtime: SubagentRuntime,
   opts: SpawnOptions,
   externalSignal: AbortSignal | undefined,
@@ -75,7 +78,12 @@ function spawnCancellable(
   return Object.assign(done, { runId }) as Promise<SpawnResult>;
 }
 
-function makeSpawnFn(runtime: SubagentRuntime, cwd: string, externalSignal: AbortSignal | undefined): EngineSpawnFn {
+function makeSpawnFn(
+  cancellables: Cancellables,
+  runtime: SubagentRuntime,
+  cwd: string,
+  externalSignal: AbortSignal | undefined,
+): EngineSpawnFn {
   return async (opts: EngineSpawnOptions): Promise<SpawnResult> => {
     const spawnOpts: SpawnOptions = {
       prompt: opts.prompt,
@@ -92,7 +100,7 @@ function makeSpawnFn(runtime: SubagentRuntime, cwd: string, externalSignal: Abor
     // default (read/bash/edit/write) would apply otherwise.
     if (opts.tools !== undefined) spawnOpts.tools = opts.tools;
     else spawnOpts.tools = ['read', 'grep', 'find', 'ls'];
-    return spawnCancellable(runtime, spawnOpts, externalSignal);
+    return spawnCancellable(cancellables, runtime, spawnOpts, externalSignal);
   };
 }
 
@@ -208,6 +216,7 @@ function formatRunResult(result: RunScriptResult, label: string): string {
 // ── Extension ─────────────────────────────────────────────────────────────
 
 export default function workflows(pi: ExtensionAPI): void {
+  const cancellables: Cancellables = new Map();
   const runtime = createSubagentRuntime({ namespace: NAMESPACE, artifactsDir: ARTIFACTS_ROOT });
   sweepRunArtifactsOnce(ARTIFACTS_ROOT);
 
@@ -312,7 +321,7 @@ export default function workflows(pi: ExtensionAPI): void {
         if (!runId) {
           return { content: [{ type: 'text' as const, text: 'stop requires runId.' }], details: {} };
         }
-        const controller = resolveCancellable(runtime, runId);
+        const controller = resolveCancellable(cancellables, runtime, runId);
         if (!controller) {
           const record = findRun(runtime, runId);
           const msg =
@@ -371,17 +380,47 @@ export default function workflows(pi: ExtensionAPI): void {
         };
       }
 
-      const spawnFn = makeSpawnFn(runtime, ctx.cwd, signal ?? undefined);
+      // One controller for BOTH abort sources: the tool's signal AND the
+      // timeout. spawnCancellable wires it into every child spawn, so firing
+      // it actually cancels in-flight work (previously the timeout controller
+      // was connected to nothing — dead code).
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      let timedOut = false;
+      const onToolAbort = () => controller.abort();
+      if (signal) {
+        if (signal.aborted) controller.abort();
+        else signal.addEventListener('abort', onToolAbort, { once: true });
+      }
+      const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutMs);
+      const spawnFn = makeSpawnFn(cancellables, runtime, ctx.cwd, controller.signal);
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        controller.signal.addEventListener(
+          'abort',
+          () =>
+            reject(
+              new Error(
+                timedOut
+                  ? `Timed out after ${timeoutMs}ms (in-flight subagents were aborted)`
+                  : 'Aborted by the host session',
+              ),
+            ),
+          { once: true },
+        );
+      });
       try {
-        const result = await runScript({
-          script: src,
-          args: params.args,
-          spawn: spawnFn,
-          cwd: ctx.cwd,
-          onLog: () => {},
-        });
+        const result = await Promise.race([
+          runScript({
+            script: src,
+            args: params.args,
+            spawn: spawnFn,
+            cwd: ctx.cwd,
+            onLog: () => {},
+          }),
+          timeoutPromise,
+        ]);
         const text = formatRunResult(result, label);
         return {
           content: [{ type: 'text' as const, text }],
@@ -401,6 +440,7 @@ export default function workflows(pi: ExtensionAPI): void {
         };
       } finally {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', onToolAbort);
       }
     },
   });
@@ -417,14 +457,19 @@ export default function workflows(pi: ExtensionAPI): void {
       return subs.map((s) => ({ value: s + ' ', label: s }));
     },
     handler: async (args, ctx) => {
-      await cmdWf(args, ctx, runtime);
+      await cmdWf(args, ctx, runtime, cancellables);
     },
   });
 }
 
 // ── /wf handler (shared, typed against the runtime) ───────────────────────
 
-async function cmdWf(args: string, ctx: ExtensionCommandContext, runtime: SubagentRuntime): Promise<void> {
+async function cmdWf(
+  args: string,
+  ctx: ExtensionCommandContext,
+  runtime: SubagentRuntime,
+  cancellables: Cancellables,
+): Promise<void> {
   const parts = args.trim().split(/\s+/).filter(Boolean);
   const sub = parts[0];
 
@@ -469,7 +514,7 @@ async function cmdWf(args: string, ctx: ExtensionCommandContext, runtime: Subage
     }
     ctx.ui.setStatus('workflows', `running ${name}…`);
     try {
-      const spawnFn = makeSpawnFn(runtime, ctx.cwd, ctx.signal ?? undefined);
+      const spawnFn = makeSpawnFn(cancellables, runtime, ctx.cwd, ctx.signal ?? undefined);
       const result = await runScript({ script: src, args: parsedArgs, spawn: spawnFn, cwd: ctx.cwd });
       ctx.ui.notify(formatRunResult(result, name), 'info');
     } catch (err) {
@@ -501,7 +546,7 @@ async function cmdWf(args: string, ctx: ExtensionCommandContext, runtime: Subage
       ctx.ui.notify('Usage: /wf stop <runId>', 'warning');
       return;
     }
-    const controller = resolveCancellable(runtime, runId);
+    const controller = resolveCancellable(cancellables, runtime, runId);
     if (!controller) {
       const record = findRun(runtime, runId);
       ctx.ui.notify(
@@ -539,7 +584,11 @@ function findRun(runtime: SubagentRuntime, runId: string): RunArtifact | undefin
 }
 
 /** Resolve a cancellable controller by full id or unique prefix. */
-function resolveCancellable(_runtime: SubagentRuntime, runId: string): AbortController | undefined {
+function resolveCancellable(
+  cancellables: Cancellables,
+  _runtime: SubagentRuntime,
+  runId: string,
+): AbortController | undefined {
   if (cancellables.has(runId)) return cancellables.get(runId);
   if (runId.length >= 8) {
     const matches = [...cancellables.entries()].filter(([id]) => id.startsWith(runId));
