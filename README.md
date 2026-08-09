@@ -46,15 +46,16 @@ Local paths are added to pi's settings without copying — edits in the repo are
 
 ### Behavior & plumbing
 
-| Package                                  | What it does                                                                                                                 | Adds                                                |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| [agent-urls](packages/agent-urls/)       | `agent://` / `history://` URIs for pi-subagents runs; list and read run outputs/transcripts                                  | `/agent`, `list_agent_runs`, `read_agent_url` tools |
-| [artifacts](packages/artifacts/)         | `artifact` tool: render markdown/HTML to styled browser pages from a lazy localhost server, with live reload                 | `artifact` tool, `/artifacts`                       |
-| [auto-theme](packages/auto-theme/)       | Sync pi theme with macOS system appearance (dark↔light pairs)                                                                | —                                                   |
-| [claude-compat](packages/claude-compat/) | Claude Code compatibility: `CLAUDE_PLUGIN_ROOT` path shimming + `` !`command` `` dynamic SKILL.md placeholders (allowlisted) | two extension entry points                          |
-| [cloak](packages/cloak/)                 | Redact secrets from `read` tool results before they reach model context, via glob-scoped regex rules                         | `/cloak-status`, `cloak.json`                       |
-| [session-name](packages/session-name/)   | Auto-name sessions (heuristic or LLM), mirror to terminal title, name-focused session picker                                 | `/sn`, `/sessions`                                  |
-| [stash](packages/stash/)                 | `ctrl+s` parks the prompt draft on a LIFO stack; pop or auto-restore                                                         | `ctrl+s`, stash widget                              |
+| Package                                  | What it does                                                                                                                   | Adds                                                |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------- |
+| [agent-urls](packages/agent-urls/)       | `agent://` / `history://` URIs for pi-subagents runs; list and read run outputs/transcripts                                    | `/agent`, `list_agent_runs`, `read_agent_url` tools |
+| [artifacts](packages/artifacts/)         | `artifact` tool: render markdown/HTML to styled browser pages from a lazy localhost server, with live reload                   | `artifact` tool, `/artifacts`                       |
+| [auto-theme](packages/auto-theme/)       | Sync pi theme with macOS system appearance (dark↔light pairs)                                                                  | —                                                   |
+| [claude-compat](packages/claude-compat/) | Claude Code compatibility: `CLAUDE_PLUGIN_ROOT` path shimming + `` !`command` `` dynamic SKILL.md placeholders (allowlisted)   | two extension entry points                          |
+| [cloak](packages/cloak/)                 | Redact secrets from `read` tool results before they reach model context, via glob-scoped regex rules                           | `/cloak-status`, `cloak.json`                       |
+| [session-name](packages/session-name/)   | Auto-name sessions (heuristic or LLM), mirror to terminal title, name-focused session picker                                   | `/sn`, `/sessions`                                  |
+| [stash](packages/stash/)                 | `ctrl+s` parks the prompt draft on a LIFO stack; pop or auto-restore                                                           | `ctrl+s`, stash widget                              |
+| [whiteboard](packages/whiteboard/)       | Voice-driven whiteboarding with real-time Mermaid diagram generation in the browser (text, push-to-talk, and continuous voice) | `/whiteboard` command, `whiteboard` tool            |
 
 ### Library
 
