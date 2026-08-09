@@ -1,15 +1,15 @@
 /**
  * Turn Timer Extension
  *
- * Shows how long each full turn took (assistant + tool calls + results),
- * as a dim one-line row below the response — similar to Claude Code's
- * per-turn elapsed timer. One row per turn, so tool-call batches don't
- * each get their own timer.
+ * Shows how long a complete run took — from the moment you send a message
+ * until the agent settles and is awaiting your next message. This spans
+ * every LLM response, tool call, and tool result in the run, so a turn
+ * with multiple tool-call rounds still produces a single timer row.
  *
- * Uses turn_start/turn_end and renders the result as a custom transcript
- * entry that does NOT participate in LLM context, so it never pollutes
- * the conversation and /copy (which reads only assistant message text)
- * never picks it up.
+ * Uses agent_start/agent_settled and renders the result as a custom
+ * transcript entry that does NOT participate in LLM context, so it never
+ * pollutes the conversation and /copy (which reads only assistant message
+ * text) never picks it up.
  */
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
@@ -33,16 +33,18 @@ export default function turnTimer(pi: ExtensionAPI) {
     return new Text(label, 0, 0);
   });
 
-  // ── Time each full turn (assistant + tool calls + results) ──────────
-  // One row per turn, not one per assistant message, so tool-call
-  // batches don't each get their own timer.
+  // ── Time each complete run (all turns until the agent settles) ──────
+  // agent_start fires when the run begins; agent_settled fires when the
+  // agent is idle and won't continue automatically (no retry/compaction/
+  // follow-up remaining). This yields one row per user message, not one
+  // per tool-call round.
   let start: number | undefined;
 
-  pi.on('turn_start', (event) => {
-    start = event.timestamp ?? Date.now();
+  pi.on('agent_start', () => {
+    start = Date.now();
   });
 
-  pi.on('turn_end', () => {
+  pi.on('agent_settled', () => {
     if (start === undefined) return;
     const seconds = (Date.now() - start) / 1000;
     start = undefined;
