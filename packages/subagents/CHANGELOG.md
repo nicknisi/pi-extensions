@@ -1,5 +1,11 @@
 # @nicknisi/pi-subagents
 
+## 0.2.2
+
+### Patch Changes
+
+- bdef70f: Fix dispatch progress rendering each task twice while running. pi keeps the renderCall component on screen next to renderResult once the first onUpdate fires, and both rendered the same task tree — renderCall now renders only the header, renderResult owns the tree.
+
 ## 0.2.1
 
 ### Patch Changes
