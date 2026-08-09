@@ -73,7 +73,7 @@ const verdict = await agent(
     'task below, independently, in isolated worktrees. You are given each contender model, ' +
     'its self-reported summary, and the path to its patch. Read each patch (use bash: ' +
     '`cat <patchPath>`) and compare them on correctness, minimalism, and style. Pick the ' +
-    'winner. Do not just trust the summaries — read the actual diffs.\n\n' +
+    'winner. Do not just trust the summaries — read the actual diffs (the read tool takes a path; no bash needed).\n\n' +
     'TASK:\n' +
     TASK +
     '\n\nCONTENDERS JSON:\n' +
@@ -82,6 +82,7 @@ const verdict = await agent(
   {
     label: 'judge',
     model: JUDGE_MODEL,
+    tools: ['read'], // patches are files — read-only judging, no bash
     schema: {
       type: 'object',
       properties: {
