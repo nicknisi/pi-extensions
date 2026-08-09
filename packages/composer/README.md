@@ -25,6 +25,11 @@ standalone `paste-expand.ts` so the two features don't fight over
   when an incoming paste matches an already-collapsed paste's stored content;
   if the marker `[paste #N ...]` is still in the buffer, the marker is replaced
   with the real content and the paste registry is renumbered to stay dense.
+- **History recall puts the cursor at the end**: pi-tui places the cursor at
+  the _start_ of a message recalled with Up, so typing prepends to your own
+  sentence. Composer overrides `navigateHistory` to move the cursor to the end
+  after a successful Up recall. Down, draft restoration, and boundary no-ops
+  (Up at the oldest entry) are untouched.
 
 ## Features
 
@@ -188,10 +193,12 @@ No npm runtime dependencies; `node:fs` / `node:os` / `node:path` only.
 
 ## Caveats
 
-- **pi-tui internals**: the paste-expand feature reaches into `Editor` privates
-  at runtime (`state`, `pastes`, `pasteCounter`, `pushUndoSnapshot`,
-  `cancelAutocomplete`, `exitHistoryBrowsing`, `setCursorCol`) and overrides
-  the TS-private `handlePaste` (compile-time private, runtime-accessible). It
+- **pi-tui internals**: the paste-expand and history-cursor features reach into
+  `Editor` privates at runtime (`state`, `pastes`, `pasteCounter`,
+  `historyIndex`, `pushUndoSnapshot`, `cancelAutocomplete`,
+  `exitHistoryBrowsing`, `setCursorCol`, `moveToLineEnd`) and override the
+  TS-private `handlePaste` and `navigateHistory` (compile-time private,
+  runtime-accessible). It
   also hard-codes pi's paste-marker format (`[paste #N +X lines]` /
   `[paste #N X chars]`) and replicates pi-tui's paste cleanup and registry
   renumbering. Any change to pi-tui's paste handling or marker format can

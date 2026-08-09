@@ -62,10 +62,12 @@ interface EditorInternals {
   pastes: Map<number, string>;
   pasteCounter: number;
   lastAction: unknown;
+  historyIndex: number;
   pushUndoSnapshot(): void;
   cancelAutocomplete(): void;
   exitHistoryBrowsing(): void;
   setCursorCol(col: number): void;
+  moveToLineEnd(): void;
 }
 
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
@@ -248,6 +250,28 @@ class Composer extends CustomEditor {
     }
     // @ts-expect-error TS2855 — see class-level note: parent method is typed private.
     super.handlePaste(pastedText);
+  }
+
+  // ── History recall: cursor at the end ─────────────────────────────────
+  // pi-tui's navigateHistory places the cursor at the *start* of an entry
+  // recalled with Up (so a second Up keeps browsing history in multi-line
+  // entries). The cost is the overwhelmingly common case — recall the
+  // message you just sent and keep typing — which then prepends to your own
+  // sentence. Prefer the common case; Down is untouched. Ported from
+  // workos/arc's editor-history-cursor extension.
+  navigateHistory(direction: number): void {
+    const self = this as unknown as EditorInternals;
+    const previousHistoryIndex = self.historyIndex;
+    // @ts-expect-error TS2855 — see class-level note: parent method is typed private.
+    super.navigateHistory(direction);
+    // Only the Up case, and only when an entry was actually recalled:
+    // historyIndex -1 means the user's in-progress draft was restored, whose
+    // cursor position should be preserved exactly as it was, and an unchanged
+    // index means the original was a boundary no-op (already at the oldest
+    // entry), where moving the cursor would disrupt in-place editing.
+    if (direction !== -1 || self.historyIndex < 0 || self.historyIndex === previousHistoryIndex) return;
+    self.state.cursorLine = Math.max(0, self.state.lines.length - 1);
+    self.moveToLineEnd();
   }
 
   /** Replace the collapsed marker for paste `id` with its real content,
