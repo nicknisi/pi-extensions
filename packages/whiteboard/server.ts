@@ -3,17 +3,29 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
 
-import { generateMermaid } from './generate.js';
 import { RealtimeTranscriber, transcribeBlob } from './transcription.js';
 import { whiteboardHtml } from './template.js';
 
 const HOST = '127.0.0.1';
 
-export interface ServerOpts {
-  apiKey: string;
-  model?: string | undefined;
-  baseUrl?: string | undefined;
+/** Callbacks the extension provides — the server has no knowledge of pi internals. */
+export interface ServerCallbacks {
+  /** Generate Mermaid from a prompt using the active model + session context. */
+  generate: (prompt: string, currentMermaid: string | null) => Promise<string>;
+  /** Called when a new diagram is generated (for session injection + persistence). */
+  onDiagramGenerated: (mermaid: string, prompt: string) => void;
+  /** Should this transcript be routed to the full agent instead of direct generation? */
+  shouldRouteToAgent: (transcript: string) => boolean;
+  /** Route a transcript to the agent as a user message. */
+  routeToAgent: (transcript: string) => void;
+  /** OpenAI API key for transcription (Realtime API + one-shot). */
+  transcriptionApiKey: string;
+  /** Base URL for OpenAI transcription API. */
+  transcriptionBaseUrl: string;
+  /** Transcription model for one-shot (push-to-talk). */
   transcribeModel?: string | undefined;
+  /** Transcription model for streaming (continuous). */
+  streamTranscribeModel?: string | undefined;
 }
 
 interface ClientState {
@@ -26,20 +38,20 @@ interface ServerState {
   server: Server;
   wss: WebSocketServer;
   currentMermaid: string | null;
-  opts: ServerOpts;
+  callbacks: ServerCallbacks;
   generating: AbortController | null;
 }
 
 let state: ServerState | null = null;
 
 /** Start the server if not already running. Returns the URL. */
-export async function startWhiteboardServer(opts: ServerOpts): Promise<string> {
+export async function startWhiteboardServer(callbacks: ServerCallbacks): Promise<string> {
   if (state) return `http://${HOST}:${state.port}`;
 
   const server = createServer((req, res) => handleHttp(req, res));
   const wss = new WebSocketServer({ server });
 
-  wss.on('connection', (ws) => handleConnection(ws, opts));
+  wss.on('connection', (ws) => handleConnection(ws, callbacks));
 
   const port = await new Promise<number>((resolve, reject) => {
     server.once('error', reject);
@@ -50,7 +62,7 @@ export async function startWhiteboardServer(opts: ServerOpts): Promise<string> {
     });
   });
 
-  state = { port, server, wss, currentMermaid: null, opts, generating: null };
+  state = { port, server, wss, currentMermaid: null, callbacks, generating: null };
   return `http://${HOST}:${port}`;
 }
 
@@ -74,6 +86,24 @@ export function isWhiteboardRunning(): boolean {
   return state !== null;
 }
 
+/** Get the current Mermaid diagram (for the snapshot tool). */
+export function getCurrentMermaid(): string | null {
+  return state?.currentMermaid ?? null;
+}
+
+/** Push a Mermaid diagram to all connected browsers (agent → whiteboard). */
+export function pushMermaid(mermaid: string): void {
+  if (!state) return;
+  state.currentMermaid = mermaid;
+  for (const client of state.wss.clients) {
+    try {
+      client.send(JSON.stringify({ type: 'mermaid', code: mermaid }));
+    } catch {
+      // Ignore
+    }
+  }
+}
+
 // ─── HTTP handler ─────────────────────────────────────────────────────────────
 
 function handleHttp(_req: IncomingMessage, res: ServerResponse): void {
@@ -83,7 +113,7 @@ function handleHttp(_req: IncomingMessage, res: ServerResponse): void {
 
 // ─── WebSocket handler ────────────────────────────────────────────────────────
 
-function handleConnection(ws: WebSocket, opts: ServerOpts): void {
+function handleConnection(ws: WebSocket, callbacks: ServerCallbacks): void {
   const clientState: ClientState = {
     pendingAudioFormat: null,
     transcriber: null,
@@ -91,9 +121,9 @@ function handleConnection(ws: WebSocket, opts: ServerOpts): void {
 
   ws.on('message', (data, isBinary) => {
     if (isBinary) {
-      handleBinaryMessage(ws, data as Buffer, clientState, opts);
+      handleBinaryMessage(ws, data as Buffer, clientState, callbacks);
     } else {
-      handleTextMessage(ws, data.toString(), clientState, opts).catch(() => {});
+      handleTextMessage(ws, data.toString(), clientState, callbacks).catch(() => {});
     }
   });
 
@@ -113,7 +143,7 @@ async function handleTextMessage(
   ws: WebSocket,
   msg: string,
   clientState: ClientState,
-  opts: ServerOpts,
+  callbacks: ServerCallbacks,
 ): Promise<void> {
   let event: { type: string; [key: string]: unknown };
   try {
@@ -124,7 +154,7 @@ async function handleTextMessage(
 
   switch (event.type) {
     case 'text':
-      await handleGenerate(ws, event.text as string, opts);
+      await handleGenerate(ws, event.text as string, callbacks);
       break;
 
     case 'audio':
@@ -133,7 +163,7 @@ async function handleTextMessage(
       break;
 
     case 'stream_start':
-      await handleStreamStart(ws, clientState, opts);
+      await handleStreamStart(ws, clientState, callbacks);
       break;
 
     case 'stream_stop':
@@ -147,7 +177,7 @@ async function handleTextMessage(
   }
 }
 
-function handleBinaryMessage(ws: WebSocket, data: Buffer, clientState: ClientState, opts: ServerOpts): void {
+function handleBinaryMessage(ws: WebSocket, data: Buffer, clientState: ClientState, callbacks: ServerCallbacks): void {
   // In streaming mode, forward audio to transcriber
   if (clientState.transcriber) {
     clientState.transcriber.sendAudio(data);
@@ -161,10 +191,14 @@ function handleBinaryMessage(ws: WebSocket, data: Buffer, clientState: ClientSta
 
     ws.send(JSON.stringify({ type: 'status', state: 'transcribing' }));
 
-    transcribeBlob(data, format, opts)
+    transcribeBlob(data, format, {
+      apiKey: callbacks.transcriptionApiKey,
+      baseUrl: callbacks.transcriptionBaseUrl,
+      model: callbacks.transcribeModel,
+    })
       .then((transcript) => {
         ws.send(JSON.stringify({ type: 'final', text: transcript }));
-        return handleGenerate(ws, transcript, opts);
+        return handleTranscript(ws, transcript, callbacks);
       })
       .catch((err: unknown) => {
         ws.send(JSON.stringify({ type: 'error', message: String(err) }));
@@ -173,7 +207,23 @@ function handleBinaryMessage(ws: WebSocket, data: Buffer, clientState: ClientSta
   }
 }
 
-async function handleGenerate(ws: WebSocket, prompt: string, opts: ServerOpts): Promise<void> {
+/** Process a transcript — route to agent or generate Mermaid directly. */
+async function handleTranscript(ws: WebSocket, transcript: string, callbacks: ServerCallbacks): Promise<void> {
+  if (!transcript.trim()) return;
+
+  // If the transcript needs the agent's codebase awareness, route it
+  if (callbacks.shouldRouteToAgent(transcript)) {
+    ws.send(JSON.stringify({ type: 'status', state: 'routing' }));
+    callbacks.routeToAgent(transcript);
+    ws.send(JSON.stringify({ type: 'status', state: 'idle' }));
+    return;
+  }
+
+  // Otherwise, generate Mermaid directly using the active model
+  await handleGenerate(ws, transcript, callbacks);
+}
+
+async function handleGenerate(ws: WebSocket, prompt: string, callbacks: ServerCallbacks): Promise<void> {
   if (!prompt.trim()) return;
 
   // Abort any in-flight generation
@@ -187,21 +237,16 @@ async function handleGenerate(ws: WebSocket, prompt: string, opts: ServerOpts): 
   ws.send(JSON.stringify({ type: 'status', state: 'generating' }));
 
   try {
-    const mermaid = await generateMermaid({
-      prompt,
-      currentMermaid: state?.currentMermaid ?? null,
-      apiKey: opts.apiKey,
-      model: opts.model,
-      baseUrl: opts.baseUrl,
-      signal: controller.signal,
-    });
+    const mermaid = await callbacks.generate(prompt, state?.currentMermaid ?? null);
 
     if (state) state.currentMermaid = mermaid;
 
     ws.send(JSON.stringify({ type: 'mermaid', code: mermaid }));
     ws.send(JSON.stringify({ type: 'status', state: 'idle' }));
+
+    // Notify the extension (inject into session + persist)
+    callbacks.onDiagramGenerated(mermaid, prompt);
   } catch (err) {
-    if (controller.signal.aborted) return; // aborted, not an error
     ws.send(JSON.stringify({ type: 'error', message: String(err) }));
     ws.send(JSON.stringify({ type: 'status', state: 'idle' }));
   } finally {
@@ -209,19 +254,19 @@ async function handleGenerate(ws: WebSocket, prompt: string, opts: ServerOpts): 
   }
 }
 
-async function handleStreamStart(ws: WebSocket, clientState: ClientState, opts: ServerOpts): Promise<void> {
+async function handleStreamStart(ws: WebSocket, clientState: ClientState, callbacks: ServerCallbacks): Promise<void> {
   if (clientState.transcriber) return; // already streaming
 
   clientState.transcriber = new RealtimeTranscriber({
-    apiKey: opts.apiKey,
-    model: opts.transcribeModel,
+    apiKey: callbacks.transcriptionApiKey,
+    model: callbacks.streamTranscribeModel,
     onPartial: (text) => {
       ws.send(JSON.stringify({ type: 'partial', text }));
     },
     onFinal: (text) => {
       ws.send(JSON.stringify({ type: 'final', text }));
       // Generate on each final transcript (phrase-level updates)
-      handleGenerate(ws, text, opts).catch(() => {});
+      handleTranscript(ws, text, callbacks).catch(() => {});
     },
     onError: (err) => {
       ws.send(JSON.stringify({ type: 'error', message: String(err) }));

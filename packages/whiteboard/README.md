@@ -1,13 +1,33 @@
 # @nicknisi/pi-whiteboard
 
-Voice-driven whiteboarding with real-time Mermaid diagram generation.
+Voice-driven whiteboarding with real-time Mermaid diagram generation, integrated with the pi coding session.
 
-Opens a browser-based whiteboard where you can type or **speak** descriptions of diagrams and see them rendered as Mermaid diagrams in real-time. As you describe what you want to build, an LLM generates the Mermaid code and the diagram updates live. Course-correct mid-conversation — "no, make the gateway a circle instead" — and the diagram updates immediately.
+Opens a browser-based whiteboard where you can type or **speak** descriptions of diagrams and see them rendered as Mermaid diagrams in real-time. The diagram generation uses the **active model** (same one as your pi agent) with **session context** — it knows what you've been working on. Diagrams flow back into the pi session so the agent can see them and act on them.
 
 ## What it adds
 
 - **`/whiteboard` command** — opens the whiteboard UI in the browser
-- **`whiteboard` tool** — LLM-callable tool to open the whiteboard programmatically
+- **`whiteboard` tool** — LLM-callable tool with four actions:
+  - `open` — launch the whiteboard
+  - `update` — push a Mermaid diagram to the whiteboard (agent → user)
+  - `snapshot` — read the current diagram back (agent reads what the user drew)
+  - `status` — check if the whiteboard is running
+
+## How it's different from a standalone app
+
+The whiteboard is **not a side channel** — it's integrated with the pi session in five ways:
+
+1. **Diagram generation uses the active model with session context.** When you say "make the gateway a circle," the model knows what "the gateway" is because it can see your recent conversation. It's the agent's brain, called directly — no agent loop, ~1-2s latency.
+
+2. **Diagrams flow back into the session.** Each voice-generated diagram is injected into session context via `pi.sendMessage()` with `deliverAs: "nextTurn"` — available when you type your next prompt, but doesn't trigger the agent on its own.
+
+3. **`before_agent_start` injects the current diagram.** When you type "build it" in pi, the agent sees the current whiteboard diagram in its context automatically.
+
+4. **The agent can push diagrams to the whiteboard.** The agent can analyze your codebase, generate a Mermaid diagram, and push it to the whiteboard via `action: "update"`. The browser live-reloads.
+
+5. **The agent can read the whiteboard.** Via `action: "snapshot"`, the agent can read the current diagram and act on it — e.g., "I see your architecture, want me to scaffold it?"
+
+6. **Diagrams persist with the session.** Via `pi.appendEntry()`, the current diagram survives restarts. On `/resume`, the whiteboard restores the last diagram.
 
 ## Usage
 
@@ -16,92 +36,121 @@ Opens a browser-based whiteboard where you can type or **speak** descriptions of
 ```
 
 This opens a browser window with:
+- A **text input** for typing diagram descriptions
+- A **Push to Talk** button for one-shot voice transcription
+- A **Continuous** button for real-time streaming voice mode
+- A live **transcript panel**
+- The rendered **Mermaid diagram**
 
-- A **text input** where you can type diagram descriptions
-- A **Push to Talk** button for one-shot voice transcription (hold to record, release to transcribe)
-- A **Continuous** button for real-time streaming voice mode (hands-free, diagram updates as you speak)
-- A live **transcript panel** showing what you said
-- The rendered **Mermaid diagram** area
+### The collaborative flow
 
-### Text mode
+```
+You (pi prompt): "whiteboard the architecture of this project"
+  → agent explores codebase, generates initial Mermaid
+  → agent calls whiteboard tool (action: "update") → browser renders
+  → agent says: "I've mapped out 3 services and a gateway. Take over with voice."
 
-Type a description and press Enter or click Send:
+You (voice): "make the gateway a circle"
+  → transcribe → active model generates updated Mermaid with session context
+  → browser live-reloads → diagram injected into session context
 
-> "draw a system architecture with a client, API gateway, and three microservices connected to a shared database"
+You (voice): "add a cache between the gateway and service 2"
+  → same fast loop → diagram updates
 
-The diagram appears within ~1-2 seconds. Then type corrections:
+You (voice): "actually, based on the auth middleware, should we add an auth service?"
+  → whiteboard detects this needs the agent → routes to pi.sendUserMessage()
+  → agent: "Looking at your auth middleware... yes, I'd extract it. [pushes updated diagram]"
 
-> "no, make the gateway a circle and add a cache layer between the gateway and the services"
+You (pi prompt): "ok, build it"
+  → agent has the final diagram in context (via before_agent_start injection)
+  → starts scaffolding
+```
 
-The diagram updates, preserving existing elements.
+### When voice routes to the agent vs. generates directly
 
-### Push-to-talk mode
+Voice transcripts are routed to the full agent (via `pi.sendUserMessage()`) when they contain:
+- Questions: "should we...", "what if...", "can we..."
+- Codebase references: "based on...", "from the codebase..."
+- Action requests: "build it", "scaffold", "generate the code", "create the files"
+- Opinion requests: "what do you think", "how should we..."
 
-Hold the **Push to Talk** button, speak your description, then release. The audio is transcribed via OpenAI's `gpt-4o-mini-transcribe` and the diagram is generated from the transcript. ~2-4 seconds from release to rendered diagram.
+Everything else generates Mermaid directly via the active model — fast iteration without the agent loop.
 
-### Continuous mode
-
-Click **Continuous** to start hands-free streaming voice mode. The browser captures audio via `AudioWorklet` (resampled to PCM16 24kHz) and streams it to the OpenAI Realtime API. As you speak, the transcript appears in the transcript panel and the diagram updates phrase-by-phrase at natural pause boundaries. Course-correct by just saying "no, actually..." — the diagram regenerates.
-
-Click **Stop** (same button) to end the streaming session.
-
-## How it works
+## Architecture
 
 ```
 Browser (localhost)                    Pi extension (Node.js)
 ┌──────────────────────┐               ┌──────────────────────────┐
 │ getUserMedia         │── audio ──►   │ WebSocket server         │
 │ AudioWorklet         │  (binary)     │                          │
-│ (PCM16 24kHz)        │               │ ├── One-shot:            │
-│                      │               │ │   transcribeBlob()     │
-│ Mermaid.js render    │◄── mermaid ── │ │   → generateMermaid() │
+│ (PCM16 24kHz)        │               │ ├── Transcription:       │
+│                      │               │ │   OpenAI Realtime API  │
+│ Mermaid.js render    │◄── mermaid ── │ │   (or one-shot blob)   │
 │                      │   (JSON)      │                          │
-│ Transcript display   │◄── partial ── │ ├── Streaming:           │
-│                      │   (JSON)      │ │   RealtimeTranscriber  │
-│                      │               │ │   → generateMermaid() │
-└──────────────────────┘               │                          │
-                                       │ generateMermaid() calls   │
-                                       │ OpenAI chat completions   │
+│ Transcript display   │◄── partial ── │ ├── Generation:          │
+│                      │   (JSON)      │ │   ctx.modelRegistry    │
+│                      │               │ │   .complete() with     │
+└──────────────────────┘               │ │   session context      │
+                                       │                          │
+                                       │ ├── Session injection:   │
+                                       │ │   pi.sendMessage()     │
+                                       │ │   pi.appendEntry()     │
+                                       │ │   before_agent_start   │
+                                       │                          │
+                                       │ ├── Agent routing:       │
+                                       │ │   pi.sendUserMessage() │
+                                       │ │   (for codebase-aware  │
+                                       │ │    requests)           │
+                                       │                          │
+                                       │ └── Agent → whiteboard:  │
+                                       │     pushMermaid() via    │
+                                       │     whiteboard tool      │
                                        └──────────────────────────┘
-                                                │
-                                                ▼
-                                       wss://api.openai.com
-                                       (transcription + LLM)
 ```
 
-- **Text path:** browser sends text → LLM generates Mermaid → browser renders
-- **Push-to-talk:** browser records audio (MediaRecorder) → server sends blob to OpenAI Audio API → transcript → LLM generates Mermaid → browser renders
-- **Continuous:** browser streams PCM16 audio via AudioWorklet → server forwards to OpenAI Realtime WebSocket → partial/final transcripts → LLM generates Mermaid on each final phrase → browser renders
+### Key design: the active model, not a disconnected LLM
+
+Diagram generation calls `ctx.modelRegistry.complete(ctx.model, context)` — the **same model** the agent uses, with **recent session messages** as context. This means:
+
+- "Make it like the auth service" → knows what the auth service is
+- "Add the service we discussed" → knows which service you mean
+- Corrections understand the existing diagram in context
+
+The voice pipeline calls the model directly (no agent loop, no tool calls) for ~1-2s latency. When a transcript needs codebase awareness, it routes to `pi.sendUserMessage()` for the full agent experience.
 
 ## Configuration
 
-No configuration needed. The extension resolves the OpenAI API key from pi's model registry (`getProviderAuth('openai')`).
+No configuration needed. The extension resolves the OpenAI API key from pi's model registry (`getProviderAuth('openai')`) for transcription, and uses the active model for diagram generation.
 
 ### Defaults
 
-| Setting                         | Default                  | Notes                                            |
-| ------------------------------- | ------------------------ | ------------------------------------------------ |
-| LLM model                       | `gpt-4o-mini`            | Fast and cost-effective for real-time generation |
-| Transcription model (one-shot)  | `gpt-4o-mini-transcribe` | Used by Push to Talk                             |
-| Transcription model (streaming) | `gpt-4o-transcribe`      | Used by Continuous mode                          |
-| Host                            | `127.0.0.1`              | Localhost only                                   |
-| Port                            | ephemeral (port 0)       | No conflicts                                     |
+| Setting | Default | Notes |
+|---------|---------|-------|
+| LLM model | Active pi model | Same model as the agent — uses `ctx.model` |
+| Transcription model (one-shot) | `gpt-4o-mini-transcribe` | Used by Push to Talk |
+| Transcription model (streaming) | `gpt-4o-transcribe` | Used by Continuous mode |
+| Host | `127.0.0.1` | Localhost only |
+| Port | ephemeral (port 0) | No conflicts |
+| Session context | Last 5 user messages | Included in generation context |
 
 ## Requirements
 
-- An OpenAI API key configured in pi (the extension checks for it on launch)
-- A browser (opened automatically via `open` / `xdg-open` / `rundll32`)
-- Microphone access (for voice features — localhost is a secure context, so `getUserMedia` works)
+- An OpenAI API key configured in pi (for transcription — the Realtime API and one-shot audio API)
+- An active model configured in pi (for diagram generation — any model that supports completions)
+- A browser (opened automatically)
+- Microphone access (for voice features — localhost is a secure context)
 
 ## Dependencies
 
 - `ws` — WebSocket server (and client for OpenAI Realtime API)
+- `typebox` — schema definitions for tool parameters
 
 ## Caveats
 
-- **API key:** The extension requires an OpenAI API key for both transcription and LLM generation. If your pi setup uses a different provider (e.g., Anthropic only), voice features won't work.
-- **Latency:** Real-time here means ~2-4 seconds from speech to rendered diagram (VAD pause detection + transcription + LLM generation + Mermaid render). It's conversational, not word-by-word.
+- **Two API surfaces:** Transcription uses OpenAI (Realtime API + Audio API). Diagram generation uses whatever model is active in pi. If your active model is Anthropic, voice transcription still needs an OpenAI key, but diagram generation uses Claude.
+- **Latency:** Real-time here means ~2-4 seconds from speech to rendered diagram (VAD pause + transcription + LLM generation + Mermaid render). It's conversational, not word-by-word.
 - **Mermaid from CDN:** The browser UI loads Mermaid.js from `cdn.jsdelivr.net`. Requires internet access on the browser machine.
-- **Audio format:** Push-to-talk uses `MediaRecorder` (WebM/Opus in most browsers). Continuous mode uses `AudioWorklet` to produce raw PCM16 at 24kHz. Both are handled server-side.
-- **Cost:** Transcription is ~$0.006/min for `gpt-4o-transcribe` and ~$0.003/min for `gpt-4o-mini-transcribe`. LLM generation with `gpt-4o-mini` is pennies per session. Continuous streaming for a long whiteboarding session costs cents.
+- **Session context size:** Only the last 5 user messages are included in the generation context to avoid token bloat. If the relevant context is older, the model may not have it.
+- **Agent routing heuristic:** The `shouldRouteToAgent` check is a simple regex. Complex phrasing may misroute. When in doubt, the user can always type in pi directly.
+- **Cost:** Transcription is ~$0.006/min (streaming) or ~$0.003/min (one-shot). Diagram generation cost depends on the active model.
 - **Session lifecycle:** The server starts lazily on `/whiteboard` or the tool call, and stops on session shutdown. One server per pi session.

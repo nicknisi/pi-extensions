@@ -237,6 +237,10 @@ export function whiteboardHtml(): string {
           badge.textContent = 'Listening';
           badge.classList.add('active');
           break;
+        case 'routing':
+          badge.innerHTML = '<span class="spinner"></span> Routing to agent';
+          badge.classList.add('active');
+          break;
         default:
           badge.textContent = state;
       }
