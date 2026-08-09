@@ -1,5 +1,15 @@
 # @nicknisi/pi-header
 
+## 0.1.4
+
+### Patch Changes
+
+- Updated dependencies [00958ee]
+- Updated dependencies [1f032e3]
+- Updated dependencies [00958ee]
+- Updated dependencies [efef393]
+  - @nicknisi/pi-shared@0.3.0
+
 ## 0.1.3
 
 ### Patch Changes

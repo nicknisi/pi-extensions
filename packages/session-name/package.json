@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-session-name",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Auto-name pi sessions (heuristic or LLM) plus search/resume-by-name conveniences",
   "keywords": [
     "pi",

@@ -1,5 +1,23 @@
 # @nicknisi/pi-codemode
 
+## 0.2.0
+
+### Minor Changes
+
+- 484672a: codemode joins pi's editor prefix grammar (`!` bash, `!!` silent bash, `@` files) as the `=` member. `=<snippet>` at position zero runs the snippet through the codemode runtime inline, devtools-console style — the snippet executes with the same `spawn`/`log`/`runWorkflow` bindings as the `codemode` tool, the result renders as a collapsible block (toggled with the same `app.tools.expand` key as tool output), and the returned value binds to `$1`, `$2`, … for later console snippets in the session. Each run is persisted as a session custom entry (`customType: 'codemode-console'`) so the console history survives reload; `$1…` are rebuilt from those entries on session start. The `=` prefix is intercepted via `on("input")` with `{ action: "handled" }` (TUI only; extension-injected and non-tui inputs pass through) and respects the schema-or-nothing spawn contract.
+- 484672a: `/cx <name> [args...]` runs a named codemode snippet discovered from plain TS/JS files in `~/.pi/agent/snippets/` (global) and `.pi/snippets/` (project, trusted only), mirroring pi's prompt-template discovery. Files carry optional frontmatter (`description`) for the autocomplete dropdown. `/cx` expands `{{args}}`-style substitution — `{{args}}`/`{{@}}` (all args), `{{N}}` (positional, 1-indexed), `{{N:-default}}` — then runs the snippet via the codemode runtime, binding the result to the next `$N` and persisting it as a `codemode-console` custom entry. This is a directory convention ONLY: no registry, no index, no config keys — the registry is `ls`, the package manager is `git`, the search engine is `grep`. Snippets are read on demand each invocation, so discovery rides `/reload` with no snippet-specific wiring.
+- 9245fdc: codemode spawn() now requires an explicit output contract. A spawn with neither `outputSchema` nor `text: true` throws immediately instead of returning unparsed text. This prevents the silent failure mode where reading a field off unparsed text yields `undefined` while the run reports success. A schema-validating spawn that fails validation after its bounded repair attempt still returns `{ ok: false, kind: 'schema_invalid' }` — never a silently-empty string. Migration: add `text: true` to existing text-mode spawns, or define an `outputSchema`.
+- 9245fdc: codemode now writes a runscope orchestration ledger into the parent session. Every `spawn` and `runWorkflow` lifecycle event — `spawn_start`, `spawn_end`, `stage_start`, `stage_end`, `gate_result` — is appended as a typed custom entry (`customType: 'codemode-runscope'`) via `pi.appendEntry`, each carrying `{ runId, spanId, parentSpanId, kind, ts }`. Custom entries persist to the session JSONL without entering LLM context. Stage `parentSpanId` is derived from `needs` edges so the trace tree mirrors the workflow DAG; spawns inside a workflow are parented to their stage via `AsyncLocalStorage`. Dependency-free — no OpenTelemetry.
+
+### Patch Changes
+
+- 6172976: Add a "Recipes" section to the codemode README with the Adversarial Gauntlet recipe: a `sharesTree` builder stage with a synchronous critic gate over the real `git diff HEAD` (revise loop, `maxGateAttempts: 3`) plus an independent downstream critic stage over the captured `treeDiffs`. Docs-only; no runtime change.
+- Updated dependencies [00958ee]
+- Updated dependencies [1f032e3]
+- Updated dependencies [00958ee]
+- Updated dependencies [efef393]
+  - @nicknisi/pi-shared@0.3.0
+
 ## 0.1.0
 
 ### Minor Changes

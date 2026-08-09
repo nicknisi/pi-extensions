@@ -1,5 +1,0 @@
----
-'@nicknisi/pi-subagents': minor
----
-
-`&` dispatch prefix and `/again`. `&scout how does auth work` at position zero intercepts the input (`on("input")` → `{action:"handled"}`, the documented `?quick`-style mechanism) and dispatches a single subagent inline, reusing the same `spawnCancellable` path as the `dispatch` tool. Live progress renders in an editor widget; the settled result lands as a collapsible `subagents:inline` custom message (registered via `registerMessageRenderer`) that reuses the `renderTaskTree` / `createExpandedDispatchView` machinery, and the answer is added to model context. Every dispatch is captured as a `subagents:dispatch` custom entry (`appendEntry`) so it survives restart, and `/again [amendment]` re-fires the last dispatch verbatim or with an amendment appended. Cut: an inline run is registered in the cascading-cancellation registry (aborted on shutdown, cancellable from the fleet radar) but is not aborted by a bare Esc — the `input` event fires while idle, so no agent abort signal is available to thread into the child.

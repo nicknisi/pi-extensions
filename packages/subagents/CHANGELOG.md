@@ -1,5 +1,24 @@
 # @nicknisi/pi-subagents
 
+## 0.2.0
+
+### Minor Changes
+
+- 00958ee: Deterministic cascading cancellation: a `session_shutdown` handler (quit/reload/new/resume/fork) now aborts every active child — foreground tasks were already aborted via the tool signal, but background runs (which deliberately carry no tool signal) only died with the process before. Aborted runs no longer capture a `.patch` and remove their worktree immediately, so an interrupt or parent exit can't leak a detached worktree; `sweepRunArtifacts` now also removes a ghost run's worktree when reaping it on next startup (closes the hard-exit/SIGKILL leak path). README documents the full worktree cleanup policy (when worktrees are removed, what happens to unclaimed `.patch` files).
+- 00958ee: Persist subagent runs as standard pi sessions (additive dual-write). Every `dispatch` run now ALSO writes a standard pi session JSONL via the real `SessionManager` (from `@earendil-works/pi-coding-agent`) into the default sessions dir, with the session header's `parentSession` set to the owning pi session's file path — so runs show up in pi's native `/resume`, `/tree`, and `--fork` machinery. New `SpawnOptions.parentSession` opts into the mirror; the resulting path is recorded on `RunRecord.sessionFile` and shown by `fleet` `result`. The bespoke `.json` run store is unchanged (fleet/registry still read it). Opt-in keeps other shared-runtime consumers (codemode/workflow) unaffected. Compat caveats: no mirror when the owning session is in-memory (print mode), and no file when the child produced no assistant turn (SessionManager creates the JSONL lazily on the first assistant message).
+- efef393: `&` dispatch prefix and `/again`. `&scout how does auth work` at position zero intercepts the input (`on("input")` → `{action:"handled"}`, the documented `?quick`-style mechanism) and dispatches a single subagent inline, reusing the same `spawnCancellable` path as the `dispatch` tool. Live progress renders in an editor widget; the settled result lands as a collapsible `subagents:inline` custom message (registered via `registerMessageRenderer`) that reuses the `renderTaskTree` / `createExpandedDispatchView` machinery, and the answer is added to model context. Every dispatch is captured as a `subagents:dispatch` custom entry (`appendEntry`) so it survives restart, and `/again [amendment]` re-fires the last dispatch verbatim or with an amendment appended. Cut: an inline run is registered in the cascading-cancellation registry (aborted on shutdown, cancellable from the fleet radar) but is not aborted by a bare Esc — the `input` event fires while idle, so no agent abort signal is available to thread into the child.
+- efef393: Fleet radar overlay and ambient statusline. `Alt+Ctrl+F` (rebindable via `~/.pi/agent/keybindings.json`) opens a tmux-choose-tree-style overlay listing every run as a per-child lane — status, model, current tool, token burn, last activity — with `Enter` to inspect the live run transcript, `c` to cancel the focused run (wired into the existing cascading-cancellation registry), and `Esc` to close. While any run is in flight, a footer status segment (`ctx.ui.setStatus`) reflects live `working · done · failed` counts. The `/fleet` command and the shortcut now share one overlay opener.
+- efef393: `/patches` staging area for worktree-subagent handoffs. A keyboard-driven overlay lists every pending `.patch` (from completed worktree runs) with diffstat and a pre-flight stamp — `clean` / `conflicts` / `stale` — checked via `git apply --check` **without** applying. `Enter` applies the whole patch (`git apply --3way`); `e` expands the full diff with per-hunk navigation (`n`/`p`); `s` applies the focused hunk (reconstructed as a sub-patch and `--3way`-ed); `d` discards; `Esc` closes. Apply/discard decisions persist to `~/.pi/agent/subagent-patches/state.json` so `/patches` survives restart. Cuts: single-hunk apply only (no multi-select), the diff view truncates at 2000 lines, and stale-vs-conflicts is a file-existence heuristic (the run record stores no base commit).
+
+### Patch Changes
+
+- 1f032e3: /fleet detail view now shows live activity for running agents: turn/tool-call counts in the meta line, a live transcript tail (last 10 events), and a 1s refresh so an open detail tracks the run instead of showing a frozen "(still running — no output yet)" stub.
+- Updated dependencies [00958ee]
+- Updated dependencies [1f032e3]
+- Updated dependencies [00958ee]
+- Updated dependencies [efef393]
+  - @nicknisi/pi-shared@0.3.0
+
 ## 0.1.0
 
 ### Minor Changes
