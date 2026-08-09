@@ -1,0 +1,41 @@
+{
+  "name": "@nicknisi/pi-workflows",
+  "version": "0.1.0",
+  "description": "Model-facing front door to the first-party workflow engine — run JS workflow scripts over the subagent runtime, replacing the third-party @quintinshaw/pi-dynamic-workflows extension",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-package"
+  ],
+  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/workflows#readme",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicknisi/pi-extensions.git",
+    "directory": "packages/workflows"
+  },
+  "files": [
+    "dist",
+    "index.ts",
+    "engine.ts"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@nicknisi/pi-shared": "workspace:*",
+    "typebox": "^1.1.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
