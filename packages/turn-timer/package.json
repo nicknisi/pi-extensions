@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-turn-timer",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Per-turn elapsed timer row below each response",
   "keywords": [
     "pi",
