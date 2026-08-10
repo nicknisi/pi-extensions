@@ -11,12 +11,13 @@
  * config-driven (~/.pi/agent/configs/composer.json) and supports a
  * prefix glyph, boxed/unboxed modes, configurable padding, menu gap,
  * rounded vs square corners, a configurable session-name inlay in the border
- * (shown only when the session has a name), and working-state animations
- * (spinner prefix and border glow while the agent works). The
- * rounded ╭╮│╰╯ corners remain the default to preserve the original look.
- * Paste-expand behavior was merged in from the former standalone
- * `paste-expand.ts` so the two features don't
- * fight over `setEditorComponent` (last-call-wins).
+ * (shown only when the session has a name — or another extension has pushed
+ * label text over the `pi.events` bus; see the README's Extension API), and
+ * working-state animations (spinner prefix and border glow while the agent
+ * works). The rounded ╭╮│╰╯ corners remain the default to preserve the
+ * original look. Paste-expand behavior was merged in from the former
+ * standalone `paste-expand.ts` so the two features don't fight over
+ * `setEditorComponent` (last-call-wins).
  *
  * Layout (boxed):
  *   ╭──────────────────────────╮
@@ -80,6 +81,7 @@ import { CONFIG, configLoadError, reloadConfig } from './config.js';
 import {
   applyColor,
   mixRgb,
+  parseLabelData,
   plainText,
   rainbowRgb,
   resolveRgb,
@@ -141,6 +143,11 @@ let busySince = 0;
  * auto-names sessions, so any value here was set deliberately — via /name,
  * --name, or an extension such as session-name. */
 let sessionName: string | undefined;
+
+/** Label text pushed by another extension via the `composer:set-label` bus
+ * event; takes precedence over the session name. Cleared and re-requested on
+ * every session start so a stale label never leaks across sessions. */
+let labelOverride: string | undefined;
 let animTimer: ReturnType<typeof setInterval> | undefined;
 let previewTimer: ReturnType<typeof setTimeout> | undefined;
 let animTui: TUI | undefined;
@@ -387,13 +394,14 @@ class Composer extends CustomEditor {
    * the session is unnamed or the rule is too narrow (keeps at least 8 cells
    * of plain rule). */
   private sessionNameLabel(width: number): { text: string; width: number } | null {
-    if (!CONFIG.SESSION_NAME || !sessionName) return null;
+    const label = labelOverride ?? sessionName;
+    if (!CONFIG.SESSION_NAME || !label) return null;
     const [pre, post] = splitFormat(CONFIG.SESSION_NAME_FORMAT);
     const surroundW = visibleWidth(pre) + visibleWidth(post);
     const fit = width - 8 - surroundW;
     const cap = CONFIG.SESSION_NAME_MAX_WIDTH > 0 ? Math.min(CONFIG.SESSION_NAME_MAX_WIDTH, fit) : fit;
     if (cap < 4) return null;
-    const name = truncateCells(sessionName, cap);
+    const name = truncateCells(label, cap);
     return {
       text: this.border(pre) + this.name(name) + this.border(post),
       width: surroundW + visibleWidth(name),
@@ -527,9 +535,20 @@ function disableFocusTracking(): void {
 }
 
 export default function composer(pi: ExtensionAPI) {
+  // Extension API over pi's shared event bus: another extension pushes label
+  // text with pi.events.emit('composer:set-label', { text }); an absent or
+  // empty text clears the override. Composer re-emits 'composer:label-request'
+  // on every session start so producers can re-push regardless of load order.
+  pi.events.on('composer:set-label', (data) => {
+    labelOverride = parseLabelData(data);
+    animTui?.requestRender();
+  });
+
   pi.on('session_start', (_event, ctx: ExtensionContext) => {
     if (ctx.mode !== 'tui') return;
     sessionName = pi.getSessionName() || undefined;
+    labelOverride = undefined;
+    pi.events.emit('composer:label-request', {});
     ctx.ui.setEditorComponent((tui, theme, kb) => {
       // All palette fns read CONFIG.* at call time so /composer reloads
       // take effect without rebuilding the editor component.
@@ -642,6 +661,7 @@ export default function composer(pi: ExtensionAPI) {
     stopAnimation();
     animTui = undefined;
     sessionName = undefined;
+    labelOverride = undefined;
     ctx.ui.setEditorComponent(undefined);
   });
 }
