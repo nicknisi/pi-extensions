@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-composer",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Configurable boxed input editor for pi, with paste-again-to-expand",
   "keywords": [
     "pi",
