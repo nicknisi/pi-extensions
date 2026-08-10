@@ -322,10 +322,16 @@ export default function (pi: ExtensionAPI) {
     const session = getTmuxSession();
     const paneId = process.env.TMUX_PANE;
     if (session && paneId) {
-      spawn('claude-notify', ['waiting', session, paneId], {
+      // claude-notify is an optional personal notifier. If it's missing
+      // (ENOENT) or fails to spawn for any reason, that must never take
+      // pi down as an uncaught exception — attach an error listener so
+      // the spawn error is swallowed.
+      const child = spawn('claude-notify', ['waiting', session, paneId], {
         detached: true,
         stdio: 'ignore',
-      }).unref();
+      });
+      child.on('error', () => {});
+      child.unref();
     }
   });
 
