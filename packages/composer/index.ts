@@ -10,10 +10,12 @@
  * Evolved from the earlier `box-editor.ts`: the rendering is now
  * config-driven (~/.pi/agent/configs/composer.json) and supports a
  * prefix glyph, boxed/unboxed modes, configurable padding, menu gap,
- * rounded vs square corners, and working-state animations (spinner prefix
- * and border glow while the agent works). The rounded ╭╮│╰╯ corners remain the
- * default to preserve the original look. Paste-expand behavior was merged
- * in from the former standalone `paste-expand.ts` so the two features don't
+ * rounded vs square corners, a configurable session-name inlay in the border
+ * (shown only when the session has a name), and working-state animations
+ * (spinner prefix and border glow while the agent works). The
+ * rounded ╭╮│╰╯ corners remain the default to preserve the original look.
+ * Paste-expand behavior was merged in from the former standalone
+ * `paste-expand.ts` so the two features don't
  * fight over `setEditorComponent` (last-call-wins).
  *
  * Layout (boxed):
@@ -75,7 +77,16 @@ import type { TUI, EditorTheme } from '@earendil-works/pi-tui';
 import type { KeybindingsManager } from '@earendil-works/pi-coding-agent';
 import { visibleWidth } from '@earendil-works/pi-tui';
 import { CONFIG, configLoadError, reloadConfig } from './config.js';
-import { applyColor, mixRgb, plainText, rainbowRgb, resolveRgb, rgbColor } from './utils.js';
+import {
+  applyColor,
+  mixRgb,
+  plainText,
+  rainbowRgb,
+  resolveRgb,
+  rgbColor,
+  splitFormat,
+  truncateCells,
+} from './utils.js';
 
 // Corner glyphs per style.
 const CORNERS = {
@@ -125,6 +136,11 @@ function prefixWidth(): number {
 let agentBusy = false;
 let agentRunning = false; // real agent run in flight (vs. preview-only busy)
 let busySince = 0;
+
+/** Current session display name, inlaid in the top border when set. pi never
+ * auto-names sessions, so any value here was set deliberately — via /name,
+ * --name, or an extension such as session-name. */
+let sessionName: string | undefined;
 let animTimer: ReturnType<typeof setInterval> | undefined;
 let previewTimer: ReturnType<typeof setTimeout> | undefined;
 let animTui: TUI | undefined;
@@ -209,6 +225,7 @@ interface Palette {
   accent: (s: string) => string;
   spin: (s: string) => string;
   glow: (s: string) => string;
+  name: (s: string) => string;
 }
 
 // @ts-expect-error TS2415 — handlePaste is a prototype method typed `private` in
@@ -220,6 +237,7 @@ class Composer extends CustomEditor {
   private accent: (s: string) => string;
   private spin: (s: string) => string;
   private glow: (s: string) => string;
+  private name: (s: string) => string;
 
   // Read from CONFIG at render time so a config reload takes effect live.
   private get corners() {
@@ -232,6 +250,7 @@ class Composer extends CustomEditor {
     this.accent = palette.accent;
     this.spin = palette.spin;
     this.glow = palette.glow;
+    this.name = palette.name;
   }
 
   // ── Paste-again-to-expand ───────────────────────────────────────────────
@@ -363,6 +382,35 @@ class Composer extends CustomEditor {
     return this.border('─'.repeat(left)) + this.glow('─'.repeat(right - left)) + this.border('─'.repeat(width - right));
   }
 
+  /** Session-name label segment built from SESSION_NAME_FORMAT — surround
+   * glyphs in the border colour, the name in the name colour — or null when
+   * the session is unnamed or the rule is too narrow (keeps at least 8 cells
+   * of plain rule). */
+  private sessionNameLabel(width: number): { text: string; width: number } | null {
+    if (!CONFIG.SESSION_NAME || !sessionName) return null;
+    const [pre, post] = splitFormat(CONFIG.SESSION_NAME_FORMAT);
+    const surroundW = visibleWidth(pre) + visibleWidth(post);
+    const fit = width - 8 - surroundW;
+    const cap = CONFIG.SESSION_NAME_MAX_WIDTH > 0 ? Math.min(CONFIG.SESSION_NAME_MAX_WIDTH, fit) : fit;
+    if (cap < 4) return null;
+    const name = truncateCells(sessionName, cap);
+    return {
+      text: this.border(pre) + this.name(name) + this.border(post),
+      width: surroundW + visibleWidth(name),
+    };
+  }
+
+  /** A rule carrying the session-name inlay when `which` is the configured
+   * border, placed at the configured end. The remaining stretch keeps the
+   * usual scroll indicator and shimmer behaviour, shortened by the label. */
+  private labeledRule(scroll: string | null, width: number, which: 'top' | 'bottom'): string {
+    if (CONFIG.SESSION_NAME_BORDER !== which) return this.rule(scroll, width);
+    const label = this.sessionNameLabel(width);
+    if (!label) return this.rule(scroll, width);
+    const rest = this.rule(scroll, width - label.width);
+    return CONFIG.SESSION_NAME_POSITION === 'left' ? label.text + rest : rest + label.text;
+  }
+
   /** First-line prefix: spinner frame while the agent works, glyph otherwise.
    * Always padded to PREFIX_W so the layout never shifts. */
   private prefixGlyph(): string {
@@ -401,8 +449,8 @@ class Composer extends CustomEditor {
     const { firstIdx, lastIdx, topScroll, bottomScroll } = scanBorders(stock);
     const pad = ' '.repeat(CONFIG.BOX_PAD_X);
 
-    const top = this.border(c.tl) + this.rule(topScroll, innerWidth) + this.border(c.tr);
-    const bottom = this.border(c.bl) + this.rule(bottomScroll, innerWidth) + this.border(c.br);
+    const top = this.border(c.tl) + this.labeledRule(topScroll, innerWidth, 'top') + this.border(c.tr);
+    const bottom = this.border(c.bl) + this.labeledRule(bottomScroll, innerWidth, 'bottom') + this.border(c.br);
     const body = this.bodyLines(
       stock,
       firstIdx,
@@ -418,8 +466,8 @@ class Composer extends CustomEditor {
   private renderUnboxed(stock: string[], contentWidth: number, width: number): string[] {
     const { firstIdx, lastIdx, topScroll, bottomScroll } = scanBorders(stock);
 
-    const top = this.rule(topScroll, width);
-    const bottom = this.rule(bottomScroll, width);
+    const top = this.labeledRule(topScroll, width, 'top');
+    const bottom = this.labeledRule(bottomScroll, width, 'bottom');
     const body = this.bodyLines(stock, firstIdx, lastIdx, contentWidth, (inner) => inner);
 
     const gap = Array.from({ length: CONFIG.MENU_GAP }, () => '');
@@ -481,6 +529,7 @@ function disableFocusTracking(): void {
 export default function composer(pi: ExtensionAPI) {
   pi.on('session_start', (_event, ctx: ExtensionContext) => {
     if (ctx.mode !== 'tui') return;
+    sessionName = pi.getSessionName() || undefined;
     ctx.ui.setEditorComponent((tui, theme, kb) => {
       // All palette fns read CONFIG.* at call time so /composer reloads
       // take effect without rebuilding the editor component.
@@ -522,6 +571,7 @@ export default function composer(pi: ExtensionAPI) {
         accent: (s: string) => applyColor(ctx.ui.theme, CONFIG.PREFIX_COLOR, s),
         spin: (s: string) => paint(CONFIG.SPINNER_COLOR, s),
         glow: (s: string) => paint(CONFIG.GLOW_COLOR, s),
+        name: (s: string) => applyColor(ctx.ui.theme, CONFIG.SESSION_NAME_COLOR, s),
       });
     });
 
@@ -564,6 +614,12 @@ export default function composer(pi: ExtensionAPI) {
     },
   });
 
+  pi.on('session_info_changed', (event, ctx: ExtensionContext) => {
+    if (ctx.mode !== 'tui') return;
+    sessionName = event.name || undefined;
+    animTui?.requestRender();
+  });
+
   pi.on('agent_start', (_event, ctx: ExtensionContext) => {
     if (ctx.mode !== 'tui') return;
     agentRunning = true;
@@ -585,6 +641,7 @@ export default function composer(pi: ExtensionAPI) {
     agentBusy = false;
     stopAnimation();
     animTui = undefined;
+    sessionName = undefined;
     ctx.ui.setEditorComponent(undefined);
   });
 }

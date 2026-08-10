@@ -25,6 +25,19 @@ export const DEFAULT_CONFIG = {
   FOCUS_INDICATOR: true,
   /** Theme colour token or hex for the border while the pane is focused. */
   FOCUSED_BORDER_COLOR: 'accent',
+  /** Inlay the session name in the border when the session has one. */
+  SESSION_NAME: true,
+  /** Theme colour token or hex for the session name. */
+  SESSION_NAME_COLOR: 'muted',
+  /** Which end of the border the name sits at. */
+  SESSION_NAME_POSITION: 'right' as 'left' | 'right',
+  /** Surround template; must contain `{name}`. The surrounding glyphs are
+   * painted in the border colour, the name in SESSION_NAME_COLOR. */
+  SESSION_NAME_FORMAT: '─ {name} ─',
+  /** Cell cap for the name before truncating with …; 0 = fit within the rule. */
+  SESSION_NAME_MAX_WIDTH: 0,
+  /** Which border carries the name. */
+  SESSION_NAME_BORDER: 'top' as 'top' | 'bottom',
   /** Animate the prefix glyph as a spinner while the agent is working. */
   SPINNER: true,
   /** Built-in spinner preset (see SPINNERS). Custom spinnerFrames override it. */
@@ -104,6 +117,12 @@ interface ComposerUserConfig {
   corners?: 'rounded' | 'square';
   focusIndicator?: boolean;
   focusedBorderColor?: string;
+  sessionName?: boolean;
+  sessionNameColor?: string;
+  sessionNamePosition?: 'left' | 'right';
+  sessionNameFormat?: string;
+  sessionNameMaxWidth?: number;
+  sessionNameBorder?: 'top' | 'bottom';
   spinner?: boolean;
   spinnerStyle?: SpinnerStyle;
   spinnerFrames?: string[];
@@ -151,6 +170,15 @@ function buildConfig(u: ComposerUserConfig) {
     CORNERS: (u.corners === 'square' ? 'square' : 'rounded') as 'rounded' | 'square',
     FOCUS_INDICATOR: u.focusIndicator ?? DEFAULT_CONFIG.FOCUS_INDICATOR,
     FOCUSED_BORDER_COLOR: u.focusedBorderColor ?? DEFAULT_CONFIG.FOCUSED_BORDER_COLOR,
+    SESSION_NAME: u.sessionName ?? DEFAULT_CONFIG.SESSION_NAME,
+    SESSION_NAME_COLOR: u.sessionNameColor ?? DEFAULT_CONFIG.SESSION_NAME_COLOR,
+    SESSION_NAME_POSITION: (u.sessionNamePosition === 'left' ? 'left' : 'right') as 'left' | 'right',
+    SESSION_NAME_FORMAT:
+      typeof u.sessionNameFormat === 'string' && u.sessionNameFormat.includes('{name}')
+        ? u.sessionNameFormat
+        : DEFAULT_CONFIG.SESSION_NAME_FORMAT,
+    SESSION_NAME_MAX_WIDTH: positiveNumber(u.sessionNameMaxWidth, DEFAULT_CONFIG.SESSION_NAME_MAX_WIDTH),
+    SESSION_NAME_BORDER: (u.sessionNameBorder === 'bottom' ? 'bottom' : 'top') as 'top' | 'bottom',
     SPINNER: u.spinner ?? DEFAULT_CONFIG.SPINNER,
     SPINNER_FRAMES: (customFrames ?? preset.frames) as readonly string[],
     SPINNER_INTERVAL_MS: positiveNumber(u.spinnerIntervalMs, preset.intervalMs),

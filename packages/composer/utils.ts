@@ -1,10 +1,34 @@
 import type { Theme, ThemeColor } from '@earendil-works/pi-coding-agent';
+import { visibleWidth } from '@earendil-works/pi-tui';
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 
 /** Strip ANSI escapes so we can inspect a rendered line's visible characters. */
 export function plainText(line: string): string {
   return line.replace(ANSI_RE, '');
+}
+
+/** Split a `{name}` format template into its literal pre/post parts. Assumes
+ * the template contains `{name}` (config validation enforces this); a
+ * template without it degrades to rendering the bare name. */
+export function splitFormat(format: string): [string, string] {
+  const i = format.indexOf('{name}');
+  if (i === -1) return ['', ''];
+  return [format.slice(0, i), format.slice(i + '{name}'.length)];
+}
+
+/** Truncate to `max` visible cells, appending an ellipsis when truncated. */
+export function truncateCells(s: string, max: number): string {
+  if (visibleWidth(s) <= max) return s;
+  let out = '';
+  let w = 0;
+  for (const ch of s) {
+    const cw = visibleWidth(ch);
+    if (w + cw > max - 1) break;
+    out += ch;
+    w += cw;
+  }
+  return out + '…';
 }
 
 function isHexColor(color: string): boolean {

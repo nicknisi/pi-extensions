@@ -17,7 +17,8 @@ standalone `paste-expand.ts` so the two features don't fight over
   keybindings, no custom entry types).
 - **`/composer` command**: reloads `composer.json` without restarting pi
   and previews the working animation for ~3 seconds.
-- **Events hooked**: `session_start` (installs the editor component),
+- **Events hooked**: `session_start` (installs the editor component, reads
+  the session name), `session_info_changed` (tracks renames for the inlay),
   `agent_start` / `agent_settled` (drive the working-state animations), and
   `session_shutdown` (removes it and tears down focus tracking and animation
   timers). TUI mode only; all handlers no-op when `ctx.mode !== "tui"`.
@@ -32,6 +33,18 @@ standalone `paste-expand.ts` so the two features don't fight over
   (Up at the oldest entry) are untouched.
 
 ## Features
+
+- **Session-name inlay**: when the session has a name, it is inlaid in the
+  border (default right end of the top rule). Position, surround glyphs, max
+  width, and which border are all configurable:
+
+  ```text
+  sessionNamePosition "right", sessionNameFormat "─ {name} ─" (defaults):
+  ╭──────────────── refactor auth ─╮
+
+  sessionNamePosition "left", sessionNameFormat "[ {name} ]":
+  ╭[ refactor auth ]───────────────╮
+  ```
 
 - **Rounded or square box**: `╭╮│╰╯` (default, preserves the original look) or `┌┐│└┘`
 - **Configurable prefix glyph** on the first body line (default `❯`); continuation lines get a space so content aligns
@@ -96,6 +109,12 @@ on `/composer` via an error) and the previous/default config is kept. Copy
   "corners": "rounded",
   "focusIndicator": true,
   "focusedBorderColor": "accent",
+  "sessionName": true,
+  "sessionNameColor": "muted",
+  "sessionNamePosition": "right",
+  "sessionNameFormat": "─ {name} ─",
+  "sessionNameMaxWidth": 0,
+  "sessionNameBorder": "top",
   "spinner": true,
   "spinnerStyle": "dots",
   "spinnerColor": "accent",
@@ -106,28 +125,34 @@ on `/composer` via an error) and the previous/default config is kept. Copy
 }
 ```
 
-| Option               | Type                    | Default     | Description                                                                                                              |
-| -------------------- | ----------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `boxedView`          | `boolean`               | `true`      | `true` = full box with side borders. `false` = top/bottom horizontal rules only.                                         |
-| `boxPadX`            | `number`                | `1`         | Horizontal padding inside the box (and around the prefix).                                                               |
-| `menuGap`            | `number`                | `0`         | Blank lines between the bottom border and the slash-menu.                                                                |
-| `extraMenuIndent`    | `number`                | `1`         | Extra indent (spaces) for slash-menu lines.                                                                              |
-| `borderColor`        | `string`                | `"border"`  | Theme colour token **or** hex colour (`"#ff6600"`) for the box border.                                                   |
-| `prefix`             | `string`                | `"❯"`       | Prefix glyph shown on the first body line.                                                                               |
-| `prefixColor`        | `string`                | `"accent"`  | Theme colour token **or** hex colour for the prefix.                                                                     |
-| `corners`            | `"rounded" \| "square"` | `"rounded"` | `rounded` = `╭╮│╰╯`, `square` = `┌┐│└┘`. Any other value falls back to `rounded`.                                        |
-| `focusIndicator`     | `boolean`               | `true`      | Track terminal focus (DECSET 1004) and restyle the border when this pane is focused. Requires `focus-events on` in tmux. |
-| `focusedBorderColor` | `string`                | `"accent"`  | Border colour while the pane is focused; `borderColor` is used when unfocused.                                           |
-| `spinner`            | `boolean`               | `true`      | Animate the prefix as a spinner while pi is working (between `agent_start` and `agent_settled`).                         |
-| `spinnerStyle`       | `string`                | `"dots"`    | Built-in spinner preset — see [Spinner presets](#spinner-presets). Unknown names fall back to `dots`.                    |
-| `spinnerFrames`      | `string[]`              | —           | Custom spinner frames; overrides `spinnerStyle`. Any cell width — the prefix slot is sized to the widest frame.          |
-| `spinnerIntervalMs`  | `number`                | per preset  | Milliseconds per spinner frame. Defaults to the active preset's tuned interval.                                          |
-| `spinnerColor`       | `string`                | `"accent"`  | Theme colour token, hex colour, or `"rainbow"` (hue rotates while spinning).                                             |
-| `glow`               | `boolean`               | `true`      | Animate the border while pi is working.                                                                                  |
-| `glowStyle`          | `"pulse" \| "shimmer"`  | `"pulse"`   | `pulse` breathes the whole border toward `glowColor`; `shimmer` sweeps a highlight along the top/bottom rules.           |
-| `glowColor`          | `string`                | `"accent"`  | Theme colour token, hex colour, or `"rainbow"` the glow animates toward.                                                 |
-| `glowPeriodMs`       | `number`                | `2000`      | Milliseconds per glow cycle (one full pulse breath or one shimmer sweep).                                                |
-| `rainbowPeriodMs`    | `number`                | `1200`      | Milliseconds per full hue rotation when a colour is set to `"rainbow"`.                                                  |
+| Option                | Type                    | Default        | Description                                                                                                                   |
+| --------------------- | ----------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `boxedView`           | `boolean`               | `true`         | `true` = full box with side borders. `false` = top/bottom horizontal rules only.                                              |
+| `boxPadX`             | `number`                | `1`            | Horizontal padding inside the box (and around the prefix).                                                                    |
+| `menuGap`             | `number`                | `0`            | Blank lines between the bottom border and the slash-menu.                                                                     |
+| `extraMenuIndent`     | `number`                | `1`            | Extra indent (spaces) for slash-menu lines.                                                                                   |
+| `borderColor`         | `string`                | `"border"`     | Theme colour token **or** hex colour (`"#ff6600"`) for the box border.                                                        |
+| `prefix`              | `string`                | `"❯"`          | Prefix glyph shown on the first body line.                                                                                    |
+| `prefixColor`         | `string`                | `"accent"`     | Theme colour token **or** hex colour for the prefix.                                                                          |
+| `corners`             | `"rounded" \| "square"` | `"rounded"`    | `rounded` = `╭╮│╰╯`, `square` = `┌┐│└┘`. Any other value falls back to `rounded`.                                             |
+| `focusIndicator`      | `boolean`               | `true`         | Track terminal focus (DECSET 1004) and restyle the border when this pane is focused. Requires `focus-events on` in tmux.      |
+| `focusedBorderColor`  | `string`                | `"accent"`     | Border colour while the pane is focused; `borderColor` is used when unfocused.                                                |
+| `sessionName`         | `boolean`               | `true`         | Inlay the session name in the border when the session has one (set via `/name`, `--name`, or the session-name extension).     |
+| `sessionNameColor`    | `string`                | `"muted"`      | Theme colour token **or** hex colour for the session name inlay.                                                              |
+| `sessionNamePosition` | `"left" \| "right"`     | `"right"`      | Which end of the border the name sits at. `left` shares that end with the scroll indicator when the input overflows.          |
+| `sessionNameFormat`   | `string`                | `"─ {name} ─"` | Surround template; must contain `{name}`. The surrounding glyphs render in the border colour, the name in `sessionNameColor`. |
+| `sessionNameMaxWidth` | `number`                | `0`            | Cell cap for the name before truncating with `…`; `0` = fit within the rule, keeping 8 cells of plain border.                 |
+| `sessionNameBorder`   | `"top" \| "bottom"`     | `"top"`        | Which border (top or bottom rule) carries the name.                                                                           |
+| `spinner`             | `boolean`               | `true`         | Animate the prefix as a spinner while pi is working (between `agent_start` and `agent_settled`).                              |
+| `spinnerStyle`        | `string`                | `"dots"`       | Built-in spinner preset — see [Spinner presets](#spinner-presets). Unknown names fall back to `dots`.                         |
+| `spinnerFrames`       | `string[]`              | —              | Custom spinner frames; overrides `spinnerStyle`. Any cell width — the prefix slot is sized to the widest frame.               |
+| `spinnerIntervalMs`   | `number`                | per preset     | Milliseconds per spinner frame. Defaults to the active preset's tuned interval.                                               |
+| `spinnerColor`        | `string`                | `"accent"`     | Theme colour token, hex colour, or `"rainbow"` (hue rotates while spinning).                                                  |
+| `glow`                | `boolean`               | `true`         | Animate the border while pi is working.                                                                                       |
+| `glowStyle`           | `"pulse" \| "shimmer"`  | `"pulse"`      | `pulse` breathes the whole border toward `glowColor`; `shimmer` sweeps a highlight along the top/bottom rules.                |
+| `glowColor`           | `string`                | `"accent"`     | Theme colour token, hex colour, or `"rainbow"` the glow animates toward.                                                      |
+| `glowPeriodMs`        | `number`                | `2000`         | Milliseconds per glow cycle (one full pulse breath or one shimmer sweep).                                                     |
+| `rainbowPeriodMs`     | `number`                | `1200`         | Milliseconds per full hue rotation when a colour is set to `"rainbow"`.                                                       |
 
 ### Spinner presets
 
