@@ -472,7 +472,18 @@ export default function codemode(pi: ExtensionAPI) {
       const { mod } = await bundleRequire({
         filepath: file,
         format: 'esm',
-        esbuildOptions: { target: 'es2022' },
+        esbuildOptions: {
+          target: 'es2022',
+          // Snippets may use CJS `require('node:fs')` (the tool description
+          // advertises `process/require/fs` as reachable). esbuild bundles to
+          // ESM and rewrites those to a `__require` shim that throws
+          // `Dynamic require of "node:fs" is not supported` when `require` is
+          // undefined in ESM scope. Inject a real CJS `require` via banner so
+          // the shim resolves to the genuine built-in instead of throwing.
+          banner: {
+            js: 'import { createRequire as __piCodemodeCreateRequire } from "node:module"; const require = __piCodemodeCreateRequire(import.meta.url);',
+          },
+        },
       });
       return mod.default;
     };
