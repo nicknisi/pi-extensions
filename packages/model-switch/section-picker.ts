@@ -38,8 +38,7 @@ export class SectionPicker implements Component {
     };
 
     this.selectList = new SelectList(sections[0]?.items ?? [], 10, this.selectTheme);
-    this.selectList.onSelect = (item) => this.done(item.value);
-    this.selectList.onCancel = () => this.done(null);
+    this.wireSelectList();
 
     this.container.addChild(this.tabBar);
     this.container.addChild(this.searchInput);
@@ -57,12 +56,44 @@ export class SectionPicker implements Component {
     this.tabBar.setText(parts.join(''));
   }
 
+  private wireSelectList(): void {
+    this.selectList.onSelect = (item) => this.done(item.value);
+    this.selectList.onCancel = () => this.done(null);
+  }
+
   private switchSection(direction: 1 | -1): void {
     this.activeSectionIndex = (this.activeSectionIndex + direction + this.sections.length) % this.sections.length;
     this.searchInput.setValue('');
-    this.selectList = new SelectList(this.sections[this.activeSectionIndex]?.items ?? [], 10, this.selectTheme);
-    this.selectList.onSelect = (item) => this.done(item.value);
-    this.selectList.onCancel = () => this.done(null);
+    this.rebuildList();
+  }
+
+  private filteredItems(): SelectItem[] {
+    const query = this.searchInput.getValue().trim().toLowerCase();
+    if (query.length === 0) return this.sections[this.activeSectionIndex]?.items ?? [];
+
+    // SelectList.setFilter only matches value.startsWith(query), which can never
+    // match a model name inside "provider/modelId" — filter here instead, with a
+    // substring match across every section.
+    const seen = new Set<string>();
+    const matches: SelectItem[] = [];
+    for (const section of this.sections) {
+      for (const item of section.items) {
+        if (seen.has(item.value) || !item.value.toLowerCase().includes(query)) continue;
+        seen.add(item.value);
+        matches.push({ ...item, description: section.name });
+      }
+    }
+    return matches;
+  }
+
+  private rebuildList(): void {
+    // Size the primary column to the content so section descriptions never
+    // truncate long provider/modelId labels (SelectList caps it at 32 otherwise).
+    this.selectList = new SelectList(this.filteredItems(), 10, this.selectTheme, {
+      minPrimaryColumnWidth: 1,
+      maxPrimaryColumnWidth: Number.MAX_SAFE_INTEGER,
+    });
+    this.wireSelectList();
     this.container.clear();
     this.container.addChild(this.tabBar);
     this.container.addChild(this.searchInput);
@@ -94,7 +125,7 @@ export class SectionPicker implements Component {
       this.selectList.handleInput(data);
     } else {
       this.searchInput.handleInput(data);
-      this.selectList.setFilter(this.searchInput.getValue());
+      this.rebuildList();
     }
   }
 }
