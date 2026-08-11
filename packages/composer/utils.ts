@@ -17,6 +17,13 @@ export function splitFormat(format: string): [string, string] {
   return [format.slice(0, i), format.slice(i + '{name}'.length)];
 }
 
+/** Parse a `composer:set-label` bus payload: a non-empty string `text` sets
+ * the label; anything else (absent, empty, wrong type) clears the override. */
+export function parseLabelData(data: unknown): string | undefined {
+  const text = (data as { text?: unknown } | null | undefined)?.text;
+  return typeof text === 'string' && text.trim().length > 0 ? text : undefined;
+}
+
 /** Truncate to `max` visible cells, appending an ellipsis when truncated. */
 export function truncateCells(s: string, max: number): string {
   if (visibleWidth(s) <= max) return s;

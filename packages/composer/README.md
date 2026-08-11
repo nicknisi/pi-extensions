@@ -31,6 +31,8 @@ standalone `paste-expand.ts` so the two features don't fight over
   sentence. Composer overrides `navigateHistory` to move the cursor to the end
   after a successful Up recall. Down, draft restoration, and boundary no-ops
   (Up at the oldest entry) are untouched.
+- **Extension API** over `pi.events`: other extensions can push their own text
+  into the border inlay — see [Extension API](#extension-api).
 
 ## Features
 
@@ -56,6 +58,34 @@ standalone `paste-expand.ts` so the two features don't fight over
 - **Focus indicator**: border switches colour when the tmux pane holding this session has terminal focus (requires tmux `focus-events on`)
 - **Spinner prefix**: while pi is working, the prefix glyph animates as a spinner — pick from built-in presets or define your own frames (configurable speed and colour, including `"rainbow"`)
 - **Border glow**: while pi is working, the border either _pulses_ (breathes between the border colour and a glow colour) or _shimmers_ (a highlight sweeps along the top/bottom rules)
+
+## Extension API
+
+Other extensions can replace the border-inlay text over pi's shared event bus
+(`pi.events`), without importing anything from this package:
+
+```ts
+// Push a label (any non-empty string):
+pi.events.emit('composer:set-label', { text: `⏱ ${elapsed}` });
+
+// Clear it (falls back to the session name):
+pi.events.emit('composer:set-label', {});
+```
+
+The pushed text takes precedence over the session name and goes through the
+same formatting pipeline — `sessionNameFormat`, `sessionNameColor`, position,
+border, and truncation all apply. The override is cleared on every session
+start so a stale label never leaks across sessions.
+
+Because extension load order is not guaranteed, composer emits
+`composer:label-request` on every `session_start`; producers should respond to
+it (and to whatever changes their own state) with `composer:set-label`:
+
+```ts
+pi.events.on('composer:label-request', () => {
+  pi.events.emit('composer:set-label', { text: currentLabel() });
+});
+```
 
 ## Install
 

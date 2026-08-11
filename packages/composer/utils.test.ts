@@ -1,5 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { splitFormat, truncateCells } from './utils.js';
+import { parseLabelData, splitFormat, truncateCells } from './utils.js';
+
+describe('parseLabelData', () => {
+  it('returns the text when it is a non-empty string', () => {
+    expect(parseLabelData({ text: 'fix the tests' })).toBe('fix the tests');
+  });
+
+  it('clears on absent, empty, blank, or wrongly-typed text', () => {
+    expect(parseLabelData({})).toBeUndefined();
+    expect(parseLabelData({ text: '' })).toBeUndefined();
+    expect(parseLabelData({ text: '   ' })).toBeUndefined();
+    expect(parseLabelData({ text: 42 })).toBeUndefined();
+    expect(parseLabelData(null)).toBeUndefined();
+    expect(parseLabelData('just a string')).toBeUndefined();
+    expect(parseLabelData(undefined)).toBeUndefined();
+  });
+});
 
 describe('splitFormat', () => {
   it('splits the template around {name}', () => {
