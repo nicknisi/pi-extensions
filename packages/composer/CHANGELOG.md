@@ -1,5 +1,12 @@
 # @nicknisi/pi-composer
 
+## 0.4.0
+
+### Minor Changes
+
+- 1847cbd: Add an extension API for the border inlay over pi's shared event bus (`pi.events`). Other extensions can push label text with `pi.events.emit('composer:set-label', { text })` (absent/empty text clears it, falling back to the session name), and composer emits `composer:label-request` on every session start so producers can re-push regardless of extension load order. Pushed labels go through the same format/colour/position/truncation pipeline as the session name.
+- ccff6ab: Inlay the session name in the composer's border when the session has one (set via `/name`, `--name`, or the session-name extension's auto-naming). Long names are truncated with an ellipsis and the inlay hides when the composer is too narrow. New composer.json options: `sessionName` (default `true`), `sessionNameColor` (default `"muted"`), `sessionNamePosition` (`"right"` | `"left"`), `sessionNameFormat` (surround template, default `"─ {name} ─"`), `sessionNameMaxWidth` (cell cap, default `0` = fit the rule), and `sessionNameBorder` (`"top"` | `"bottom"`).
+
 ## 0.3.1
 
 ### Patch Changes

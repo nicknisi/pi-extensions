@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-model-switch",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Cycle or fuzzy-pick from a machine-local, sectioned list of preferred Pi models",
   "keywords": [
     "pi",
