@@ -111,6 +111,8 @@ importers:
 
   packages/mg: {}
 
+  packages/model-switch: {}
+
   packages/orchestrate: {}
 
   packages/pin-last-prompt: {}
