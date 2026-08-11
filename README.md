@@ -53,6 +53,7 @@ Local paths are added to pi's settings without copying — edits in the repo are
 | [auto-theme](packages/auto-theme/)       | Sync pi theme with macOS system appearance (dark↔light pairs)                                                                | —                                                   |
 | [claude-compat](packages/claude-compat/) | Claude Code compatibility: `CLAUDE_PLUGIN_ROOT` path shimming + `` !`command` `` dynamic SKILL.md placeholders (allowlisted) | two extension entry points                          |
 | [cloak](packages/cloak/)                 | Redact secrets from `read` tool results before they reach model context, via glob-scoped regex rules                         | `/cloak-status`, `cloak.json`                       |
+| [model-switch](packages/model-switch/)   | Cycle or fuzzy-pick from a machine-local, sectioned model list, skipping missing or unauthenticated entries                  | `/model-cycle`, configurable shortcuts              |
 | [session-name](packages/session-name/)   | Auto-name sessions (heuristic or LLM), mirror to terminal title, name-focused session picker                                 | `/sn`, `/sessions`                                  |
 | [stash](packages/stash/)                 | `ctrl+s` parks the prompt draft on a LIFO stack; pop or auto-restore                                                         | `ctrl+s`, stash widget                              |
 

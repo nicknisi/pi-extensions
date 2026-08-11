@@ -1,0 +1,11 @@
+{
+  "sections": {
+    "work": [
+      "cloudflare-ai-gateway/gpt-5.6-sol",
+      "cloudflare-ai-gateway/claude-opus-5",
+      "cloudflare-ai-gateway/grok-4.5",
+      "fireworks/accounts/fireworks/models/kimi-k3"
+    ],
+    "personal": ["fireworks/accounts/fireworks/models/kimi-k3"]
+  }
+}

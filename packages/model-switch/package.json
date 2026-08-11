@@ -1,0 +1,43 @@
+{
+  "name": "@nicknisi/pi-model-switch",
+  "version": "0.1.0",
+  "description": "Cycle or fuzzy-pick from a machine-local, sectioned list of preferred Pi models",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-package"
+  ],
+  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/model-switch#readme",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicknisi/pi-extensions.git",
+    "directory": "packages/model-switch"
+  },
+  "files": [
+    "dist",
+    "index.ts",
+    "config.ts",
+    "cycle.ts",
+    "section-picker.ts",
+    "README.md",
+    "model-switch.example.json"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
