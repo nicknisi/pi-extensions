@@ -1,5 +1,16 @@
 # @nicknisi/pi-btw
 
+## 0.2.0
+
+### Minor Changes
+
+- 7412f7f: Make the `/btw` side-chat model configurable through `~/.pi/agent/configs/btw.json`, using a `provider/model-id` string and preserving `fireworks/glm-latest` as the default.
+
+### Patch Changes
+
+- Updated dependencies [4fff6f8]
+  - @nicknisi/pi-shared@0.5.0
+
 ## 0.1.5
 
 ### Patch Changes

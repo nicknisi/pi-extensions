@@ -1,5 +1,16 @@
 # @nicknisi/pi-answer
 
+## 0.2.0
+
+### Minor Changes
+
+- 5ec73b4: Make `/answer` extraction models configurable as an ordered `provider/model-id` fallback list in `~/.pi/agent/configs/answer.json`, preserving the existing Anthropic defaults.
+
+### Patch Changes
+
+- Updated dependencies [4fff6f8]
+  - @nicknisi/pi-shared@0.5.0
+
 ## 0.1.5
 
 ### Patch Changes

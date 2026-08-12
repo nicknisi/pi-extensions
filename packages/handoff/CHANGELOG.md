@@ -1,5 +1,12 @@
 # @nicknisi/pi-handoff
 
+## 0.1.6
+
+### Patch Changes
+
+- Updated dependencies [4fff6f8]
+  - @nicknisi/pi-shared@0.5.0
+
 ## 0.1.5
 
 ### Patch Changes

@@ -1,5 +1,13 @@
 # @nicknisi/pi-workflows
 
+## 0.2.1
+
+### Patch Changes
+
+- 4fff6f8: Scope the default fleet command, shortcut, tool list, and footer indicator to active subagents owned by the current Pi session, with explicit `all` access to persisted machine-wide history. Propagate owner-session metadata through codemode and workflows without enabling session mirrors. Add a global statusline `hiddenStatuses` denylist for suppressing extension-provided footer segments.
+- Updated dependencies [4fff6f8]
+  - @nicknisi/pi-shared@0.5.0
+
 ## 0.2.0
 
 ### Minor Changes

@@ -1,5 +1,12 @@
 # @nicknisi/pi-session-name
 
+## 0.1.8
+
+### Patch Changes
+
+- Updated dependencies [4fff6f8]
+  - @nicknisi/pi-shared@0.5.0
+
 ## 0.1.7
 
 ### Patch Changes
