@@ -14,6 +14,7 @@
  *   body, only a short preview.
  */
 
+import { randomBytes } from 'node:crypto';
 import * as path from 'node:path';
 import {
   assertPathSegment,
@@ -37,10 +38,37 @@ export interface Letter {
 
 export const MAX_BODY_CHARS = 32 * 1024;
 
+const MESSAGE_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
+const INBOX_FILE_TOKEN_PATTERN = /^(0|[1-9][0-9]*)-([a-zA-Z0-9][a-zA-Z0-9_-]{0,127})\.json$/;
+const INBOX_CLAIM_TOKEN_PATTERN = /^[a-f0-9]{32}$/;
+
 function letterFileName(letter: Letter): string {
-  const name = `${letter.ts}-${letter.id.slice(0, 6)}.json`;
+  if (!MESSAGE_ID_PATTERN.test(letter.id)) throw new TypeError(`Invalid relay message id: ${letter.id}`);
+  if (!Number.isSafeInteger(letter.ts) || letter.ts < 0) {
+    throw new TypeError(`Invalid relay letter timestamp: ${letter.ts}`);
+  }
+  const name = `${letter.ts}-${letter.id}.json`;
   assertPathSegment(name, 'relay letter file name');
   return name;
+}
+
+function inboxFileTokenParts(fileToken: string): { ts: number; id: string } | null {
+  const match = INBOX_FILE_TOKEN_PATTERN.exec(fileToken);
+  if (match === null) return null;
+  const ts = Number(match[1]);
+  return Number.isSafeInteger(ts) ? { ts, id: match[2]! } : null;
+}
+
+function assertInboxClaimToken(claimToken: string): void {
+  if (!INBOX_CLAIM_TOKEN_PATTERN.test(claimToken)) {
+    throw new TypeError(`Invalid relay inbox claim token: ${claimToken}`);
+  }
+}
+
+function assertInboxFileToken(fileToken: string): void {
+  if (inboxFileTokenParts(fileToken) === null) {
+    throw new TypeError(`Invalid relay inbox file token: ${fileToken}`);
+  }
 }
 
 /** Atomic deposit: write to a random exclusive tmp sibling, then rename into place. */
@@ -188,12 +216,252 @@ export function watchInbox(root: string, addr: string, onMail: () => void): () =
   };
 }
 
+// ── Durable inbox claims ────────────────────────────────────────────────
+// A claim atomically renames the current inbox beneath <addr>.claims and
+// immediately creates a fresh inbox for new deposits. Tokens, never paths,
+// are the public persistence boundary for crash recovery.
+
+export interface InboxClaim {
+  claimToken: string;
+  fileTokens: string[];
+}
+
+function claimsDirectoryName(addr: string): string {
+  return `${addr}.claims`;
+}
+
+function inboxFileTokens(directory: RelayDirectoryHandle): string[] {
+  return directory
+    .readDirectory()
+    .filter((entry) => {
+      if (inboxFileTokenParts(entry.name) === null) return false;
+      if (entry.isSymbolicLink()) throw new RelayFilesystemError(`Refusing symlinked claimed letter: ${entry.name}`);
+      return entry.isFile();
+    })
+    .map((entry) => entry.name)
+    .sort();
+}
+
+/** Atomically detach the current non-empty inbox and return its durable tokens. */
+export function claimInbox(root: string, addr: string): InboxClaim | null {
+  assertPathSegment(addr, 'relay address');
+  const relay = openRelayRoot(root, true)!;
+  try {
+    const inboxName = `${addr}.inbox`;
+    const inbox = relay.openDirectory(inboxName);
+    if (inbox === null) return null;
+    try {
+      if (inboxFileTokens(inbox).length === 0) return null;
+    } finally {
+      inbox.close();
+    }
+
+    const claims = relay.openDirectory(claimsDirectoryName(addr), true)!;
+    try {
+      let claimToken = '';
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const candidate = randomBytes(16).toString('hex');
+        const existing = claims.openDirectory(candidate);
+        if (existing === null) {
+          claimToken = candidate;
+          break;
+        }
+        existing.close();
+      }
+      if (claimToken === '') throw new Error('Could not allocate an exclusive relay inbox claim token');
+
+      const claimed = relay.moveDirectoryTo(inboxName, claims, claimToken);
+      if (claimed === null) return null;
+      try {
+        claimed.sync();
+        claims.sync();
+        const replacement = relay.openDirectory(inboxName, true)!;
+        replacement.close();
+        relay.sync();
+        return { claimToken, fileTokens: inboxFileTokens(claimed) };
+      } finally {
+        claimed.close();
+      }
+    } finally {
+      claims.close();
+    }
+  } finally {
+    relay.close();
+  }
+}
+
+/** Enumerate durable claims left by this or a crashed consumer. */
+export function recoverInboxClaims(root: string, addr: string): InboxClaim[] {
+  assertPathSegment(addr, 'relay address');
+  const relay = openRelayRoot(root);
+  if (relay === null) return [];
+  try {
+    const claims = relay.openDirectory(claimsDirectoryName(addr));
+    if (claims === null) return [];
+    try {
+      const out: InboxClaim[] = [];
+      for (const entry of claims.readDirectory()) {
+        if (!INBOX_CLAIM_TOKEN_PATTERN.test(entry.name)) continue;
+        if (entry.isSymbolicLink()) throw new RelayFilesystemError(`Refusing symlinked inbox claim: ${entry.name}`);
+        if (!entry.isDirectory()) continue;
+        const claim = claims.openDirectory(entry.name);
+        if (claim === null) continue;
+        try {
+          out.push({ claimToken: entry.name, fileTokens: inboxFileTokens(claim) });
+        } finally {
+          claim.close();
+        }
+      }
+      return out.sort((left, right) => left.claimToken.localeCompare(right.claimToken));
+    } finally {
+      claims.close();
+    }
+  } finally {
+    relay.close();
+  }
+}
+
+/** Read and validate one claimed letter without exposing or following a path. */
+export function readClaimedLetter(root: string, addr: string, claimToken: string, fileToken: string): Letter | null {
+  assertPathSegment(addr, 'relay address');
+  assertInboxClaimToken(claimToken);
+  assertInboxFileToken(fileToken);
+  const expected = inboxFileTokenParts(fileToken)!;
+  const relay = openRelayRoot(root);
+  if (relay === null) return null;
+  try {
+    const claims = relay.openDirectory(claimsDirectoryName(addr));
+    if (claims === null) return null;
+    try {
+      const claim = claims.openDirectory(claimToken);
+      if (claim === null) return null;
+      try {
+        const raw = claim.readFile(fileToken);
+        if (raw === null) return null;
+        const parsed = JSON.parse(raw) as Letter;
+        if (
+          parsed === null ||
+          typeof parsed !== 'object' ||
+          parsed.id !== expected.id ||
+          parsed.ts !== expected.ts ||
+          typeof parsed.body !== 'string'
+        ) {
+          return null;
+        }
+        return parsed;
+      } catch (error) {
+        rethrowFilesystemError(error);
+        return null;
+      } finally {
+        claim.close();
+      }
+    } finally {
+      claims.close();
+    }
+  } finally {
+    relay.close();
+  }
+}
+
+function finishClaimedLetter(
+  root: string,
+  addr: string,
+  claimToken: string,
+  fileToken: string,
+  requeue: boolean,
+): boolean {
+  assertPathSegment(addr, 'relay address');
+  assertInboxClaimToken(claimToken);
+  assertInboxFileToken(fileToken);
+  const relay = openRelayRoot(root, requeue);
+  if (relay === null) return false;
+  try {
+    const claims = relay.openDirectory(claimsDirectoryName(addr));
+    if (claims === null) return false;
+    try {
+      const claim = claims.openDirectory(claimToken);
+      if (claim === null) return false;
+      let finished: boolean;
+      try {
+        if (requeue) {
+          const inbox = relay.openDirectory(`${addr}.inbox`, true)!;
+          try {
+            finished = claim.moveFileTo(fileToken, inbox);
+            relay.sync();
+          } finally {
+            inbox.close();
+          }
+        } else {
+          finished = claim.unlinkFile(fileToken);
+          if (finished) claim.sync();
+        }
+      } finally {
+        claim.close();
+      }
+      if (finished) claims.removeEmptyDirectory(claimToken);
+      return finished;
+    } finally {
+      claims.close();
+    }
+  } finally {
+    relay.close();
+  }
+}
+
+/** Permanently acknowledge/delete one claimed letter. Idempotent. */
+export function ackClaimedLetter(root: string, addr: string, claimToken: string, fileToken: string): boolean {
+  return finishClaimedLetter(root, addr, claimToken, fileToken, false);
+}
+
+/** Atomically return one claimed letter to the current inbox. */
+export function requeueClaimedLetter(root: string, addr: string, claimToken: string, fileToken: string): boolean {
+  return finishClaimedLetter(root, addr, claimToken, fileToken, true);
+}
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function fileExistsInClaims(relay: RelayDirectoryHandle, addr: string, fileName: string): boolean {
+  const claims = relay.openDirectory(claimsDirectoryName(addr));
+  if (claims === null) return false;
+  try {
+    for (const entry of claims.readDirectory()) {
+      if (!INBOX_CLAIM_TOKEN_PATTERN.test(entry.name)) continue;
+      if (entry.isSymbolicLink()) throw new RelayFilesystemError(`Refusing symlinked inbox claim: ${entry.name}`);
+      if (!entry.isDirectory()) continue;
+      const claim = claims.openDirectory(entry.name);
+      if (claim === null) continue;
+      try {
+        if (claim.fileExists(fileName)) return true;
+      } finally {
+        claim.close();
+      }
+    }
+    return false;
+  } finally {
+    claims.close();
+  }
+}
+
+function receiptFileExists(relay: RelayDirectoryHandle, addr: string, fileName: string): boolean {
+  // Check claims on both sides of the live inbox. This avoids observing a
+  // false absence while a descriptor-relative rename moves in either
+  // direction between a claim and the current inbox.
+  if (fileExistsInClaims(relay, addr, fileName)) return true;
+  const inbox = relay.openDirectory(`${addr}.inbox`);
+  if (inbox !== null) {
+    try {
+      if (inbox.fileExists(fileName)) return true;
+    } finally {
+      inbox.close();
+    }
+  }
+  return fileExistsInClaims(relay, addr, fileName);
+}
 
 /**
  * Consumption receipt: after depositing to a LIVE target, wait briefly for
- * the letter to vanish. 'delivered' means the receiver's drainer took it —
- * stronger than any transport ack.
+ * the exact letter to vanish from both the live inbox and durable claims.
+ * 'delivered' means the receiver acknowledged it, not merely claimed it.
  */
 export async function awaitReceipt(
   root: string,
@@ -205,19 +473,13 @@ export async function awaitReceipt(
   const relay = openRelayRoot(root);
   if (relay === null) return 'delivered';
   try {
-    const inbox = relay.openDirectory(`${toAddr}.inbox`);
-    if (inbox === null) return 'delivered';
-    try {
-      const fileName = letterFileName(letter);
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        if (!inbox.fileExists(fileName)) return 'delivered';
-        await sleep(100);
-      }
-      return inbox.fileExists(fileName) ? 'queued' : 'delivered';
-    } finally {
-      inbox.close();
+    const fileName = letterFileName(letter);
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!receiptFileExists(relay, toAddr, fileName)) return 'delivered';
+      await sleep(100);
     }
+    return receiptFileExists(relay, toAddr, fileName) ? 'queued' : 'delivered';
   } finally {
     relay.close();
   }

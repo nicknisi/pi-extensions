@@ -20,6 +20,7 @@ import {
   appendAudit,
   auditLogPath,
   awaitReceipt,
+  claimInbox,
   clearAsk,
   deposit,
   drain,
@@ -28,6 +29,7 @@ import {
   readAudit,
   readIncomingAsk,
   readOutgoingAsk,
+  recoverInboxClaims,
   resolveAskByRef,
   trackIncomingAsk,
   trackOutgoingAsk,
@@ -201,6 +203,19 @@ describe('registry', () => {
     sweep(root);
     expect(listRecords(root)).toHaveLength(1);
     expect(unreadCount(root, record().addr)).toBe(1);
+  });
+
+  it('treats a recoverable durable claim as undelivered mail', () => {
+    const root = tmpRoot();
+    const crashed = record({ offline: true, pid: 2_000_000_005 });
+    writeRecord(root, crashed);
+    deposit(root, crashed.addr, letter());
+    const claim = claimInbox(root, crashed.addr)!;
+
+    sweep(root, Date.now(), () => false);
+
+    expect(readRecord(root, crashed.addr)).not.toBeNull();
+    expect(recoverInboxClaims(root, crashed.addr)).toEqual([claim]);
   });
 });
 

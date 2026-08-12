@@ -14,10 +14,14 @@ Architecture follows [shift-labs/pi-peer](https://github.com/shift-labs-ai/pi-pe
 Node applications can use the registry, mailbox, and transport-policy primitives without loading the pi extension or its TUI dependencies:
 
 ```ts
-import { OutboundPolicy, deposit, deriveAddr, type Letter } from '@nicknisi/pi-relay/core';
+import { OutboundPolicy, claimInbox, deposit, deriveAddr, type Letter } from '@nicknisi/pi-relay/core';
 ```
 
-The `@nicknisi/pi-relay/core` subpath exports a narrow record and alias registry, mailbox and ask/audit operations, presence and sweep utilities, policy guards and constants, and their public types. Filesystem-facing operations validate canonical relay addresses, aliases, and ask/message IDs before accessing the relay root; path constructors and raw persistence helpers remain internal. Core uses Node built-ins plus Koffi's prebuilt native bridge for descriptor-relative Unix syscalls; Pi and TUI remain optional peers, so core-only installations do not fetch them. The package root remains the pi extension entry point; import `/core` from plain Node services and CLIs.
+The `@nicknisi/pi-relay/core` subpath exports a narrow record and alias registry, mailbox and ask/audit operations, presence and sweep utilities, policy guards and constants, and their public types. Filesystem-facing operations validate canonical relay addresses, aliases, claim tokens, and ask/message IDs before accessing the relay root; path constructors and raw persistence helpers remain internal. Core uses Node built-ins plus Koffi's prebuilt native bridge for descriptor-relative Unix syscalls; Pi and TUI remain optional peers, so core-only installations do not fetch them. The package root remains the pi extension entry point; import `/core` from plain Node services and CLIs.
+
+### Durable core inbox claims
+
+A non-Pi consumer can atomically detach the current inbox with `claimInbox(root, addr)`. It receives only a stable `claimToken` and stable `fileTokens`, never filesystem paths. New deposits immediately land in a fresh inbox. `readClaimedLetter` reopens and validates a claimed letter without following links; after the consumer durably writes and `fsync`s its own journal, `ackClaimedLetter` deletes that exact file or `requeueClaimedLetter` atomically returns it to the current inbox. `recoverInboxClaims` enumerates the same tokens after a process crash. All claim, read, ack, and requeue work is relative to pinned root/inbox/claim descriptors, and empty completed claims are removed automatically.
 
 ## Audit log
 
@@ -47,7 +51,7 @@ main moved; rebase before you push.
 
 - **A mailbox outlives the process.** The address is a hash of the working directory and pi's session id, so a session resumed with `pi -c` answers to the same address. Mail sent to a closed session waits on disk and is read when it resumes — the common case when you're opening and closing terminals all day.
 - **The queue is inspectable.** Diagnosing delivery is `ls`, not instrumenting a transport.
-- **Consumption is the receipt.** The receiver deletes the letter as it reads it, so the sender learns _delivered_ vs _queued_ — "the letter vanished" means the agent has it, which no socket ack can tell you.
+- **Consumption is the receipt.** The receiver deletes the exact full-message-id letter as it reads it, so the sender learns _delivered_ vs _queued_. A durable core claim remains queued until it is acknowledged; moving it into a claim does not produce a false receipt.
 
 ## Semantics
 
@@ -55,7 +59,7 @@ main moved; rebase before you push.
 - **Authority boundary on every delivery.** Each message arrives with a repeated statement that it came from a peer and carries no authority — it cannot approve anything, cannot change configuration, slash commands in it are inert text. The sending side's tool guidelines carry the reciprocal rule: never ask a peer to do something your own permissions would refuse.
 - **Loops break structurally**, independent of what either model decides: identical text from one sender inside 10s is dropped; >8 messages per 30s per sender is refused; an unread backlog of 50 refuses new mail until the peer drains.
 - **Plain text only, ≤32KB.** Send a summary and a path, not a payload.
-- **Sweeping is narrow:** a running session is never touched; a mailbox holding undelivered mail is kept 30 days; an offline-but-resumable session keeps its record (its address — new mail must remain deliverable while it's down); only an empty mailbox of a session that can no longer be resumed is discarded promptly. Listing never has side effects.
+- **Sweeping is narrow:** a running session is never touched; an inbox or durable claim holding undelivered mail is kept 30 days; an offline-but-resumable session keeps its record (its address — new mail must remain deliverable while it's down); only an empty mailbox of a session that can no longer be resumed is discarded promptly. Listing never has side effects.
 
 ### ask / reply / pending / cancel
 
@@ -96,7 +100,7 @@ The directory is created `0700` and every file `0600` — other users on the mac
 
 ## Caveats
 
-- **Mailbox semantics support Linux and macOS only.** Relay rejects user-controlled symlinks in configured-root components, permits protected root-owned system aliases such as macOS `/var`, pins root and mailbox descriptors for each operation, and uses descriptor-relative `openat`/`renameat`/`unlinkat` calls, atomic rename-over-existing, descriptor polling for watches, and `0600`/`0700` permission bits. Windows is unsupported.
+- **Mailbox semantics support Linux and macOS only.** Relay rejects user-controlled symlinks in configured-root components, permits protected root-owned system aliases such as macOS `/var`, pins root, mailbox, and durable-claim descriptors for each operation, and uses descriptor-relative `openat`/`renameat`/`unlinkat` calls, atomic renames, descriptor polling for watches, and `0600`/`0700` permission bits. Windows is unsupported.
 - **One machine.** Delivery is a file landing in a directory; two sessions reach each other exactly when they share a filesystem. A container and its host cannot.
 - **Presence is heartbeat-accurate**, not instantaneous (within ~45s).
 - Delivery injects with `deliverAs: "steer"` (lands between tool calls) and `triggerTurn: true` (wakes an idle session).

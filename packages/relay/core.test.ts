@@ -64,6 +64,11 @@ describe('/core filesystem boundary', () => {
       () => core.deposit(root, validAddr, letter({ from: { ...validLetter.from, addr: badAddr } })),
       () => core.drain(root, badAddr),
       () => core.unreadCount(root, badAddr),
+      () => core.claimInbox(root, badAddr),
+      () => core.recoverInboxClaims(root, badAddr),
+      () => core.readClaimedLetter(root, badAddr, '0'.repeat(32), `${validLetter.ts}-${validLetter.id}.json`),
+      () => core.ackClaimedLetter(root, badAddr, '0'.repeat(32), `${validLetter.ts}-${validLetter.id}.json`),
+      () => core.requeueClaimedLetter(root, badAddr, '0'.repeat(32), `${validLetter.ts}-${validLetter.id}.json`),
       () => core.watchInbox(root, badAddr, () => {}),
       () => core.trackIncomingAsk(root, badAddr, validLetter),
       () =>
@@ -140,6 +145,7 @@ describe('/core filesystem boundary', () => {
       () => core.deposit(root, addr, validLetter),
       () => core.drain(root, addr),
       () => core.unreadCount(root, addr),
+      () => core.claimInbox(root, addr),
       () => core.watchInbox(root, addr, () => {}),
     ]) {
       expect(call).toThrow(/symlink/i);
@@ -197,7 +203,7 @@ describe('/core filesystem boundary', () => {
 
     const inbox = path.join(root, `${addr}.inbox`);
     fs.mkdirSync(inbox);
-    fs.symlinkSync(sentinel, path.join(inbox, `${validLetter.ts}-${validLetter.id.slice(0, 6)}.json`), 'file');
+    fs.symlinkSync(sentinel, path.join(inbox, `${validLetter.ts}-${validLetter.id}.json`), 'file');
     expect(() => core.drain(root, addr)).toThrow(/symlink/i);
     fs.rmSync(inbox, { recursive: true, force: true });
 
@@ -215,10 +221,104 @@ describe('/core filesystem boundary', () => {
     expect(fs.existsSync(path.join(root, `${addr}.inbox`))).toBe(false);
   });
 
-  it('rejects traversal in aliases and ask/message identifiers', async () => {
+  it('durably claims same-millisecond letters without collisions and recovers by opaque tokens', async () => {
     const base = fixture();
     const root = path.join(base, 'relay');
     const addr = core.deriveAddr('/receiver', 'session');
+    const ts = Date.now();
+    const first = letter({ id: 'reply-prefix-000000000000000000000001', kind: 'reply', ts, body: 'first' });
+    const second = letter({ id: 'reply-prefix-000000000000000000000002', kind: 'reply', ts, body: 'second' });
+
+    core.deposit(root, addr, first);
+    core.deposit(root, addr, second);
+    expect(core.unreadCount(root, addr)).toBe(2);
+
+    const claim = core.claimInbox(root, addr)!;
+    expect(claim.claimToken).toMatch(/^[a-f0-9]{32}$/);
+    expect(claim.claimToken).not.toContain('/');
+    expect(claim.fileTokens).toEqual([`${ts}-${first.id}.json`, `${ts}-${second.id}.json`]);
+    expect(claim.fileTokens.every((token) => !token.includes('/'))).toBe(true);
+    expect(core.unreadCount(root, addr)).toBe(0);
+    expect(await core.awaitReceipt(root, addr, first, 1)).toBe('queued');
+
+    // A new process can recover the same stable claim/file tokens and read
+    // letters without retaining a path or descriptor from claimInbox.
+    expect(core.recoverInboxClaims(root, addr)).toEqual([claim]);
+    expect(core.readClaimedLetter(root, addr, claim.claimToken, claim.fileTokens[0]!)?.body).toBe('first');
+    expect(core.readClaimedLetter(root, addr, claim.claimToken, claim.fileTokens[1]!)?.body).toBe('second');
+
+    const journal = fs.openSync(path.join(base, 'journal'), 'w');
+    fs.writeFileSync(journal, JSON.stringify({ claim: claim.claimToken, file: claim.fileTokens[0] }));
+    fs.fsyncSync(journal);
+    fs.closeSync(journal);
+    expect(core.ackClaimedLetter(root, addr, claim.claimToken, claim.fileTokens[0]!)).toBe(true);
+    expect(await core.awaitReceipt(root, addr, first, 1)).toBe('delivered');
+
+    const later = letter({ id: 'later-message', ts: ts + 1, body: 'new inbox' });
+    core.deposit(root, addr, later);
+    expect(core.requeueClaimedLetter(root, addr, claim.claimToken, claim.fileTokens[1]!)).toBe(true);
+    expect(core.recoverInboxClaims(root, addr)).toEqual([]);
+    expect(core.drain(root, addr).map((entry) => entry.body)).toEqual(['second', 'new inbox']);
+  });
+
+  it('never follows symlinked durable claims or claimed letters', () => {
+    const base = fixture();
+    const root = path.join(base, 'relay');
+    const outside = path.join(base, 'outside');
+    const addr = core.deriveAddr('/receiver', 'session');
+    const claimToken = 'a'.repeat(32);
+    const validLetter = letter();
+    const fileToken = `${validLetter.ts}-${validLetter.id}.json`;
+    const sentinel = path.join(outside, 'sentinel.json');
+    fs.mkdirSync(root);
+    fs.mkdirSync(outside);
+    fs.writeFileSync(sentinel, 'sentinel');
+
+    fs.symlinkSync(outside, path.join(root, `${addr}.claims`), 'dir');
+    core.deposit(root, addr, validLetter);
+    for (const call of [
+      () => core.claimInbox(root, addr),
+      () => core.recoverInboxClaims(root, addr),
+      () => core.readClaimedLetter(root, addr, claimToken, fileToken),
+      () => core.ackClaimedLetter(root, addr, claimToken, fileToken),
+      () => core.requeueClaimedLetter(root, addr, claimToken, fileToken),
+    ]) {
+      expect(call).toThrow(/symlink/i);
+    }
+    fs.unlinkSync(path.join(root, `${addr}.claims`));
+
+    const claims = path.join(root, `${addr}.claims`);
+    fs.mkdirSync(claims);
+    fs.symlinkSync(outside, path.join(claims, claimToken), 'dir');
+    for (const call of [
+      () => core.recoverInboxClaims(root, addr),
+      () => core.readClaimedLetter(root, addr, claimToken, fileToken),
+      () => core.ackClaimedLetter(root, addr, claimToken, fileToken),
+      () => core.requeueClaimedLetter(root, addr, claimToken, fileToken),
+    ]) {
+      expect(call).toThrow(/symlink/i);
+    }
+    fs.unlinkSync(path.join(claims, claimToken));
+
+    const claim = path.join(claims, claimToken);
+    fs.mkdirSync(claim);
+    fs.symlinkSync(sentinel, path.join(claim, fileToken), 'file');
+    for (const call of [
+      () => core.recoverInboxClaims(root, addr),
+      () => core.readClaimedLetter(root, addr, claimToken, fileToken),
+      () => core.ackClaimedLetter(root, addr, claimToken, fileToken),
+      () => core.requeueClaimedLetter(root, addr, claimToken, fileToken),
+    ]) {
+      expect(call).toThrow(/symlink/i);
+    }
+    expect(fs.readFileSync(sentinel, 'utf8')).toBe('sentinel');
+  });
+
+  it('rejects traversal in aliases, claims, and ask/message identifiers', async () => {
+    const base = fixture();
+    const root = path.join(base, 'relay');
+    const addr = core.deriveAddr('/receiver', 'session');
+    const validLetter = letter();
     const badId = '../../../escaped';
     const badAlias = '../../../escaped';
 
@@ -240,6 +340,9 @@ describe('/core filesystem boundary', () => {
       () => core.readOutgoingAsk(root, addr, badId),
       () => core.clearAsk(root, addr, badId),
       () => core.resolveAskByRef(root, addr, badId),
+      () => core.readClaimedLetter(root, addr, badId, `${validLetter.ts}-${validLetter.id}.json`),
+      () => core.ackClaimedLetter(root, addr, '0'.repeat(32), badId),
+      () => core.requeueClaimedLetter(root, addr, '0'.repeat(32), badId),
     ];
 
     for (const call of calls) expect(call).toThrow(TypeError);
@@ -295,7 +398,7 @@ it('builds, packs, installs, and imports the real core package without Pi or TUI
       '--input-type=module',
       '--eval',
       `const core = await import('@nicknisi/pi-relay/core');
-for (const name of ['deriveAddr', 'deposit', 'drain', 'claimAlias', 'pendingAsks', 'OutboundPolicy']) {
+for (const name of ['deriveAddr', 'deposit', 'drain', 'claimInbox', 'recoverInboxClaims', 'readClaimedLetter', 'ackClaimedLetter', 'requeueClaimedLetter', 'claimAlias', 'pendingAsks', 'OutboundPolicy']) {
   if (typeof core[name] !== 'function') throw new Error(\`Missing core export: \${name}\`);
 }
 for (const name of ['recordPath', 'inboxDir', 'asksDir', 'aliasPath', 'auditLogPath', 'writeRecord', 'writeAlias', 'appendAudit']) {

@@ -1,19 +1,25 @@
 /** Pi-free relay registry, mailbox, and policy API for non-extension consumers. */
 import {
+  ackClaimedLetter as ackClaimedLetterInternal,
   awaitReceipt as awaitReceiptInternal,
+  claimInbox as claimInboxInternal,
   clearAsk as clearAskInternal,
   deposit as depositInternal,
   drain as drainInternal,
   pendingAsks as pendingAsksInternal,
   readAudit as readAuditInternal,
+  readClaimedLetter as readClaimedLetterInternal,
   readIncomingAsk as readIncomingAskInternal,
   readOutgoingAsk as readOutgoingAskInternal,
+  recoverInboxClaims as recoverInboxClaimsInternal,
+  requeueClaimedLetter as requeueClaimedLetterInternal,
   resolveAskByRef as resolveAskByRefInternal,
   trackIncomingAsk as trackIncomingAskInternal,
   trackOutgoingAsk as trackOutgoingAskInternal,
   unreadCount as unreadCountInternal,
   watchInbox as watchInboxInternal,
   type AuditRecord,
+  type InboxClaim,
   type Letter,
   type OutAsk,
 } from './mailbox.js';
@@ -32,7 +38,15 @@ import {
   type SessionRecord,
 } from './registry.js';
 
-export { MAX_BODY_CHARS, previewBody, type AuditRecord, type Letter, type LetterKind, type OutAsk } from './mailbox.js';
+export {
+  MAX_BODY_CHARS,
+  previewBody,
+  type AuditRecord,
+  type InboxClaim,
+  type Letter,
+  type LetterKind,
+  type OutAsk,
+} from './mailbox.js';
 export {
   BACKLOG_CAP,
   DEDUPE_WINDOW_MS,
@@ -54,6 +68,8 @@ export {
 
 const ADDRESS_PATTERN = /^[a-f0-9]{12}$/;
 const ASK_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
+const INBOX_CLAIM_TOKEN_PATTERN = /^[a-f0-9]{32}$/;
+const INBOX_FILE_TOKEN_PATTERN = /^(0|[1-9][0-9]*)-[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}\.json$/;
 
 function assertAddress(addr: string): void {
   if (!ADDRESS_PATTERN.test(addr)) throw new TypeError(`Invalid relay address: ${addr}`);
@@ -67,13 +83,29 @@ function assertAskId(id: string): void {
   if (!ASK_ID_PATTERN.test(id)) throw new TypeError(`Invalid relay ask/message id: ${id}`);
 }
 
+function assertInboxClaimToken(token: string): void {
+  if (!INBOX_CLAIM_TOKEN_PATTERN.test(token)) throw new TypeError(`Invalid relay inbox claim token: ${token}`);
+}
+
+function assertInboxFileToken(token: string): void {
+  if (!INBOX_FILE_TOKEN_PATTERN.test(token)) throw new TypeError(`Invalid relay inbox file token: ${token}`);
+}
+
 function assertLetter(letter: Letter): void {
   if (typeof letter !== 'object' || letter === null) throw new TypeError('Invalid relay letter');
   assertAskId(letter.id);
   if (typeof letter.from !== 'object' || letter.from === null) throw new TypeError('Invalid relay letter sender');
   assertAddress(letter.from.addr);
+  if (typeof letter.from.name !== 'string' || typeof letter.from.cwd !== 'string') {
+    throw new TypeError('Invalid relay letter sender');
+  }
+  if (!['message', 'ask', 'reply', 'cancel'].includes(letter.kind) || typeof letter.body !== 'string') {
+    throw new TypeError('Invalid relay letter payload');
+  }
   if (letter.replyTo !== undefined) assertAskId(letter.replyTo);
-  if (!Number.isFinite(letter.ts)) throw new TypeError(`Invalid relay letter timestamp: ${letter.ts}`);
+  if (!Number.isSafeInteger(letter.ts) || letter.ts < 0) {
+    throw new TypeError(`Invalid relay letter timestamp: ${letter.ts}`);
+  }
 }
 
 function isSafeLetter(letter: Letter): boolean {
@@ -182,6 +214,38 @@ export function drain(root: string, addr: string): Letter[] {
 export function unreadCount(root: string, addr: string): number {
   assertAddress(addr);
   return unreadCountInternal(root, addr);
+}
+
+export function claimInbox(root: string, addr: string): InboxClaim | null {
+  assertAddress(addr);
+  return claimInboxInternal(root, addr);
+}
+
+export function recoverInboxClaims(root: string, addr: string): InboxClaim[] {
+  assertAddress(addr);
+  return recoverInboxClaimsInternal(root, addr);
+}
+
+export function readClaimedLetter(root: string, addr: string, claimToken: string, fileToken: string): Letter | null {
+  assertAddress(addr);
+  assertInboxClaimToken(claimToken);
+  assertInboxFileToken(fileToken);
+  const letter = readClaimedLetterInternal(root, addr, claimToken, fileToken);
+  return letter && isSafeLetter(letter) ? letter : null;
+}
+
+export function ackClaimedLetter(root: string, addr: string, claimToken: string, fileToken: string): boolean {
+  assertAddress(addr);
+  assertInboxClaimToken(claimToken);
+  assertInboxFileToken(fileToken);
+  return ackClaimedLetterInternal(root, addr, claimToken, fileToken);
+}
+
+export function requeueClaimedLetter(root: string, addr: string, claimToken: string, fileToken: string): boolean {
+  assertAddress(addr);
+  assertInboxClaimToken(claimToken);
+  assertInboxFileToken(fileToken);
+  return requeueClaimedLetterInternal(root, addr, claimToken, fileToken);
 }
 
 export function watchInbox(root: string, addr: string, onMail: () => void): () => void {

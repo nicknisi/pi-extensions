@@ -106,8 +106,14 @@ function unlinkAt(directoryFd: number, name: string, flags = 0): void {
   if (nativeUnlinkAt(directoryFd, name, flags) < 0) throw syscallError('unlinkat', name);
 }
 
-function renameAt(directoryFd: number, from: string, to: string): void {
-  if (nativeRenameAt(directoryFd, from, directoryFd, to) < 0) throw syscallError('renameat', `${from} -> ${to}`);
+function renameAt(fromDirectoryFd: number, from: string, toDirectoryFd: number, to: string): void {
+  if (nativeRenameAt(fromDirectoryFd, from, toDirectoryFd, to) < 0) {
+    throw syscallError('renameat', `${from} -> ${to}`);
+  }
+}
+
+function sameFile(left: fs.Stats, right: fs.Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
 }
 
 function verifyDirectoryFd(fd: number, label: string): fs.Stats {
@@ -355,7 +361,8 @@ export class RelayDirectoryHandle {
       fs.writeFileSync(fd, contents, 'utf8');
       fs.fsyncSync(fd);
       this.verifyFile(fileName);
-      renameAt(this.#fd, temporary, fileName);
+      renameAt(this.#fd, temporary, this.#fd, fileName);
+      this.sync();
       renamed = true;
     } finally {
       fs.closeSync(fd);
@@ -420,7 +427,98 @@ export class RelayDirectoryHandle {
     if (from === null) return;
     fs.closeSync(from);
     this.verifyFile(toName);
-    renameAt(this.#fd, fromName, toName);
+    renameAt(this.#fd, fromName, this.#fd, toName);
+  }
+
+  /** Atomically move one pinned child directory beneath another pinned directory. */
+  moveDirectoryTo(name: string, target: RelayDirectoryHandle, targetName: string): RelayDirectoryHandle | null {
+    this.#assertOpen();
+    target.#assertOpen();
+    assertPathSegment(name);
+    assertPathSegment(targetName);
+
+    const source = this.openDirectory(name);
+    if (source === null) return null;
+    try {
+      const existing = target.openDirectory(targetName);
+      if (existing !== null) {
+        existing.close();
+        unsafe(`Relay destination directory already exists: ${targetName}`);
+      }
+
+      const sourceStat = fs.fstatSync(source.#fd);
+      renameAt(this.#fd, name, target.#fd, targetName);
+      const moved = target.openDirectory(targetName);
+      if (moved === null) unsafe(`Relay directory move disappeared: ${targetName}`);
+      try {
+        if (!sameFile(sourceStat, fs.fstatSync(moved.#fd))) {
+          unsafe(`Relay directory changed during move: ${name}`);
+        }
+      } finally {
+        moved.close();
+      }
+      this.sync();
+      target.sync();
+      return source;
+    } catch (error) {
+      source.close();
+      throw error;
+    }
+  }
+
+  /** Atomically move one regular file between pinned directories without following links. */
+  moveFileTo(fileName: string, target: RelayDirectoryHandle, targetName = fileName): boolean {
+    this.#assertOpen();
+    target.#assertOpen();
+    assertPathSegment(fileName, 'relay file name');
+    assertPathSegment(targetName, 'relay file name');
+
+    const sourceFd = openRegularFileAt(this.#fd, fileName, fs.constants.O_RDONLY);
+    if (sourceFd === null) return false;
+    try {
+      if (target.fileExists(targetName)) return false;
+      const sourceStat = fs.fstatSync(sourceFd);
+      renameAt(this.#fd, fileName, target.#fd, targetName);
+      const movedFd = openRegularFileAt(target.#fd, targetName, fs.constants.O_RDONLY);
+      if (movedFd === null) unsafe(`Relay file move disappeared: ${targetName}`);
+      try {
+        if (!sameFile(sourceStat, fs.fstatSync(movedFd))) unsafe(`Relay file changed during move: ${fileName}`);
+      } finally {
+        fs.closeSync(movedFd);
+      }
+      this.sync();
+      target.sync();
+      return true;
+    } finally {
+      fs.closeSync(sourceFd);
+    }
+  }
+
+  /** Remove a child directory only when it is still a real, empty directory. */
+  removeEmptyDirectory(name: string): boolean {
+    this.#assertOpen();
+    const directory = this.openDirectory(name);
+    if (directory === null) return false;
+    try {
+      if (directory.readDirectory().length > 0) return false;
+      try {
+        unlinkAt(this.#fd, name, AT_REMOVEDIR);
+        this.sync();
+        return true;
+      } catch (error) {
+        if (isErrorCode(error, 'ENOENT') || isErrorCode(error, 'ENOTEMPTY') || isErrorCode(error, 'EEXIST')) {
+          return false;
+        }
+        throw error;
+      }
+    } finally {
+      directory.close();
+    }
+  }
+
+  sync(): void {
+    this.#assertOpen();
+    fs.fsyncSync(this.#fd);
   }
 
   removeDirectory(name: string): void {

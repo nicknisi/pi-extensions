@@ -294,6 +294,59 @@ function dirHasJson(root: string, name: string): boolean {
   }
 }
 
+function claimsHaveJson(root: string, addr: string): boolean {
+  const relay = openRelayRoot(root);
+  if (relay === null) return false;
+  try {
+    const claims = relay.openDirectory(`${addr}.claims`);
+    if (claims === null) return false;
+    try {
+      for (const entry of claims.readDirectory()) {
+        if (entry.isSymbolicLink()) throw new RelayFilesystemError(`Refusing symlinked relay claim: ${entry.name}`);
+        if (!entry.isDirectory()) continue;
+        const claim = claims.openDirectory(entry.name);
+        if (claim === null) continue;
+        try {
+          if (
+            claim.readDirectory().some((file) => {
+              if (!file.name.endsWith('.json')) return false;
+              if (file.isSymbolicLink()) {
+                throw new RelayFilesystemError(`Refusing symlinked claimed letter: ${file.name}`);
+              }
+              return file.isFile();
+            })
+          ) {
+            return true;
+          }
+        } finally {
+          claim.close();
+        }
+      }
+      return false;
+    } finally {
+      claims.close();
+    }
+  } finally {
+    relay.close();
+  }
+}
+
+function removeClaims(directory: RelayDirectoryHandle, addr: string): void {
+  const claimsName = `${addr}.claims`;
+  const claims = directory.openDirectory(claimsName);
+  if (claims === null) return;
+  try {
+    for (const entry of claims.readDirectory()) {
+      if (entry.isSymbolicLink()) throw new RelayFilesystemError(`Refusing symlinked relay claim: ${entry.name}`);
+      if (!entry.isDirectory()) continue;
+      claims.removeDirectory(entry.name);
+    }
+  } finally {
+    claims.close();
+  }
+  directory.removeDirectory(claimsName);
+}
+
 /**
  * Reclaim dead sessions' files. Rules (mail outranks tidiness):
  * - a running session is never touched;
@@ -310,7 +363,10 @@ function dirHasJson(root: string, name: string): boolean {
 export function sweep(root: string, now: number = Date.now(), sessionExists?: (sessionId: string) => boolean): void {
   for (const record of listRecords(root)) {
     if (presenceOf(record, now) !== 'offline') continue;
-    const hasMail = dirHasJson(root, `${record.addr}.inbox`) || dirHasJson(root, `${record.addr}.asks`);
+    const hasMail =
+      dirHasJson(root, `${record.addr}.inbox`) ||
+      dirHasJson(root, `${record.addr}.asks`) ||
+      claimsHaveJson(root, record.addr);
     const expired = now - record.lastSeenAt >= SWEEP_MAIL_KEEP_MS;
     if (hasMail && !expired) continue;
     if (!expired && (sessionExists?.(record.sessionId) ?? true)) continue;
@@ -319,6 +375,7 @@ export function sweep(root: string, now: number = Date.now(), sessionExists?: (s
       try {
         relay.removeDirectory(`${record.addr}.inbox`);
         relay.removeDirectory(`${record.addr}.asks`);
+        removeClaims(relay, record.addr);
         try {
           relay.unlinkFile(`${record.addr}.json`);
         } catch (error) {
