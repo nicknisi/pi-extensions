@@ -88,12 +88,14 @@ function makeSpawnFn(
   cancellables: Cancellables,
   runtime: SubagentRuntime,
   cwd: string,
+  ownerSession: string | undefined,
   externalSignal: AbortSignal | undefined,
 ): EngineSpawnFn {
   return async (opts: EngineSpawnOptions): Promise<EngineSpawnResult> => {
     const spawnOpts: SpawnOptions = {
       prompt: opts.prompt,
       cwd,
+      ...(ownerSession !== undefined ? { ownerSession } : {}),
       ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
       ...(opts.model !== undefined ? { model: opts.model } : {}),
       ...(opts.systemPrompt !== undefined ? { systemPrompt: opts.systemPrompt } : {}),
@@ -412,7 +414,13 @@ export default function workflows(pi: ExtensionAPI): void {
         timedOut = true;
         controller.abort();
       }, timeoutMs);
-      const spawnFn = makeSpawnFn(cancellables, runtime, ctx.cwd, controller.signal);
+      const spawnFn = makeSpawnFn(
+        cancellables,
+        runtime,
+        ctx.cwd,
+        ctx.sessionManager.getSessionFile(),
+        controller.signal,
+      );
       const timeoutPromise = new Promise<never>((_, reject) => {
         controller.signal.addEventListener(
           'abort',
@@ -531,7 +539,13 @@ async function cmdWf(
     }
     ctx.ui.setStatus('workflows', `running ${name}…`);
     try {
-      const spawnFn = makeSpawnFn(cancellables, runtime, ctx.cwd, ctx.signal ?? undefined);
+      const spawnFn = makeSpawnFn(
+        cancellables,
+        runtime,
+        ctx.cwd,
+        ctx.sessionManager.getSessionFile(),
+        ctx.signal ?? undefined,
+      );
       const result = await runScript({ script: src, args: parsedArgs, spawn: spawnFn, cwd: ctx.cwd });
       ctx.ui.notify(formatRunResult(result, name), 'info');
     } catch (err) {

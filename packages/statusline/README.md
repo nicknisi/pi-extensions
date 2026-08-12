@@ -85,7 +85,19 @@ The footer render path is kept synchronous:
 
 ## Configuration
 
-No config files and no options. Environment variables read:
+Optional global config: `~/.pi/agent/configs/statusline.json`. Changes take effect on the next session or after `/reload`.
+
+```json
+{
+  "hiddenStatuses": ["mcp"]
+}
+```
+
+`hiddenStatuses` contains stable extension status keys—the first argument passed to `ctx.ui.setStatus(key, text)`. Only matching extension-provided segments are omitted; built-in model, cost, context, usage, and branch segments are unaffected. The default is `[]`, which preserves all extension statuses. Missing or invalid config falls back to the default and invalid config emits a warning.
+
+For example, `pi-mcp-adapter` publishes its server-count segment under the `mcp` key, while this repository's subagent fleet uses `subagents`.
+
+Environment variables read:
 
 | Variable    | Use                                                      |
 | ----------- | -------------------------------------------------------- |

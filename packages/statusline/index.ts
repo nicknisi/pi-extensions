@@ -24,6 +24,7 @@ import { writeFileSync, readFileSync, mkdirSync, existsSync, statSync } from 'no
 import { join } from 'node:path';
 import { execSync, execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { loadStatuslineConfig, shouldShowStatus } from './config.js';
 
 const execFileP = promisify(execFile);
 
@@ -357,6 +358,9 @@ export default function (pi: ExtensionAPI) {
   // ── Custom footer ──────────────────────────────────────────────────────
 
   pi.on('session_start', async (_event, ctx) => {
+    const { config, warnings } = loadStatuslineConfig();
+    for (const warning of warnings) ctx.ui.notify(warning, 'warning');
+
     ctx.ui.setFooter((tui, theme, footerData) => {
       const unsub = footerData.onBranchChange(() => tui.requestRender());
       onPrUpdated = () => tui.requestRender();
@@ -481,6 +485,7 @@ export default function (pi: ExtensionAPI) {
           // this line is the only place they can appear — without this, every
           // extension's status indicator is silently dropped.
           const extensionStatuses = Array.from(footerData.getExtensionStatuses().entries())
+            .filter(([key]) => shouldShowStatus(key, config))
             .sort(([a], [b]) => a.localeCompare(b))
             .map(([, text]) => sanitizeStatusText(text))
             .filter((text) => text.length > 0);

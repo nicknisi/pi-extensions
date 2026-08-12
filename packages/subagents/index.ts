@@ -59,6 +59,7 @@ import {
   type SpawnUsage,
 } from '@nicknisi/pi-shared';
 import { Type } from 'typebox';
+import { scopeFleetRuns, type FleetScope } from './fleet.js';
 
 const ARTIFACTS_ROOT = path.join(getAgentDir(), 'subagent-runs');
 const PATCHES_STATE_DIR = path.join(getAgentDir(), 'subagent-patches');
@@ -176,6 +177,14 @@ function collectFleet(live: RunArtifact[]): RunArtifact[] {
     byId.set(record.runId, { ...persisted, ...record, output: record.output ?? persisted?.output });
   }
   return [...byId.values()].sort((a, b) => b.startedAt - a.startedAt);
+}
+
+function collectFleetForScope(
+  runtime: SubagentRuntime,
+  scope: FleetScope,
+  parentSession: string | undefined,
+): RunArtifact[] {
+  return scopeFleetRuns(collectFleet(runtime.listRuns() as RunArtifact[]), scope, parentSession);
 }
 
 function postText(pi: ExtensionAPI, ctx: ExtensionCommandContext, text: string) {
@@ -1096,8 +1105,11 @@ function openFleetOverlay(
   ctx: ExtensionCommandContext | ExtensionContext,
   runtime: SubagentRuntime,
   initial: RunArtifact | undefined,
+  scope: FleetScope,
+  parentSession: string | undefined,
 ): Promise<void> {
-  const all = collectFleet(runtime.listRuns() as RunArtifact[]);
+  const getRuns = () => collectFleetForScope(runtime, scope, parentSession);
+  const all = getRuns();
   const cancelRun = (runId: string) => {
     const controller = cancellables.get(runId);
     if (!controller) {
@@ -1118,44 +1130,39 @@ function openFleetOverlay(
   return ctx.ui.custom<void>(
     (tui, theme, _kb, done) => {
       widgetTheme = theme;
-      return new FleetOverlay(
-        all,
-        initial,
-        tui,
-        theme,
-        () => collectFleet(runtime.listRuns() as RunArtifact[]),
-        () => done(undefined),
-        cancelRun,
-      );
+      return new FleetOverlay(all, initial, tui, theme, getRuns, () => done(undefined), cancelRun);
     },
     { overlay: true, overlayOptions: { width: '80%', maxHeight: '70%', anchor: 'center' } },
   );
 }
 
-/** Recompute working/done/failed counts and reflect them in the footer statusline. */
-function refreshStatusline(ui: ExtensionUIContext, theme: Theme | null, runtime: SubagentRuntime): void {
-  let all: RunArtifact[];
+/** Reflect active runs owned by this pi session in the footer statusline. */
+function refreshStatusline(
+  ui: ExtensionUIContext,
+  theme: Theme | null,
+  runtime: SubagentRuntime,
+  parentSession: string | undefined,
+): void {
+  let active: RunArtifact[];
   try {
-    all = collectFleet(runtime.listRuns() as RunArtifact[]);
+    active = collectFleetForScope(runtime, 'current', parentSession);
   } catch {
     return;
   }
-  const working = all.filter((r) => r.status === 'running' || r.status === 'queued').length;
-  const done = all.filter((r) => r.status === 'completed').length;
-  const failed = all.filter((r) => r.status === 'failed' || r.status === 'aborted').length;
-  if (working === 0) {
+  if (active.length === 0) {
     ui.setStatus(STATUS_KEY, undefined);
     return;
   }
   const text = theme
-    ? `${theme.fg('accent', '●')} ${theme.fg('dim', 'fleet ')}${theme.fg('accent', String(working))}${theme.fg('dim', ' working · ')}${theme.fg('success', String(done))}${theme.fg('dim', ' done · ')}${theme.fg('error', String(failed))}${theme.fg('dim', ' failed')}`
-    : `fleet ${working} working · ${done} done · ${failed} failed`;
+    ? `${theme.fg('accent', '●')} ${theme.fg('dim', 'fleet ')}${theme.fg('accent', String(active.length))}${theme.fg('dim', ' working')}`
+    : `fleet ${active.length} working`;
   ui.setStatus(STATUS_KEY, text);
 }
 
 let statusTimer: ReturnType<typeof setInterval> | undefined;
 let statusUi: ExtensionUIContext | null = null;
 let statusTheme: Theme | null = null;
+let statusParentSession: string | undefined;
 
 // ── & dispatch prefix: inline single-subagent runs ────────────────────────
 //
@@ -1279,10 +1286,11 @@ export default function subagents(pi: ExtensionAPI) {
     if (!ctx.hasUI) return;
     statusUi = ctx.ui;
     statusTheme = (ctx.ui as ExtensionUIContext).theme ?? null;
-    refreshStatusline(statusUi, statusTheme, runtime);
+    statusParentSession = ctx.sessionManager.getSessionFile();
+    refreshStatusline(statusUi, statusTheme, runtime, statusParentSession);
     if (statusTimer) clearInterval(statusTimer);
     statusTimer = setInterval(() => {
-      if (statusUi) refreshStatusline(statusUi, statusTheme ?? widgetTheme, runtime);
+      if (statusUi) refreshStatusline(statusUi, statusTheme ?? widgetTheme, runtime, statusParentSession);
     }, STATUS_INTERVAL);
   });
 
@@ -1303,6 +1311,7 @@ export default function subagents(pi: ExtensionAPI) {
     }
     statusUi?.setStatus(STATUS_KEY, undefined);
     statusUi = null;
+    statusParentSession = undefined;
     for (const controller of cancellables.values()) {
       try {
         controller.abort();
@@ -1584,21 +1593,34 @@ export default function subagents(pi: ExtensionAPI) {
     name: 'fleet',
     label: 'Subagent Fleet',
     description:
-      'Inspect subagent runs: list recent runs (live and persisted, across extensions using the shared runtime) or fetch a specific run result by runId. Use to check background dispatch results.',
+      "Inspect subagent runs: list active runs owned by the current pi session by default, list persisted machine-wide history with scope='all', or fetch a specific run result by runId. Use to check background dispatch results.",
     promptSnippet: 'List or inspect subagent runs',
     parameters: Type.Object({
       action: Type.Union([Type.Literal('list'), Type.Literal('result'), Type.Literal('cancel')], {
         description: 'list runs, fetch one result, or cancel a running run',
       }),
       runId: Type.Optional(Type.String({ description: 'Run id (or unique prefix) for action=result/cancel' })),
+      scope: Type.Optional(
+        Type.Union([Type.Literal('current'), Type.Literal('all')], {
+          description:
+            "List scope: active runs for the current session (default) or persisted machine-wide history ('all').",
+        }),
+      ),
     }),
-    async execute(_toolCallId, params) {
-      const live = runtime.listRuns() as RunArtifact[];
-      const all = collectFleet(live);
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const all = collectFleet(runtime.listRuns() as RunArtifact[]);
       if (params.action === 'list') {
-        if (all.length === 0) return toolResult('No subagent runs found.');
-        const text = all.slice(0, MAX_FLEET_LIST).map(formatRunLine).join('\n');
-        return toolResult(text, { runs: all.slice(0, MAX_FLEET_LIST) });
+        const scope = (params.scope ?? 'current') as FleetScope;
+        const runs = scopeFleetRuns(all, scope, ctx.sessionManager.getSessionFile());
+        if (runs.length === 0) {
+          return toolResult(
+            scope === 'current'
+              ? "No active subagent runs for the current session. Use scope='all' for persisted history."
+              : 'No persisted subagent runs found.',
+          );
+        }
+        const text = runs.slice(0, MAX_FLEET_LIST).map(formatRunLine).join('\n');
+        return toolResult(text, { scope, runs: runs.slice(0, MAX_FLEET_LIST) });
       }
       if (!params.runId) {
         return toolResult(`action=${params.action} requires a runId (or prefix).`);
@@ -1646,39 +1668,51 @@ export default function subagents(pi: ExtensionAPI) {
   });
 
   pi.registerCommand('fleet', {
-    description: 'Show recent subagent runs (live + persisted, across extensions using the shared runtime)',
+    description: 'Show active subagents for this session; pass `all` for persisted machine-wide history',
     handler: async (args, ctx) => {
-      const all = collectFleet(runtime.listRuns() as RunArtifact[]);
+      const query = args.trim();
+      const scope: FleetScope = query === 'all' || (query !== '' && query !== 'current') ? 'all' : 'current';
+      const parentSession = ctx.sessionManager.getSessionFile();
+      const runs = collectFleetForScope(runtime, scope, parentSession);
 
       if (!ctx.hasUI) {
         postText(
           pi,
           ctx,
-          all.length === 0 ? 'No subagent runs found.' : all.slice(0, MAX_FLEET_LIST).map(formatRunLine).join('\n'),
+          runs.length === 0
+            ? scope === 'current'
+              ? 'No active subagent runs for the current session. Use `/fleet all` for persisted history.'
+              : 'No persisted subagent runs found.'
+            : runs.slice(0, MAX_FLEET_LIST).map(formatRunLine).join('\n'),
         );
         return;
       }
 
-      if (all.length === 0) {
-        ctx.ui.notify('No subagent runs found.', 'info');
+      if (runs.length === 0) {
+        ctx.ui.notify(
+          scope === 'current'
+            ? 'No active subagent runs for the current session. Use /fleet all for persisted history.'
+            : 'No persisted subagent runs found.',
+          'info',
+        );
         return;
       }
 
-      // `/fleet <runId-prefix>` jumps straight to that run's detail view.
+      // `/fleet <runId-prefix>` explicitly searches persisted history and
+      // jumps straight to that run's detail view. `/fleet all` opens history.
       let initial: RunArtifact | undefined;
-      const query = args.trim();
-      if (query) {
-        const matches = all.filter((r) => r.runId.startsWith(query));
+      if (query && query !== 'all' && query !== 'current') {
+        const matches = runs.filter((r) => r.runId.startsWith(query));
         if (matches.length === 1) {
           initial = matches[0];
         } else if (matches.length > 1) {
-          ctx.ui.notify(`Ambiguous run id '${query}' (${matches.length} matches); showing the list`, 'warning');
+          ctx.ui.notify(`Ambiguous run id '${query}' (${matches.length} matches); showing history`, 'warning');
         } else {
-          ctx.ui.notify(`No run matches '${query}'; showing the list`, 'warning');
+          ctx.ui.notify(`No run matches '${query}'; showing history`, 'warning');
         }
       }
 
-      await openFleetOverlay(pi, ctx, runtime, initial);
+      await openFleetOverlay(pi, ctx, runtime, initial, scope, parentSession);
     },
   });
 
@@ -1690,12 +1724,13 @@ export default function subagents(pi: ExtensionAPI) {
         ctx.ui.notify('The fleet radar overlay needs the TUI.', 'warning');
         return;
       }
-      const all = collectFleet(runtime.listRuns() as RunArtifact[]);
-      if (all.length === 0) {
-        ctx.ui.notify('No subagent runs found.', 'info');
+      const parentSession = ctx.sessionManager.getSessionFile();
+      const active = collectFleetForScope(runtime, 'current', parentSession);
+      if (active.length === 0) {
+        ctx.ui.notify('No active subagent runs for the current session. Use /fleet all for persisted history.', 'info');
         return;
       }
-      await openFleetOverlay(pi, ctx, runtime, undefined);
+      await openFleetOverlay(pi, ctx, runtime, undefined, 'current', parentSession);
     },
   });
 

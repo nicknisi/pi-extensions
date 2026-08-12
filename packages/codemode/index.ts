@@ -318,12 +318,20 @@ export default function codemode(pi: ExtensionAPI) {
     label: string;
     timeoutMs: number;
     cwd: string;
+    ownerSession?: string | undefined;
     externalSignal?: AbortSignal | undefined;
     bindResult?: boolean;
   }): Promise<CodemodeOutcome> {
-    const { code, label, timeoutMs, cwd, externalSignal, bindResult = false } = input;
+    const { code, label, timeoutMs, cwd, ownerSession, externalSignal, bindResult = false } = input;
     const logs: string[] = [];
     const controller = new AbortController();
+    const sessionRuntime: SubagentRuntime = {
+      namespace: tracedRuntime.namespace,
+      spawn: (opts) => sessionRuntime.spawnDetached(opts).done,
+      spawnDetached: (opts) => tracedRuntime.spawnDetached(ownerSession ? { ...opts, ownerSession } : opts),
+      listRuns: () => tracedRuntime.listRuns(),
+      activeCount: () => tracedRuntime.activeCount(),
+    };
 
     const log = (...args: unknown[]) => {
       if (logs.length >= MAX_LOG_ENTRIES) return;
@@ -363,7 +371,7 @@ export default function codemode(pi: ExtensionAPI) {
       // (read/bash/edit/write) would apply otherwise.
       if (opts.tools === undefined) opts.tools = ['read', 'grep', 'find', 'ls'];
       if (merged) opts.signal = merged;
-      return tracedRuntime.spawn(opts);
+      return sessionRuntime.spawn(opts);
     };
 
     const boundRunWorkflow = (
@@ -460,7 +468,7 @@ export default function codemode(pi: ExtensionAPI) {
         }
       };
 
-      return runWorkflow({ ...spec, stages: wrappedStages }, tracedRuntime, full);
+      return runWorkflow({ ...spec, stages: wrappedStages }, sessionRuntime, full);
     };
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-codemode-'));
@@ -602,6 +610,7 @@ export default function codemode(pi: ExtensionAPI) {
         label,
         timeoutMs,
         cwd: ctx.cwd,
+        ownerSession: ctx.sessionManager.getSessionFile(),
         externalSignal: signal ?? undefined,
       });
       return {
@@ -703,6 +712,7 @@ export default function codemode(pi: ExtensionAPI) {
         label: 'console',
         timeoutMs: DEFAULT_TIMEOUT_MS,
         cwd: ctx.cwd,
+        ownerSession: ctx.sessionManager.getSessionFile(),
         externalSignal: ctx.signal ?? undefined,
         bindResult: true,
       });
@@ -836,6 +846,7 @@ export default function codemode(pi: ExtensionAPI) {
           label: name,
           timeoutMs: DEFAULT_TIMEOUT_MS,
           cwd: ctx.cwd,
+          ownerSession: ctx.sessionManager.getSessionFile(),
           externalSignal: ctx.signal ?? undefined,
           bindResult: true,
         });

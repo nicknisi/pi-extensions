@@ -16,7 +16,8 @@
   },
   "files": [
     "dist",
-    "index.ts"
+    "index.ts",
+    "config.ts"
   ],
   "type": "module",
   "exports": {
