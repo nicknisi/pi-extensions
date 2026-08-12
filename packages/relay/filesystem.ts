@@ -116,6 +116,62 @@ function verifyDirectoryFd(fd: number, label: string): fs.Stats {
   return stat;
 }
 
+function isProtectedSystemPath(stat: fs.Stats): boolean {
+  return stat.uid === 0 && (stat.mode & 0o022) === 0;
+}
+
+function canonicalTraversalPath(absolute: string): string {
+  let candidate = absolute;
+  for (let redirect = 0; redirect < 40; redirect++) {
+    const parsed = path.parse(candidate);
+    const components = candidate.slice(parsed.root.length).split(path.sep).filter(Boolean);
+    let current = parsed.root;
+    let redirected = false;
+
+    for (const [index, component] of components.entries()) {
+      current = path.join(current, component);
+      let stat: fs.Stats;
+      try {
+        stat = fs.lstatSync(current);
+      } catch (error) {
+        if (isErrorCode(error, 'ENOENT')) return candidate;
+        throw error;
+      }
+
+      if (stat.isSymbolicLink()) {
+        if (index === components.length - 1) unsafe(`Refusing symlinked relay root: ${absolute}`);
+
+        let canonicalTarget: string;
+        let targetStat: fs.Stats;
+        const parentStat = fs.statSync(path.dirname(current));
+        try {
+          canonicalTarget = fs.realpathSync.native(current);
+          targetStat = fs.lstatSync(canonicalTarget);
+        } catch (error) {
+          unsafe(`Refusing unsafe system ancestor symlink: ${current}`, error);
+        }
+        if (
+          !isProtectedSystemPath(parentStat) ||
+          !isProtectedSystemPath(stat) ||
+          !targetStat.isDirectory() ||
+          !isProtectedSystemPath(targetStat)
+        ) {
+          unsafe(`Refusing user-controlled ancestor symlink: ${current}`);
+        }
+
+        candidate = path.join(canonicalTarget, ...components.slice(index + 1));
+        redirected = true;
+        break;
+      }
+
+      if (!stat.isDirectory()) unsafe(`Relay path is not a directory: ${current}`);
+    }
+
+    if (!redirected) return candidate;
+  }
+  unsafe(`Refusing relay path with too many system symlinks: ${absolute}`);
+}
+
 function openDirectoryAt(
   directoryFd: number,
   name: string,
@@ -410,23 +466,72 @@ export interface RelayWatcher {
   unref(): void;
 }
 
-/** Open every configured-root component without following symlinks and return the pinned root descriptor. */
-export function openRelayRoot(root: string, create = false): RelayDirectoryHandle | null {
-  const absolute = path.resolve(root);
-  const components = absolute.split(path.sep).filter(Boolean);
-  let fd = fs.openSync(path.parse(absolute).root, READ_DIRECTORY_FLAGS);
+function ensureRootDirectory(absolute: string): void {
+  const parsed = path.parse(absolute);
+  const components = absolute.slice(parsed.root.length).split(path.sep).filter(Boolean);
+  const rootName = components.pop();
+  if (rootName === undefined) return;
+
+  let fd = fs.openSync(parsed.root, READ_DIRECTORY_FLAGS);
   try {
-    verifyDirectoryFd(fd, path.parse(absolute).root);
-    for (const [index, component] of components.entries()) {
-      const next = openDirectoryAt(fd, component, create, absolute, create && index === components.length - 1);
+    verifyDirectoryFd(fd, parsed.root);
+    for (const component of components) {
+      const next = openDirectoryAt(fd, component, true, absolute);
+      fs.closeSync(fd);
+      fd = next!;
+    }
+    try {
+      mkdirAt(fd, rootName);
+    } catch (error) {
+      if (!isErrorCode(error, 'EEXIST')) throw error;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function openRootFd(absolute: string): number | null {
+  const parsed = path.parse(absolute);
+  const components = absolute.slice(parsed.root.length).split(path.sep).filter(Boolean);
+  let fd = fs.openSync(parsed.root, READ_DIRECTORY_FLAGS);
+  try {
+    verifyDirectoryFd(fd, parsed.root);
+    for (const component of components) {
+      const next = openDirectoryAt(fd, component, false, absolute);
       if (next === null) return null;
       fs.closeSync(fd);
       fd = next;
     }
-    const handle = new RelayDirectoryHandle(fd, absolute);
+    const rootFd = fd;
     fd = -1;
-    return handle;
+    return rootFd;
   } finally {
     if (fd >= 0) fs.closeSync(fd);
   }
+}
+
+/** Open every canonical configured-root component without following symlinks and return its pinned descriptor. */
+export function openRelayRoot(root: string, create = false): RelayDirectoryHandle | null {
+  const absolute = path.resolve(root);
+  const traversalPath = canonicalTraversalPath(absolute);
+  if (create) ensureRootDirectory(traversalPath);
+
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = fs.realpathSync.native(traversalPath);
+  } catch (error) {
+    if (!create && isErrorCode(error, 'ENOENT')) return null;
+    throw error;
+  }
+
+  const fd = openRootFd(canonicalRoot);
+  if (fd === null) return null;
+  if (create) {
+    try {
+      fs.fchmodSync(fd, 0o700);
+    } catch {
+      // best-effort on filesystems that support modes
+    }
+  }
+  return new RelayDirectoryHandle(fd, absolute);
 }

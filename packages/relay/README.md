@@ -96,7 +96,7 @@ The directory is created `0700` and every file `0600` — other users on the mac
 
 ## Caveats
 
-- **Mailbox semantics support Linux and macOS only.** Relay rejects symlinks in every configured-root component, pins root and mailbox descriptors for each operation, and uses descriptor-relative `openat`/`renameat`/`unlinkat` calls, atomic rename-over-existing, descriptor polling for watches, and `0600`/`0700` permission bits. Windows is unsupported.
+- **Mailbox semantics support Linux and macOS only.** Relay rejects user-controlled symlinks in configured-root components, permits protected root-owned system aliases such as macOS `/var`, pins root and mailbox descriptors for each operation, and uses descriptor-relative `openat`/`renameat`/`unlinkat` calls, atomic rename-over-existing, descriptor polling for watches, and `0600`/`0700` permission bits. Windows is unsupported.
 - **One machine.** Delivery is a file landing in a directory; two sessions reach each other exactly when they share a filesystem. A container and its host cannot.
 - **Presence is heartbeat-accurate**, not instantaneous (within ~45s).
 - Delivery injects with `deliverAs: "steer"` (lands between tool calls) and `triggerTurn: true` (wakes an idle session).

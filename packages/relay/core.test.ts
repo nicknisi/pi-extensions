@@ -92,7 +92,20 @@ describe('/core filesystem boundary', () => {
     expect(fs.readdirSync(base)).toEqual([]);
   });
 
-  it('rejects symlinked roots and every symlinked ancestor component', () => {
+  it.runIf(process.platform === 'darwin')('creates an exact /var temp root through the protected system link', () => {
+    const canonicalBase = fixture();
+    expect(canonicalBase.startsWith('/private/var/')).toBe(true);
+    const root = path.join('/var', path.relative('/private/var', canonicalBase), 'relay');
+    const addr = core.deriveAddr('/receiver', 'session');
+    const validLetter = letter();
+
+    core.deposit(root, addr, validLetter);
+
+    expect(fs.realpathSync.native(root)).toBe(path.join(canonicalBase, 'relay'));
+    expect(core.drain(root, addr)).toEqual([validLetter]);
+  });
+
+  it('rejects symlinked roots and user-controlled symlinked ancestor components', () => {
     const base = fixture();
     const outside = path.join(base, 'outside');
     const root = path.join(base, 'relay');
