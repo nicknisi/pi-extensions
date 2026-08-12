@@ -16,7 +16,9 @@
   },
   "files": [
     "dist",
-    "index.ts"
+    "index.ts",
+    "config.ts",
+    "btw.example.json"
   ],
   "type": "module",
   "exports": {

@@ -1,6 +1,6 @@
 # @nicknisi/pi-btw
 
-Side-channel LLM chat in a floating window. `/btw <question>` opens an overlay backed by a one-off `streamSimple` thread that sees the current branch's conversation context plus your questions. Answers stream live into the window, follow-ups can be typed in place, and the thread never touches the main agent's context no matter how deep it goes. On close, the thread persists as a custom session entry that renders in the transcript but never enters LLM context or triggers a turn.
+Side-channel LLM chat in a floating window. `/btw <question>` opens an overlay backed by a configurable one-off `streamSimple` thread that sees the current branch's conversation context plus your questions. Answers stream live into the window, follow-ups can be typed in place, and the thread never touches the main agent's context no matter how deep it goes. On close, the thread persists as a custom session entry that renders in the transcript but never enters LLM context or triggers a turn.
 
 Use it for the "quick question while the agent works" case: explanations, alternatives, sanity checks — without polluting the main conversation or spending a steer/follow-up turn on it.
 
@@ -8,7 +8,7 @@ Use it for the "quick question while the agent works" case: explanations, altern
 
 | Surface                    | Name                              | Notes                                                                                      |
 | -------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------ |
-| Slash command              | `/btw <question>`                 | Requires a selected model and an API key                                                   |
+| Slash command              | `/btw <question>`                 | Uses the model configured in `~/.pi/agent/configs/btw.json`                                |
 | Overlay window             | `BtwWindow` via `ctx.ui.custom()` | Streaming markdown thread + follow-up editor                                               |
 | Custom entry type          | `btw-answer`                      | Persisted via `pi.appendEntry()`, rendered by `pi.registerEntryRenderer()`                 |
 | Legacy custom message type | `btw-answer`                      | Old sessions stored answers as custom messages; still rendered and filtered out of context |
@@ -66,7 +66,7 @@ Fork happens _before_ the transcript card is persisted, so the forked session do
 ## How it works
 
 - On `/btw`, the current branch (`ctx.sessionManager.getBranch()`) is converted to LLM messages with `convertToLlm()`. Assistant tool calls with no matching `toolResult` are dropped first, because `/btw` can run mid-turn when tool calls are still unanswered, and Anthropic rejects `tool_use` blocks without a matching `tool_result`.
-- The side thread starts from that snapshot. Each question is sent with a fixed system prompt (concise, no tool suggestions) via `getModelProvider(ctx, model).streamSimple(...)`, with `apiKey`/`headers` from `ctx.modelRegistry.getApiKeyAndHeaders()` and the current thinking level (`off` maps to `undefined`). Completed Q&A pairs are appended to the side thread, so follow-ups have full side-thread history plus the original branch snapshot.
+- The side thread starts from that snapshot. Each question is sent to the configured model with a fixed system prompt (concise, no tool suggestions) via `getModelProvider(ctx, model).streamSimple(...)`, with `apiKey`/`headers` from `ctx.modelRegistry.getApiKeyAndHeaders()` and the current thinking level (`off` maps to `undefined`). Completed Q&A pairs are appended to the side thread, so follow-ups have full side-thread history plus the original branch snapshot.
 - The overlay is a `Component`/`Focusable` from `@earendil-works/pi-tui`, rendering a bordered box (max width 100, body capped at 30 rows or `terminal.rows - 14`) with a spinner while streaming and markdown-rendered answers.
 - On close with at least one completed turn, the thread is persisted via `pi.appendEntry<BtwEntryData>("btw-answer", { model, turns })`.
 
@@ -76,7 +76,15 @@ Custom messages participate in LLM context and, when sent while the agent is str
 
 ## Configuration
 
-No config files are read. There is one environment variable:
+Optional global config: `~/.pi/agent/configs/btw.json`. Changes take effect on the next session or after `/reload`.
+
+```json
+{
+  "model": "fireworks/glm-latest"
+}
+```
+
+`model` must be a `provider/model-id` string registered in Pi with working authentication. Model IDs may contain additional slashes; only the first slash separates the provider. Missing or invalid config falls back to `fireworks/glm-latest` and invalid config emits a warning. See [`btw.example.json`](./btw.example.json).
 
 | Variable       | Values   | Default                                                                  |
 | -------------- | -------- | ------------------------------------------------------------------------ |

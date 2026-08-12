@@ -35,6 +35,7 @@ import type { AssistantMessage, Message, ThinkingLevel } from '@earendil-works/p
 import { getModelProvider } from '@nicknisi/pi-shared';
 import type { ExtensionAPI, SessionEntry, Theme } from '@earendil-works/pi-coding-agent';
 import { convertToLlm, CURRENT_SESSION_VERSION, getMarkdownTheme } from '@earendil-works/pi-coding-agent';
+import { loadBtwConfig, parseModelSpec } from './config.js';
 import {
   Box,
   type Component,
@@ -378,6 +379,12 @@ class BtwWindow implements Component, Focusable {
 }
 
 export default function (pi: ExtensionAPI) {
+  const { config, warnings } = loadBtwConfig();
+
+  pi.on('session_start', async (_event, ctx) => {
+    for (const warning of warnings) ctx.ui.notify(warning, 'warning');
+  });
+
   // ── Legacy: old sessions persisted answers as custom MESSAGES ─────────
   // Keep filtering them out of the main agent's context and rendering them.
   // New answers are custom ENTRIES, which never enter context by design.
@@ -408,8 +415,10 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      if (!ctx.model) {
-        ctx.ui.notify('No model selected', 'error');
+      const modelSpec = parseModelSpec(config.model)!;
+      const model = ctx.modelRegistry.find(modelSpec.provider, modelSpec.id);
+      if (!model) {
+        ctx.ui.notify(`btw model not found: ${config.model}`, 'error');
         return;
       }
 
@@ -444,15 +453,15 @@ export default function (pi: ExtensionAPI) {
       const reasoning: ThinkingLevel | undefined =
         thinkingLevel === 'off' ? undefined : (thinkingLevel as ThinkingLevel);
 
-      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
       if (!auth.ok) {
-        ctx.ui.notify(`No API key for ${ctx.model.provider}/${ctx.model.id}: ${auth.error}`, 'error');
+        ctx.ui.notify(`No API key for ${model.provider}/${model.id}: ${auth.error}`, 'error');
         return;
       }
       const { apiKey, headers } = auth;
 
-      const model = ctx.model;
       const modelId = model.id;
+      const modelName = `${model.provider}/${modelId}`;
 
       const makeUser = (text: string): Message => ({
         role: 'user',
@@ -479,7 +488,7 @@ export default function (pi: ExtensionAPI) {
 
       // Run the side-chat window
       const result = await ctx.ui.custom<BtwResult>((tui, theme, _kb, done) => {
-        const win = new BtwWindow(tui, theme, modelId, done);
+        const win = new BtwWindow(tui, theme, modelName, done);
 
         const runQuestion = async (q: string) => {
           win.beginStreaming(q);
@@ -545,11 +554,11 @@ export default function (pi: ExtensionAPI) {
 
       // Persist for scrollback as a custom ENTRY: rendered in the transcript,
       // never part of LLM context, never triggers or steers an agent turn.
-      pi.appendEntry<BtwEntryData>(CUSTOM_TYPE, { model: modelId, turns: result.turns });
+      pi.appendEntry<BtwEntryData>(CUSTOM_TYPE, { model: modelName, turns: result.turns });
 
       if (result.action === 'promote') {
         pi.sendUserMessage(
-          formatThreadForPromote(result.turns, modelId),
+          formatThreadForPromote(result.turns, modelName),
           ctx.isIdle() ? undefined : { deliverAs: 'steer' },
         );
       }
