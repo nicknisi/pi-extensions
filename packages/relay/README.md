@@ -9,6 +9,16 @@ Architecture follows [shift-labs/pi-peer](https://github.com/shift-labs-ai/pi-pe
 - **`relay` tool** — actions: `list`, `list-cwd`, `send`, `ask`, `reply`, `pending`, `cancel`, `status`, `claim`, `watch`
 - **`/relay` command** — prints the session listing; `/relay log [N]` prints the last N audit entries (default 50)
 
+## Pi-free core API
+
+Node applications can use the registry, mailbox, and transport-policy primitives without loading the pi extension or its TUI dependencies:
+
+```ts
+import { OutboundPolicy, deposit, deriveAddr, type Letter } from '@nicknisi/pi-relay/core';
+```
+
+The `@nicknisi/pi-relay/core` subpath exports a narrow record and alias registry, mailbox and ask/audit operations, presence and sweep utilities, policy guards and constants, and their public types. Filesystem-facing operations validate canonical relay addresses, aliases, and ask/message IDs before accessing the relay root; path constructors and raw persistence helpers remain internal. It depends only on Node built-ins. Pi and TUI are optional peers, so core-only installations do not fetch them. The package root remains the pi extension entry point; import `/core` from plain Node services and CLIs.
+
 ## Audit log
 
 Every deposit and every delivery appends one line-delimited JSON record to `<PI_RELAY_DIR>/audit.log` — written from the transport choke points so draining a letter as a receipt no longer destroys the evidence that it existed. Each line records the timestamp, the event (`deposit`/`deliver`), the letter kind, the from/to addresses, and the message id. **The full body is never logged** — only a short (≤80 char) whitespace-collapsed preview. The file is `0600`, append-only, and survives corrupt lines (skipped on parse). Read it with `/relay log [N]`.

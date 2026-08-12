@@ -17,6 +17,7 @@
   "files": [
     "dist",
     "index.ts",
+    "core.ts",
     "registry.ts",
     "mailbox.ts",
     "policy.ts",
@@ -27,7 +28,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./core": {
+      "types": "./dist/core.d.ts",
+      "default": "./dist/core.js"
     }
+  },
+  "scripts": {
+    "build": "node ../../scripts/build.ts"
   },
   "dependencies": {
     "typebox": "^1.1.0"
@@ -35,6 +43,14 @@
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
   },
   "pi": {
     "extensions": [
