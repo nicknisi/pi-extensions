@@ -54,20 +54,17 @@ The extraction loader can be aborted with Esc, which cancels the whole flow.
 
 ## Configuration
 
-No config files are read. No environment variables are read directly.
+Optional global config: `~/.pi/agent/configs/answer.json`. Changes take effect on the next session or after `/reload`.
 
-### Extraction model selection
-
-Hardcoded preference list (`EXTRACTION_MODEL_PREFERENCES` in `index.ts`):
-
-```ts
-[
-  { provider: 'anthropic', modelId: 'claude-fable-5' },
-  { provider: 'anthropic', modelId: 'claude-opus-5' },
-];
+```json
+{
+  "extractionModels": ["anthropic/claude-fable-5", "anthropic/claude-opus-5"]
+}
 ```
 
-The first model that both exists in `ctx.modelRegistry` and passes `getApiKeyAndHeaders()` is used. The current session model (`ctx.model`) is **not** used for extraction — only checked for presence as a guard. To change the extraction model you must edit the source. API keys come from pi's normal model auth (env vars / models.json per pi's rules).
+`extractionModels` is a non-empty ordered list of `provider/model-id` strings. The first model that both exists in `ctx.modelRegistry` and passes `getApiKeyAndHeaders()` is used. Model IDs may contain additional slashes; only the first slash separates the provider. Missing or invalid config falls back to the list above and invalid config emits a warning. See [`answer.example.json`](./answer.example.json).
+
+The current session model (`ctx.model`) is **not** used for extraction—only checked for presence as a guard. API keys come from Pi's normal model authentication.
 
 ## Dependencies
 
@@ -80,7 +77,7 @@ No third-party npm dependencies.
 
 ## Caveats
 
-- **Hardcoded extraction models.** Both preferences are Anthropic models. With no Anthropic key configured, the command errors out listing what it checked. The code comment notes there is no provider-specific reasoning override because both candidates are Anthropic.
+- **Extraction-model availability.** If none of the configured candidates exist with working authentication, the command errors out listing every model it checked.
 - **Pi internals:** depends on `ctx.sessionManager.getBranch()` entry shapes (`entry.type === "message"`, `message.role`, `message.stopReason === "stop"`, content part `{ type: "text", text }`), `ctx.modelRegistry.find/getApiKeyAndHeaders/getProvider`, `ctx.ui.custom` component contract, and `pi.sendUserMessage(..., { deliverAs: "followUp" })`. Any of these changing across pi versions will break it.
 - **Editor render slicing.** `AnswerComponent.render` strips the first and last lines of the embedded `Editor.render()` output (`editorLines[1..len-2]`) assuming the Editor wraps its content in a border frame. If pi-tui's `Editor` render shape changes, answers will render wrong.
 - **Extraction is heuristic at the edges.** The LLM prompt tries to keep questions self-contained, but the regex fallback (`fallbackExtractQuestions`) is naive — it splits on sentence boundaries ending in `?` and can produce context-free or false-positive questions when extraction JSON parsing fails.
