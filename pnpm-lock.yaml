@@ -88,6 +88,8 @@ importers:
 
   packages/composer: {}
 
+  packages/fast: {}
+
   packages/handoff:
     dependencies:
       '@nicknisi/pi-shared':

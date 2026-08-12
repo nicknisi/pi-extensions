@@ -1,0 +1,40 @@
+{
+  "name": "@nicknisi/pi-fast",
+  "version": "0.1.0",
+  "description": "Toggle faster premium inference for supported Claude and Codex models",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-package"
+  ],
+  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/fast#readme",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicknisi/pi-extensions.git",
+    "directory": "packages/fast"
+  },
+  "files": [
+    "dist",
+    "index.ts",
+    "config.ts",
+    "fast.ts",
+    "README.md",
+    "fast.example.json"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
