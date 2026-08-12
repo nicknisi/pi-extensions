@@ -16,7 +16,8 @@
   },
   "files": [
     "dist",
-    "index.ts"
+    "index.ts",
+    "fleet.ts"
   ],
   "type": "module",
   "exports": {

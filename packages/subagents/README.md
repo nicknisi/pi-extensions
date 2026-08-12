@@ -5,9 +5,9 @@ First-party subagent dispatch and fleet for pi — fan out parallel child agents
 ## What it adds
 
 - **`dispatch` tool** (model-facing) — fan out up to 8 child agents in parallel. Each task gets its own prompt, optional label/model/system-prompt, and a tool allowlist (default read-only: `read`, `grep`, `find`, `ls`). Typed per-task results aggregate into one tool result. `background: true` runs detached and surfaces completion via a transcript message. Tasks whose allowlist includes `edit`, `write`, or `bash` mutate the shared working tree: they must declare `allowTreeMutation: true` (otherwise that task is refused) and always run **sequentially**, one at a time, after the parallel read-only batch completes — never concurrently with each other or the read-only batch.
-- **`fleet` tool** (model-facing) — `list` recent runs (live + persisted, across extensions using the shared runtime) or fetch a `result` by runId. This is how the model checks on background dispatches.
-- **`/fleet` command** — user-facing run table.
-- **Fleet radar overlay + statusline** — `Alt+Ctrl+F` (rebind via `~/.pi/agent/keybindings.json`) opens a tmux-choose-tree-style overlay listing every run as a per-child lane: status, model, current tool, token burn, last activity. `Enter` inspects the live run transcript; `c` cancels the focused run (wired into the cascading-cancellation registry); `Esc` closes. While any run is in flight, an ambient footer segment (`ctx.ui.setStatus`) shows live `working · done · failed` counts.
+- **`fleet` tool** (model-facing) — `list` shows queued/running runs owned by the current Pi session. Pass `scope: "all"` for persisted machine-wide history, or fetch a `result` directly by runId. This is how the model checks on background dispatches without mixing in unrelated sessions.
+- **`/fleet` command** — user-facing active-run table. `/fleet all` opens persisted machine-wide history; `/fleet <runId-prefix>` jumps to a historical result.
+- **Fleet radar overlay + statusline** — `Alt+Ctrl+F` (rebind via `~/.pi/agent/keybindings.json`) opens a tmux-choose-tree-style overlay listing active runs owned by the current Pi session as per-child lanes: status, model, current tool, token burn, last activity. `Enter` inspects the live run transcript; `c` cancels the focused run (wired into the cascading-cancellation registry); `Esc` closes. The ambient footer segment (`ctx.ui.setStatus`) exists only while this session owns queued/running subagents; runs from other sessions never make it appear.
 - **`/patches` command** — staging area for worktree-subagent `.patch` handoffs. Opens a keyboard-driven overlay over every pending patch with diffstat and a pre-flight stamp (`clean` / `conflicts` / `stale`, checked via `git apply --check` **without** applying). `Enter` applies the whole patch (`git apply --3way`); `e` expands the full diff with per-hunk navigation (`n`/`p`); `s` applies the focused hunk; `d` discards. Apply/discard decisions persist to `~/.pi/agent/subagent-patches/state.json` so `/patches` survives restart.
 - **`&` dispatch prefix** — `&scout how does auth work` at position zero dispatches a single subagent inline (reusing the same spawn/cancel path as the `dispatch` tool). Live progress shows in a widget above the editor; the final result lands as a collapsible `subagents:inline` transcript block rendered with the same vocabulary as a dispatch tool result, and the answer reaches the model's context. Each dispatch is captured as a session custom entry so it survives restart.
 - **`/again [amendment]` command** — re-fires the last `&` dispatch verbatim, or with the amendment appended.
@@ -31,7 +31,8 @@ Check the fleet for that background run's result.
 or directly:
 
 ```text
-/fleet
+/fleet       # active runs owned by this session
+/fleet all   # persisted machine-wide history
 ```
 
 ### Inline `&` dispatch
@@ -103,7 +104,7 @@ The one residual exposure is a hard `SIGKILL` of the host: in-process children d
 
 `dispatch` maps each task to a `spawn()` call on a shared in-process runtime (`namespace: "subagents"`). Foreground tasks run concurrently (the runtime caps parallelism, default 4) and their results return as the tool output. Background tasks use `spawnDetached()` and report completion via a transcript message.
 
-Every run persists a record to `~/.pi/agent/subagent-runs/subagents/<runId>.json` (status, timing, usage, bounded output). Because pi isolates module state per extension, this directory is the cross-extension fleet view: any extension using `@nicknisi/pi-shared` with the same artifacts root shows up in `/fleet`.
+Every run persists a record to `~/.pi/agent/subagent-runs/subagents/<runId>.json` (status, timing, usage, bounded output, and owning parent-session path). Because pi isolates module state per extension, this directory is the cross-extension fleet view: any extension using `@nicknisi/pi-shared` with the same artifacts root can appear in `/fleet all`. The default fleet filters those records to queued/running children whose `ownerSession` matches the current Pi session.
 
 ### Standard pi session mirror
 
@@ -130,7 +131,7 @@ None. No config files, no environment variables.
 
 - **In-process means no crash isolation.** Children share the parent session's event loop and memory; a pathological child can hurt the host. Untrusted or heavy parallel work should stay on pi-subagents (or a future RPC transport) until this platform grows an isolation option.
 - **Background completion is a notification, not a turn.** The completion message lands in the transcript but doesn't drive the agent — the model learns results when it next acts (or when asked to check `fleet`).
-- **The fleet is per-machine, per-agent-dir.** Records live under `~/.pi/agent/subagent-runs/` and are garbage-collected at startup after 7 days (along with their patches and worktrees).
+- **Fleet history is per-machine, per-agent-dir.** `/fleet all` reads records under `~/.pi/agent/subagent-runs/`; they are garbage-collected at startup after 7 days (along with their patches and worktrees). The default `/fleet`, shortcut, tool list, and footer are current-session active views.
 - **Background runs live only as long as the host session.** They are detached in-process children; cancel them via the `fleet` tool (`action: 'cancel'`), or let the `session_shutdown` handler abort them deterministically on quit/reload/session-replacement (see **Cascading cancellation** above). Running records left by a hard exit are reaped as `aborted` (and their worktrees removed) on the next host startup.
 - Depends on pi SDK internals (`createAgentSession`, `DefaultResourceLoader` flags, `SessionManager.inMemory`) that could change across pi versions — runtime-aliased to the host at load time, but type-level drift would surface at extension load.
 - **The recursion guard has a hole.** The in-process depth guard only covers spawns made through the shared runtime; a child that itself shells out to `pi -p` via bash starts a fresh process with none of that context — the same exposure as any pi session with bash access.

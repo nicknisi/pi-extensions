@@ -142,6 +142,8 @@ export interface SpawnOptions {
    * when cwd is not inside a git repository.
    */
   worktree?: boolean;
+  /** Owning pi session file used to group the run in operational fleet views. */
+  ownerSession?: string;
   /**
    * Owning pi session file path. When set, the run is ALSO persisted as a
    * standard pi session JSONL via the real `SessionManager` into the default
@@ -208,6 +210,8 @@ export interface RunRecord {
   error?: string | undefined;
   /** Host pi process id — reaping distinguishes ghosts from live runs. */
   hostPid?: number | undefined;
+  /** Owning pi session file, used to scope operational fleet views. */
+  ownerSession?: string | undefined;
   /** Last N child events (turns/tool calls), bounded. */
   transcript?: TranscriptEntry[] | undefined;
   worktree?: WorktreeInfo | undefined;
@@ -661,6 +665,8 @@ export function createSubagentRuntime(options: {
     };
     if (opts.agent) record.agent = opts.agent;
     if (opts.model) record.model = opts.model;
+    const ownerSession = opts.ownerSession ?? opts.parentSession;
+    if (ownerSession) record.ownerSession = ownerSession;
     recordRun(record);
 
     // Ecosystem recursion guard — honored, not namespaced. See header.
