@@ -4,6 +4,7 @@
  */
 
 import * as fs from 'node:fs';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -25,6 +26,7 @@ import {
   pendingAsks,
   previewBody,
   readAudit,
+  readIncomingAsk,
   readOutgoingAsk,
   resolveAskByRef,
   trackIncomingAsk,
@@ -51,9 +53,10 @@ import {
   type SessionRecord,
 } from './registry.js';
 
+const require = createRequire(import.meta.url);
 const dirs: string[] = [];
 function tmpRoot(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-relay-test-'));
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'pi-relay-test-')));
   dirs.push(dir);
   return dir;
 }
@@ -61,6 +64,33 @@ function tmpRoot(): string {
 afterEach(() => {
   while (dirs.length > 0) fs.rmSync(dirs.pop()!, { recursive: true, force: true });
 });
+
+let swapSequence = 0;
+function swapWhenPinned(target: string, replacement: string, operation: () => void): string {
+  const parked = `${target}.pinned-${++swapSequence}`;
+  const identity = fs.statSync(target);
+  const mutableFs = require('node:fs') as { fstatSync: typeof fs.fstatSync };
+  const originalFstatSync = mutableFs.fstatSync;
+  let swapped = false;
+  mutableFs.fstatSync = ((fd: number) => {
+    const stat = originalFstatSync(fd);
+    if (!swapped && stat.dev === identity.dev && stat.ino === identity.ino) {
+      fs.renameSync(target, parked);
+      fs.renameSync(replacement, target);
+      swapped = true;
+    }
+    return stat;
+  }) as typeof fs.fstatSync;
+  syncBuiltinESMExports();
+  try {
+    operation();
+  } finally {
+    mutableFs.fstatSync = originalFstatSync;
+    syncBuiltinESMExports();
+  }
+  expect(swapped).toBe(true);
+  return parked;
+}
 
 function record(over: Partial<SessionRecord> = {}): SessionRecord {
   const now = Date.now();
@@ -102,6 +132,22 @@ describe('registry', () => {
     expect(presenceOf(record({ lastSeenAt: Date.now() - 60_000 }))).toBe('stalled');
     expect(presenceOf(record({ offline: true }))).toBe('offline');
     expect(presenceOf(record({ pid: 2_000_000_000 }))).toBe('offline'); // dead pid
+  });
+
+  it('uses random exclusive temp files without overwriting a predictable temp', () => {
+    const root = tmpRoot();
+    const value = record();
+    const outside = path.join(root, 'outside');
+    const predictable = path.join(root, `${value.addr}.json.${process.pid}.tmp`);
+    fs.writeFileSync(outside, 'outside-sentinel');
+    fs.symlinkSync(outside, predictable, 'file');
+
+    writeRecord(root, value);
+    writeRecord(root, { ...value, name: 'updated' });
+
+    expect(fs.readFileSync(outside, 'utf8')).toBe('outside-sentinel');
+    expect(fs.lstatSync(predictable).isSymbolicLink()).toBe(true);
+    expect(readRecord(root, value.addr)?.name).toBe('updated');
   });
 
   it('listing has no side effects and survives garbage files', () => {
@@ -237,6 +283,152 @@ describe('mailbox', () => {
     expect(unreadCount(root, addr)).toBe(1);
     // "resume": drain-on-start
     expect(drain(root, addr).map((l) => l.body)).toEqual(['while you were out']);
+  });
+});
+
+describe('descriptor-relative filesystem safety', () => {
+  it('keeps record reads on a pinned root after the configured root is swapped', () => {
+    const root = tmpRoot();
+    const replacement = `${root}.replacement`;
+    fs.mkdirSync(replacement);
+    writeRecord(root, record({ name: 'pinned' }));
+    writeRecord(replacement, record({ name: 'attacker' }));
+
+    const result: { current: SessionRecord | null } = { current: null };
+    const parked = swapWhenPinned(root, replacement, () => {
+      result.current = readRecord(root, record().addr);
+    });
+
+    expect(result.current?.name).toBe('pinned');
+    expect(JSON.parse(fs.readFileSync(path.join(root, `${record().addr}.json`), 'utf8')).name).toBe('attacker');
+    expect(JSON.parse(fs.readFileSync(path.join(parked, `${record().addr}.json`), 'utf8')).name).toBe('pinned');
+  });
+
+  it('deletes aliases through the pinned aliases descriptor after a child swap', () => {
+    const root = tmpRoot();
+    writeAlias(root, { name: 'ci', addr: 'aaaa1111bbbb', sessionId: 'pinned', claimedAt: 1 });
+    const aliases = path.join(root, 'aliases');
+    const replacement = path.join(root, 'aliases.replacement');
+    fs.mkdirSync(replacement);
+    fs.writeFileSync(path.join(replacement, 'ci.json'), '{"sessionId":"attacker"}');
+
+    const parked = swapWhenPinned(aliases, replacement, () => clearAlias(root, 'ci'));
+
+    expect(fs.existsSync(path.join(parked, 'ci.json'))).toBe(false);
+    expect(fs.readFileSync(path.join(aliases, 'ci.json'), 'utf8')).toContain('attacker');
+  });
+
+  it('appends audit records to the pinned root after a root swap', () => {
+    const root = tmpRoot();
+    const replacement = `${root}.replacement`;
+    fs.mkdirSync(replacement);
+    fs.writeFileSync(path.join(root, 'audit.log'), '');
+    fs.writeFileSync(path.join(replacement, 'audit.log'), 'attacker-sentinel\n');
+
+    const parked = swapWhenPinned(root, replacement, () =>
+      appendAudit(root, {
+        ts: 1,
+        event: 'deliver',
+        kind: 'message',
+        from: 'aaaa1111bbbb',
+        to: 'cccc2222dddd',
+        messageId: 'audit-race',
+        preview: 'safe',
+      }),
+    );
+
+    expect(fs.readFileSync(path.join(parked, 'audit.log'), 'utf8')).toContain('audit-race');
+    expect(fs.readFileSync(path.join(root, 'audit.log'), 'utf8')).toBe('attacker-sentinel\n');
+  });
+
+  it('deposits and drains through pinned inbox descriptors after child swaps', () => {
+    const depositRoot = tmpRoot();
+    const addr = 'race00000001';
+    const inbox = path.join(depositRoot, `${addr}.inbox`);
+    const replacement = `${inbox}.replacement`;
+    fs.mkdirSync(inbox);
+    fs.mkdirSync(replacement);
+    const deposited = letter({ id: 'deposit-race', ts: 1000 });
+
+    const parkedInbox = swapWhenPinned(inbox, replacement, () => deposit(depositRoot, addr, deposited));
+    expect(fs.readdirSync(inbox)).toEqual([]);
+    expect(fs.readdirSync(parkedInbox).some((name) => name.endsWith('.json'))).toBe(true);
+
+    const drainRoot = tmpRoot();
+    const drainInbox = path.join(drainRoot, `${addr}.inbox`);
+    const drainReplacement = `${drainInbox}.replacement`;
+    fs.mkdirSync(drainInbox);
+    fs.mkdirSync(drainReplacement);
+    fs.writeFileSync(path.join(drainInbox, '1000-pinned.json'), JSON.stringify(letter({ id: 'drain-race' })));
+    fs.writeFileSync(path.join(drainReplacement, '1000-attacker.json'), JSON.stringify(letter({ body: 'attacker' })));
+
+    let drained: Letter[] = [];
+    const parkedDrain = swapWhenPinned(drainInbox, drainReplacement, () => {
+      drained = drain(drainRoot, addr);
+    });
+    expect(drained.map((entry) => entry.id)).toEqual(['drain-race']);
+    expect(fs.readdirSync(parkedDrain)).toEqual([]);
+    expect(fs.readdirSync(drainInbox)).toEqual(['1000-attacker.json']);
+  });
+
+  it('reads and clears asks through the pinned asks descriptor after child swaps', () => {
+    const root = tmpRoot();
+    const addr = 'race00000002';
+    const ask = letter({ id: 'ask-race', kind: 'ask' });
+    trackIncomingAsk(root, addr, ask);
+    const asks = path.join(root, `${addr}.asks`);
+    const replacement = `${asks}.replacement`;
+    fs.mkdirSync(replacement);
+    fs.writeFileSync(
+      path.join(replacement, `${ask.id}.json`),
+      JSON.stringify(letter({ id: ask.id, body: 'attacker' })),
+    );
+
+    const result: { current: Letter | null } = { current: null };
+    const parked = swapWhenPinned(asks, replacement, () => {
+      result.current = readIncomingAsk(root, addr, ask.id);
+    });
+    expect(result.current?.body).toBe('hello');
+
+    const current = asks;
+    const secondReplacement = `${asks}.second-replacement`;
+    fs.mkdirSync(secondReplacement);
+    fs.writeFileSync(
+      path.join(secondReplacement, `${ask.id}.json`),
+      JSON.stringify(letter({ body: 'second-attacker' })),
+    );
+    const parkedReplacement = swapWhenPinned(current, secondReplacement, () => clearAsk(root, addr, ask.id));
+    expect(fs.existsSync(path.join(parkedReplacement, `${ask.id}.json`))).toBe(false);
+    expect(fs.existsSync(path.join(parked, `${ask.id}.json`))).toBe(true);
+    expect(fs.readFileSync(path.join(current, `${ask.id}.json`), 'utf8')).toContain('second-attacker');
+  });
+
+  it('keeps a watch on the pinned inbox and closes its descriptors', async () => {
+    const root = tmpRoot();
+    const descriptorDirectory = process.platform === 'darwin' ? '/dev/fd' : '/proc/self/fd';
+    const descriptorCount = () => fs.readdirSync(descriptorDirectory).length;
+    const addr = 'race00000003';
+    const inbox = path.join(root, `${addr}.inbox`);
+    const replacement = `${inbox}.replacement`;
+    fs.mkdirSync(inbox);
+    fs.mkdirSync(replacement);
+    let calls = 0;
+    let unwatch = () => {};
+    const before = descriptorCount();
+
+    const parked = swapWhenPinned(inbox, replacement, () => {
+      unwatch = watchInbox(root, addr, () => calls++);
+    });
+    expect(descriptorCount()).toBeGreaterThanOrEqual(before + 2);
+    try {
+      fs.writeFileSync(path.join(parked, 'mail.json'), '{}');
+      const deadline = Date.now() + 2000;
+      while (calls === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(calls).toBeGreaterThan(0);
+    } finally {
+      unwatch();
+    }
+    expect(descriptorCount()).toBe(before);
   });
 });
 

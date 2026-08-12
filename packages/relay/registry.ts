@@ -16,8 +16,14 @@
  */
 
 import * as crypto from 'node:crypto';
-import * as fs from 'node:fs';
 import * as path from 'node:path';
+import {
+  assertPathSegment,
+  openRelayRoot,
+  rethrowFilesystemError,
+  RelayDirectoryHandle,
+  RelayFilesystemError,
+} from './filesystem.js';
 
 export interface SessionRecord {
   addr: string;
@@ -42,23 +48,22 @@ export function deriveAddr(cwd: string, sessionId: string): string {
 }
 
 export function ensureRoot(root: string): void {
-  fs.mkdirSync(root, { recursive: true, mode: 0o700 });
-  try {
-    fs.chmodSync(root, 0o700);
-  } catch {
-    // best-effort on filesystems that support modes
-  }
+  const directory = openRelayRoot(root, true)!;
+  directory.close();
 }
 
 export function recordPath(root: string, addr: string): string {
+  assertPathSegment(addr, 'relay address');
   return path.join(root, `${addr}.json`);
 }
 
 export function inboxDir(root: string, addr: string): string {
+  assertPathSegment(addr, 'relay address');
   return path.join(root, `${addr}.inbox`);
 }
 
 export function asksDir(root: string, addr: string): string {
+  assertPathSegment(addr, 'relay address');
   return path.join(root, `${addr}.asks`);
 }
 
@@ -80,15 +85,23 @@ export function aliasesDir(root: string): string {
 }
 
 export function aliasPath(root: string, name: string): string {
+  assertPathSegment(name, 'relay alias');
   return path.join(aliasesDir(root), `${name}.json`);
 }
 
 export function writeAlias(root: string, alias: AliasRecord): void {
-  const file = aliasPath(root, alias.name);
-  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(alias, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, file);
+  if (!isValidAliasName(alias.name)) throw new TypeError(`Invalid relay alias: ${alias.name}`);
+  const relay = openRelayRoot(root, true)!;
+  try {
+    const aliases = relay.openDirectory('aliases', true)!;
+    try {
+      aliases.writeFileAtomic(`${alias.name}.json`, JSON.stringify(alias, null, 2));
+    } finally {
+      aliases.close();
+    }
+  } finally {
+    relay.close();
+  }
 }
 
 /** Alias names: lowercase alnum start, then alnum/_/-, 1-32 chars. */
@@ -96,35 +109,65 @@ export function isValidAliasName(name: string): boolean {
   return /^[a-z0-9][a-z0-9_-]{0,31}$/.test(name);
 }
 
+function readAliasFromDirectory(directory: RelayDirectoryHandle, name: string): AliasRecord | null {
+  const raw = directory.readFile(`${name}.json`);
+  if (raw === null) return null;
+  const parsed = JSON.parse(raw);
+  if (parsed && typeof parsed.name === 'string' && typeof parsed.addr === 'string') return parsed as AliasRecord;
+  return null;
+}
+
 export function readAlias(root: string, name: string): AliasRecord | null {
   // The name can come from LLM-controlled tool input — never let it reach
   // the filesystem unvalidated (e.g. '@../../../../tmp/x').
   if (!isValidAliasName(name)) return null;
+  const relay = openRelayRoot(root);
+  if (relay === null) return null;
   try {
-    const parsed = JSON.parse(fs.readFileSync(aliasPath(root, name), 'utf8'));
-    if (parsed && typeof parsed.name === 'string' && typeof parsed.addr === 'string') {
-      return parsed as AliasRecord;
+    const aliases = relay.openDirectory('aliases');
+    if (aliases === null) return null;
+    try {
+      return readAliasFromDirectory(aliases, name);
+    } catch (error) {
+      rethrowFilesystemError(error);
+      return null;
+    } finally {
+      aliases.close();
     }
-    return null;
-  } catch {
-    return null;
+  } finally {
+    relay.close();
   }
 }
 
 export function listAliases(root: string): AliasRecord[] {
-  let entries: fs.Dirent[];
+  const relay = openRelayRoot(root);
+  if (relay === null) return [];
   try {
-    entries = fs.readdirSync(aliasesDir(root), { withFileTypes: true });
-  } catch {
+    const aliases = relay.openDirectory('aliases');
+    if (aliases === null) return [];
+    try {
+      const out: AliasRecord[] = [];
+      for (const entry of aliases.readDirectory()) {
+        if (!entry.name.endsWith('.json')) continue;
+        if (entry.isSymbolicLink()) throw new RelayFilesystemError(`Refusing symlinked relay alias: ${entry.name}`);
+        if (!entry.isFile()) continue;
+        try {
+          const alias = readAliasFromDirectory(aliases, entry.name.slice(0, -'.json'.length));
+          if (alias) out.push(alias);
+        } catch (error) {
+          rethrowFilesystemError(error);
+        }
+      }
+      return out.sort((a, b) => a.claimedAt - b.claimedAt);
+    } finally {
+      aliases.close();
+    }
+  } catch (error) {
+    rethrowFilesystemError(error);
     return [];
+  } finally {
+    relay.close();
   }
-  const out: AliasRecord[] = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-    const alias = readAlias(root, entry.name.slice(0, -'.json'.length));
-    if (alias) out.push(alias);
-  }
-  return out.sort((a, b) => a.claimedAt - b.claimedAt);
 }
 
 /** Last-claim-wins: overwrites any prior owner. */
@@ -135,48 +178,80 @@ export function claimAlias(root: string, name: string, addr: string, sessionId: 
 }
 
 export function clearAlias(root: string, name: string): void {
+  if (!isValidAliasName(name)) return;
+  const relay = openRelayRoot(root);
+  if (relay === null) return;
   try {
-    fs.unlinkSync(aliasPath(root, name));
-  } catch {
-    // already gone
+    const aliases = relay.openDirectory('aliases');
+    if (aliases === null) return;
+    try {
+      aliases.unlinkFile(`${name}.json`);
+    } catch (error) {
+      rethrowFilesystemError(error);
+      // deletion remains best-effort for ordinary I/O failures
+    } finally {
+      aliases.close();
+    }
+  } finally {
+    relay.close();
   }
 }
 
 export function writeRecord(root: string, record: SessionRecord): void {
-  ensureRoot(root);
-  const file = recordPath(root, record.addr);
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(record, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, file);
+  const relay = openRelayRoot(root, true)!;
+  try {
+    relay.writeFileAtomic(`${record.addr}.json`, JSON.stringify(record, null, 2));
+  } finally {
+    relay.close();
+  }
+}
+
+function readRecordFromDirectory(directory: RelayDirectoryHandle, addr: string): SessionRecord | null {
+  const raw = directory.readFile(`${addr}.json`);
+  if (raw === null) return null;
+  const parsed = JSON.parse(raw);
+  if (parsed && typeof parsed.addr === 'string' && typeof parsed.pid === 'number') return parsed as SessionRecord;
+  return null;
 }
 
 export function readRecord(root: string, addr: string): SessionRecord | null {
+  assertPathSegment(addr, 'relay address');
+  const relay = openRelayRoot(root);
+  if (relay === null) return null;
   try {
-    const parsed = JSON.parse(fs.readFileSync(recordPath(root, addr), 'utf8'));
-    if (parsed && typeof parsed.addr === 'string' && typeof parsed.pid === 'number') {
-      return parsed as SessionRecord;
-    }
+    return readRecordFromDirectory(relay, addr);
+  } catch (error) {
+    rethrowFilesystemError(error);
     return null;
-  } catch {
-    return null;
+  } finally {
+    relay.close();
   }
 }
 
 /** Read-only listing, oldest first. Never mutates anything. */
 export function listRecords(root: string): SessionRecord[] {
-  let entries: fs.Dirent[];
+  const relay = openRelayRoot(root);
+  if (relay === null) return [];
   try {
-    entries = fs.readdirSync(root, { withFileTypes: true });
-  } catch {
+    const out: SessionRecord[] = [];
+    for (const entry of relay.readDirectory()) {
+      if (!entry.name.endsWith('.json')) continue;
+      if (entry.isSymbolicLink()) throw new RelayFilesystemError(`Refusing symlinked relay record: ${entry.name}`);
+      if (!entry.isFile()) continue;
+      try {
+        const record = readRecordFromDirectory(relay, entry.name.slice(0, -'.json'.length));
+        if (record) out.push(record);
+      } catch (error) {
+        rethrowFilesystemError(error);
+      }
+    }
+    return out.sort((a, b) => a.startedAt - b.startedAt);
+  } catch (error) {
+    rethrowFilesystemError(error);
     return [];
+  } finally {
+    relay.close();
   }
-  const out: SessionRecord[] = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-    const record = readRecord(root, entry.name.slice(0, -'.json'.length));
-    if (record) out.push(record);
-  }
-  return out.sort((a, b) => a.startedAt - b.startedAt);
 }
 
 function pidAlive(pid: number): boolean {
@@ -196,19 +271,26 @@ export function presenceOf(record: SessionRecord, now: number = Date.now()): Pre
   return now - record.lastSeenAt < HEARTBEAT_STALE_MS ? 'live' : 'stalled';
 }
 
-function dirHasJson(dir: string): boolean {
+function dirHasJson(root: string, name: string): boolean {
+  const relay = openRelayRoot(root);
+  if (relay === null) return false;
   try {
-    return fs.readdirSync(dir).some((f) => f.endsWith('.json'));
-  } catch {
+    const directory = relay.openDirectory(name);
+    if (directory === null) return false;
+    try {
+      return directory.readDirectory().some((entry) => {
+        if (!entry.name.endsWith('.json')) return false;
+        if (entry.isSymbolicLink()) throw new RelayFilesystemError(`Refusing symlinked relay entry: ${entry.name}`);
+        return entry.isFile();
+      });
+    } finally {
+      directory.close();
+    }
+  } catch (error) {
+    rethrowFilesystemError(error);
     return false;
-  }
-}
-
-function rmrf(target: string): void {
-  try {
-    fs.rmSync(target, { recursive: true, force: true });
-  } catch {
-    // sweep is best-effort
+  } finally {
+    relay.close();
   }
 }
 
@@ -228,16 +310,24 @@ function rmrf(target: string): void {
 export function sweep(root: string, now: number = Date.now(), sessionExists?: (sessionId: string) => boolean): void {
   for (const record of listRecords(root)) {
     if (presenceOf(record, now) !== 'offline') continue;
-    const hasMail = dirHasJson(inboxDir(root, record.addr)) || dirHasJson(asksDir(root, record.addr));
+    const hasMail = dirHasJson(root, `${record.addr}.inbox`) || dirHasJson(root, `${record.addr}.asks`);
     const expired = now - record.lastSeenAt >= SWEEP_MAIL_KEEP_MS;
     if (hasMail && !expired) continue;
     if (!expired && (sessionExists?.(record.sessionId) ?? true)) continue;
-    rmrf(inboxDir(root, record.addr));
-    rmrf(asksDir(root, record.addr));
-    try {
-      fs.unlinkSync(recordPath(root, record.addr));
-    } catch {
-      // already gone
+    const relay = openRelayRoot(root);
+    if (relay !== null) {
+      try {
+        relay.removeDirectory(`${record.addr}.inbox`);
+        relay.removeDirectory(`${record.addr}.asks`);
+        try {
+          relay.unlinkFile(`${record.addr}.json`);
+        } catch (error) {
+          rethrowFilesystemError(error);
+          // deletion remains best-effort for ordinary I/O failures
+        }
+      } finally {
+        relay.close();
+      }
     }
   }
   // Aliases are swept when the owning session dies: an alias whose record

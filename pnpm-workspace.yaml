@@ -4,6 +4,7 @@ packages:
 allowBuilds:
   '@google/genai': set this to true or false
   esbuild: set this to true or false
+  koffi: false
   protobufjs: set this to true or false
 
 # Transitive deps of the pi packages (typecheck-only here); their postinstalls aren't needed.

@@ -34,6 +34,7 @@ import {
   clearAsk,
   drain,
   deposit,
+  outgoingAskIds,
   pendingAsks,
   previewBody,
   readAudit,
@@ -770,15 +771,7 @@ export default function relay(pi: ExtensionAPI) {
 
 /** Find an outgoing ask id by exact id or unique prefix (for cancel ergonomics). */
 function resolveOutAskId(root: string, addr: string, idOrPrefix: string): string | undefined {
-  let names: string[];
-  try {
-    names = fs.readdirSync(path.join(root, `${addr}.asks`));
-  } catch {
-    return undefined;
-  }
-  const ids = names
-    .filter((f) => f.startsWith('out-') && f.endsWith('.json'))
-    .map((f) => f.slice('out-'.length, -'.json'.length));
+  const ids = outgoingAskIds(root, addr);
   if (ids.includes(idOrPrefix)) return idOrPrefix;
   const matches = ids.filter((id) => id.startsWith(idOrPrefix));
   return matches.length === 1 ? matches[0] : undefined;

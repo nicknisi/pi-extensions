@@ -18,7 +18,7 @@ const packageJson = JSON.parse(fs.readFileSync(path.join(relayDir, 'package.json
 const fixtures: string[] = [];
 
 function fixture(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-relay-core-'));
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'pi-relay-core-')));
   fixtures.push(dir);
   return dir;
 }
@@ -92,6 +92,116 @@ describe('/core filesystem boundary', () => {
     expect(fs.readdirSync(base)).toEqual([]);
   });
 
+  it('rejects symlinked roots and every symlinked ancestor component', () => {
+    const base = fixture();
+    const outside = path.join(base, 'outside');
+    const root = path.join(base, 'relay');
+    const addr = core.deriveAddr('/receiver', 'session');
+    fs.mkdirSync(outside);
+    fs.symlinkSync(outside, root, 'dir');
+
+    expect(() => core.listRecords(root)).toThrow(/symlink/i);
+    expect(() => core.deposit(root, addr, letter())).toThrow(/symlink/i);
+    expect(fs.readdirSync(outside)).toEqual([]);
+
+    fs.unlinkSync(root);
+    const ancestor = path.join(base, 'ancestor');
+    fs.symlinkSync(outside, ancestor, 'dir');
+    const nestedRoot = path.join(ancestor, 'nested', 'relay');
+    expect(() => core.listRecords(nestedRoot)).toThrow(/symlink/i);
+    expect(() => core.deposit(nestedRoot, addr, letter())).toThrow(/symlink/i);
+    expect(fs.readdirSync(outside)).toEqual([]);
+  });
+
+  it('rejects symlinked inbox and ask directories in every access mode', async () => {
+    const base = fixture();
+    const root = path.join(base, 'relay');
+    const outside = path.join(base, 'outside');
+    const addr = core.deriveAddr('/receiver', 'session');
+    const validLetter = letter();
+    fs.mkdirSync(root);
+    fs.mkdirSync(outside);
+    fs.symlinkSync(outside, path.join(root, `${addr}.inbox`), 'dir');
+
+    for (const call of [
+      () => core.deposit(root, addr, validLetter),
+      () => core.drain(root, addr),
+      () => core.unreadCount(root, addr),
+      () => core.watchInbox(root, addr, () => {}),
+    ]) {
+      expect(call).toThrow(/symlink/i);
+    }
+    await expect(core.awaitReceipt(root, addr, validLetter, 1)).rejects.toThrow(/symlink/i);
+
+    fs.unlinkSync(path.join(root, `${addr}.inbox`));
+    fs.symlinkSync(outside, path.join(root, `${addr}.asks`), 'dir');
+    const out: core.OutAsk = {
+      askId: validLetter.id,
+      toAddr: core.deriveAddr('/peer', 'session'),
+      body: 'question',
+      ts: Date.now(),
+    };
+    for (const call of [
+      () => core.trackIncomingAsk(root, addr, validLetter),
+      () => core.trackOutgoingAsk(root, addr, out),
+      () => core.readIncomingAsk(root, addr, validLetter.id),
+      () => core.readOutgoingAsk(root, addr, validLetter.id),
+      () => core.clearAsk(root, addr, validLetter.id),
+      () => core.pendingAsks(root, addr),
+      () => core.resolveAskByRef(root, addr, validLetter.id),
+    ]) {
+      expect(call).toThrow(/symlink/i);
+    }
+    expect(fs.readdirSync(outside)).toEqual([]);
+  });
+
+  it('rejects symlinked aliases, records, letters, asks, and audit files without following them', () => {
+    const base = fixture();
+    const root = path.join(base, 'relay');
+    const outside = path.join(base, 'outside');
+    const addr = core.deriveAddr('/receiver', 'session');
+    const validLetter = letter();
+    const sentinel = path.join(outside, 'sentinel.json');
+    fs.mkdirSync(root);
+    fs.mkdirSync(outside);
+    fs.writeFileSync(sentinel, '{"sentinel":true}');
+
+    fs.symlinkSync(outside, path.join(root, 'aliases'), 'dir');
+    for (const call of [
+      () => core.claimAlias(root, 'ci', addr, 'session'),
+      () => core.readAlias(root, 'ci'),
+      () => core.listAliases(root),
+      () => core.clearAlias(root, 'ci'),
+    ]) {
+      expect(call).toThrow(/symlink/i);
+    }
+    fs.unlinkSync(path.join(root, 'aliases'));
+
+    fs.symlinkSync(sentinel, path.join(root, `${addr}.json`), 'file');
+    expect(() => core.readRecord(root, addr)).toThrow(/symlink/i);
+    expect(() => core.listRecords(root)).toThrow(/symlink/i);
+    fs.unlinkSync(path.join(root, `${addr}.json`));
+
+    const inbox = path.join(root, `${addr}.inbox`);
+    fs.mkdirSync(inbox);
+    fs.symlinkSync(sentinel, path.join(inbox, `${validLetter.ts}-${validLetter.id.slice(0, 6)}.json`), 'file');
+    expect(() => core.drain(root, addr)).toThrow(/symlink/i);
+    fs.rmSync(inbox, { recursive: true, force: true });
+
+    const asks = path.join(root, `${addr}.asks`);
+    fs.mkdirSync(asks);
+    fs.symlinkSync(sentinel, path.join(asks, `${validLetter.id}.json`), 'file');
+    expect(() => core.readIncomingAsk(root, addr, validLetter.id)).toThrow(/symlink/i);
+    expect(() => core.clearAsk(root, addr, validLetter.id)).toThrow(/symlink/i);
+    fs.rmSync(asks, { recursive: true, force: true });
+
+    fs.symlinkSync(sentinel, path.join(root, 'audit.log'), 'file');
+    expect(() => core.readAudit(root)).toThrow(/symlink/i);
+    expect(() => core.deposit(root, addr, validLetter)).toThrow(/symlink/i);
+    expect(fs.readFileSync(sentinel, 'utf8')).toBe('{"sentinel":true}');
+    expect(fs.existsSync(path.join(root, `${addr}.inbox`))).toBe(false);
+  });
+
   it('rejects traversal in aliases and ask/message identifiers', async () => {
     const base = fixture();
     const root = path.join(base, 'relay');
@@ -130,6 +240,11 @@ describe('/core filesystem boundary', () => {
   });
 });
 
+it('keeps the Pi extension entry importable', async () => {
+  const entry = await import('./index.js');
+  expect(typeof entry.default).toBe('function');
+});
+
 it('builds, packs, installs, and imports the real core package without Pi or TUI', () => {
   const base = fixture();
   const tarball = path.join(base, 'relay.tgz');
@@ -155,6 +270,7 @@ it('builds, packs, installs, and imports the real core package without Pi or TUI
   for (const target of Object.values(coreExport!)) {
     expect(fs.existsSync(path.join(installedDir, target))).toBe(true);
   }
+  expect(fs.existsSync(path.join(installedDir, 'filesystem.ts'))).toBe(true);
   expect(packageJson.peerDependenciesMeta['@earendil-works/pi-coding-agent']?.optional).toBe(true);
   expect(packageJson.peerDependenciesMeta['@earendil-works/pi-tui']?.optional).toBe(true);
   expect(fs.existsSync(path.join(appDir, 'node_modules', '@earendil-works', 'pi-coding-agent'))).toBe(false);

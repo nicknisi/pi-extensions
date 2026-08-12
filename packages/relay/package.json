@@ -18,6 +18,7 @@
     "dist",
     "index.ts",
     "core.ts",
+    "filesystem.ts",
     "registry.ts",
     "mailbox.ts",
     "policy.ts",
@@ -38,6 +39,7 @@
     "build": "node ../../scripts/build.ts"
   },
   "dependencies": {
+    "koffi": "^3.1.4",
     "typebox": "^1.1.0"
   },
   "peerDependencies": {

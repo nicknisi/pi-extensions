@@ -17,7 +17,7 @@ Node applications can use the registry, mailbox, and transport-policy primitives
 import { OutboundPolicy, deposit, deriveAddr, type Letter } from '@nicknisi/pi-relay/core';
 ```
 
-The `@nicknisi/pi-relay/core` subpath exports a narrow record and alias registry, mailbox and ask/audit operations, presence and sweep utilities, policy guards and constants, and their public types. Filesystem-facing operations validate canonical relay addresses, aliases, and ask/message IDs before accessing the relay root; path constructors and raw persistence helpers remain internal. It depends only on Node built-ins. Pi and TUI are optional peers, so core-only installations do not fetch them. The package root remains the pi extension entry point; import `/core` from plain Node services and CLIs.
+The `@nicknisi/pi-relay/core` subpath exports a narrow record and alias registry, mailbox and ask/audit operations, presence and sweep utilities, policy guards and constants, and their public types. Filesystem-facing operations validate canonical relay addresses, aliases, and ask/message IDs before accessing the relay root; path constructors and raw persistence helpers remain internal. Core uses Node built-ins plus Koffi's prebuilt native bridge for descriptor-relative Unix syscalls; Pi and TUI remain optional peers, so core-only installations do not fetch them. The package root remains the pi extension entry point; import `/core` from plain Node services and CLIs.
 
 ## Audit log
 
@@ -96,7 +96,7 @@ The directory is created `0700` and every file `0600` — other users on the mac
 
 ## Caveats
 
-- **Mailbox semantics are unix-only.** Delivery relies on atomic `renameSync`-over-existing, `fs.watch`, and `0600`/`0700` permission bits; Windows is untested and unsupported.
+- **Mailbox semantics support Linux and macOS only.** Relay rejects symlinks in every configured-root component, pins root and mailbox descriptors for each operation, and uses descriptor-relative `openat`/`renameat`/`unlinkat` calls, atomic rename-over-existing, descriptor polling for watches, and `0600`/`0700` permission bits. Windows is unsupported.
 - **One machine.** Delivery is a file landing in a directory; two sessions reach each other exactly when they share a filesystem. A container and its host cannot.
 - **Presence is heartbeat-accurate**, not instantaneous (within ~45s).
 - Delivery injects with `deliverAs: "steer"` (lands between tool calls) and `triggerTurn: true` (wakes an idle session).
