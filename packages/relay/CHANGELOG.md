@@ -1,5 +1,15 @@
 # @nicknisi/pi-relay
 
+## 0.3.0
+
+### Minor Changes
+
+- 28c1157: Add a narrow, traversal- and symlink-safe `@nicknisi/pi-relay/core` export for registry, mailbox, and policy operations and types, usable from plain Node without installing Pi or TUI packages. Harden Relay storage with canonical directories, no-follow file access, and random exclusive temporary files.
+
+### Patch Changes
+
+- b52f80a: Close Relay filesystem TOCTOU gaps by rejecting user-controlled symlinked root ancestors, safely canonicalizing protected system aliases such as macOS `/var`, and pinning root and child directory descriptors across record, alias, audit, mailbox, ask, receipt, watch, and durable inbox-claim operations. Mailbox filenames now contain the complete validated message id, preventing same-millisecond prefix collisions and allowing receipts to track the exact letter. Core consumers can atomically claim an inbox, recover stable claim/file tokens after a crash, safely read letters without following symlinks, and acknowledge or requeue them after fsyncing their own journal.
+
 ## 0.2.0
 
 ### Minor Changes
