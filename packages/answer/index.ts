@@ -1,6 +1,7 @@
 import type { Api, Model, UserMessage } from '@earendil-works/pi-ai';
 import { getModelProvider } from '@nicknisi/pi-shared';
 import { BorderedLoader, Theme, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { loadAnswerConfig, parseModelPreference, type ModelPreference } from './config.js';
 import {
   type Component,
   type Focusable,
@@ -55,17 +56,7 @@ Rules:
 - Do not add commentary outside the JSON object.
 - If there are no user-answerable questions, return {"questions": []}.`;
 
-interface ExtractionModelPreference {
-  provider: string;
-  modelId: string;
-}
-
-const EXTRACTION_MODEL_PREFERENCES: readonly ExtractionModelPreference[] = [
-  { provider: 'anthropic', modelId: 'claude-fable-5' },
-  { provider: 'anthropic', modelId: 'claude-opus-5' },
-];
-
-function formatExtractionModelPreferences(preferences: readonly ExtractionModelPreference[]): string {
+function formatExtractionModelPreferences(preferences: readonly ModelPreference[]): string {
   return preferences.map((candidate) => `${candidate.provider}/${candidate.modelId}`).join(', ');
 }
 
@@ -187,7 +178,7 @@ async function selectExtractionModel(
       model: Model<Api>,
     ) => Promise<{ ok: true; apiKey?: string; headers?: Record<string, string | null> } | { ok: false; error: string }>;
   },
-  preferences: readonly ExtractionModelPreference[],
+  preferences: readonly ModelPreference[],
 ): Promise<Model<Api> | undefined> {
   for (const candidate of preferences) {
     const model = modelRegistry.find(candidate.provider, candidate.modelId);
@@ -464,6 +455,13 @@ class AnswerComponent implements Component, Focusable {
 }
 
 export default function (pi: ExtensionAPI) {
+  const { config, warnings } = loadAnswerConfig();
+  const extractionModelPreferences = config.extractionModels.map((model) => parseModelPreference(model)!);
+
+  pi.on('session_start', async (_event, ctx) => {
+    for (const warning of warnings) ctx.ui.notify(warning, 'warning');
+  });
+
   const answerHandler = async (ctx: ExtensionContext) => {
     if (!ctx.hasUI) {
       ctx.ui.notify('answer requires interactive mode', 'error');
@@ -488,7 +486,6 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify('Using the last completed assistant message', 'warning');
     }
 
-    const extractionModelPreferences = EXTRACTION_MODEL_PREFERENCES;
     const extractionModel = await selectExtractionModel(ctx.modelRegistry, extractionModelPreferences);
     if (!extractionModel) {
       ctx.ui.notify(
@@ -530,7 +527,6 @@ export default function (pi: ExtensionAPI) {
               ...(auth.apiKey !== undefined && { apiKey: auth.apiKey }),
               ...(auth.headers !== undefined && { headers: auth.headers }),
               signal: loader.signal,
-              // (no provider-specific reasoning override; both fallback models are Anthropic)
             },
           )
           .result();
