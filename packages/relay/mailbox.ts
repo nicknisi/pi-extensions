@@ -4,11 +4,13 @@
  * Guarantees (each pinned by a test):
  * - A reader never sees half a letter: writers rename into place; readers
  *   only look at `*.json`.
- * - Nothing is delivered twice: a letter is unlinked as it is read, BEFORE
- *   the caller handles it.
+ * - A letter is deleted only once consumed: drain unlinks as it reads, and
+ *   the durable claim flow deletes only on explicit ack — a crashed or
+ *   failed delivery leaves the letter recoverable (recoverInboxClaims) or
+ *   requeueable.
  * - A corrupt letter is discarded on read, so it cannot poison every drain.
  * - Consumption is the receipt: the sender learns "delivered" only when the
- *   letter actually disappeared from the target's inbox.
+ *   letter actually disappeared from the target's inbox and durable claims.
  * - Every deposit and every delivery appends one append-only audit line —
  *   drain-as-receipt must not destroy evidence. The log never holds a full
  *   body, only a short preview.
@@ -103,8 +105,12 @@ export function deposit(root: string, toAddr: string, letter: Letter): void {
 /**
  * Take every letter in the inbox, oldest first. Each letter is unlinked as
  * it is read — before parsing — so it can never be delivered twice. The
- * tradeoff: a drained letter that is never delivered would be lost, so the
- * caller must re-deposit any letter it fails to deliver (checkInbox does).
+ * tradeoff: a drained letter that is never delivered is lost, so callers
+ * that can fail delivery should prefer the durable claim flow (claimInbox →
+ * readClaimedLetter → ackClaimedLetter/requeueClaimedLetter), which only
+ * deletes a letter once it has actually been handed off. The pi entry point
+ * (index.ts checkInbox) uses claims; drain remains for core consumers that
+ * handle drained letters synchronously.
  */
 export function drain(root: string, addr: string): Letter[] {
   assertPathSegment(addr, 'relay address');

@@ -51,7 +51,7 @@ main moved; rebase before you push.
 
 - **A mailbox outlives the process.** The address is a hash of the working directory and pi's session id, so a session resumed with `pi -c` answers to the same address. Mail sent to a closed session waits on disk and is read when it resumes — the common case when you're opening and closing terminals all day.
 - **The queue is inspectable.** Diagnosing delivery is `ls`, not instrumenting a transport.
-- **Consumption is the receipt.** The receiver deletes the exact full-message-id letter as it reads it, so the sender learns _delivered_ vs _queued_. A durable core claim remains queued until it is acknowledged; moving it into a claim does not produce a false receipt.
+- **Delivery is the receipt.** The receiver detaches its inbox into a durable claim and deletes each exact full-message-id letter only after the session has accepted it — a failed delivery is requeued for retry, and a crash mid-delivery leaves the letter recoverable on the next start (redeliveries are deduped by message id, seeded from the transcript). The sender therefore learns _delivered_ vs _queued_ honestly: a claimed-but-unacknowledged letter still reads _queued_, never a false receipt.
 
 ## Semantics
 

@@ -17,6 +17,7 @@ import {
   refusalUnknown,
 } from './format.js';
 import {
+  ackClaimedLetter,
   appendAudit,
   auditLogPath,
   awaitReceipt,
@@ -27,9 +28,11 @@ import {
   pendingAsks,
   previewBody,
   readAudit,
+  readClaimedLetter,
   readIncomingAsk,
   readOutgoingAsk,
   recoverInboxClaims,
+  requeueClaimedLetter,
   resolveAskByRef,
   trackIncomingAsk,
   trackOutgoingAsk,
@@ -256,6 +259,40 @@ describe('mailbox', () => {
     const l2 = letter({ id: 'rcpt-2', ts: Date.now() + 1 });
     deposit(root, addr, l2);
     expect(await awaitReceipt(root, addr, l2, 400)).toBe('queued');
+  });
+
+  it("a letter reads 'queued' to the sender until actually delivered (claim → fail → requeue → ack)", async () => {
+    // The pi entry point's delivery flow: a claimed letter stays 'queued' to
+    // the sender, a failed delivery returns it to the inbox for retry, and
+    // the receipt flips to 'delivered' only after acceptance (ack). A crash
+    // mid-claim leaves the letter recoverable instead of silently lost.
+    const root = tmpRoot();
+    const addr = 'inbox0000004';
+    const l1 = letter({ id: 'rcpt-3', ts: Date.now() });
+    deposit(root, addr, l1);
+
+    const claim = claimInbox(root, addr)!;
+    expect(claim.fileTokens).toHaveLength(1);
+    // Claimed but not yet delivered: the sender must NOT see 'delivered'.
+    expect(await awaitReceipt(root, addr, l1, 400)).toBe('queued');
+    expect(readClaimedLetter(root, addr, claim.claimToken, claim.fileTokens[0]!)?.id).toBe(l1.id);
+
+    // Delivery failure: requeue returns the letter to the live inbox, and a
+    // later claim picks it up again.
+    expect(requeueClaimedLetter(root, addr, claim.claimToken, claim.fileTokens[0]!)).toBe(true);
+    expect(unreadCount(root, addr)).toBe(1);
+    expect(recoverInboxClaims(root, addr)).toEqual([]);
+
+    const retry = claimInbox(root, addr)!;
+    expect(retry.fileTokens).toEqual(claim.fileTokens);
+
+    // Crash after delivery but before ack: the letter is recoverable.
+    expect(recoverInboxClaims(root, addr)).toEqual([retry]);
+
+    // Acceptance: only the ack deletes the letter and flips the receipt.
+    expect(ackClaimedLetter(root, addr, retry.claimToken, retry.fileTokens[0]!)).toBe(true);
+    expect(recoverInboxClaims(root, addr)).toEqual([]);
+    expect(await awaitReceipt(root, addr, l1, 400)).toBe('delivered');
   });
 
   it('watch fires on deposit (poll fallback covers missed events)', async () => {

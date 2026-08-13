@@ -29,16 +29,20 @@ import {
   shortAddr,
 } from './format.js';
 import {
+  ackClaimedLetter,
   appendAudit,
   awaitReceipt,
+  claimInbox,
   clearAsk,
-  drain,
   deposit,
   outgoingAskIds,
   pendingAsks,
   previewBody,
   readAudit,
+  readClaimedLetter,
   readOutgoingAsk,
+  recoverInboxClaims,
+  requeueClaimedLetter,
   resolveAskByRef,
   trackIncomingAsk,
   trackOutgoingAsk,
@@ -169,10 +173,22 @@ export default function relay(pi: ExtensionAPI) {
   let unwatch: (() => void) | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   const askWaiters = new Map<string, (outcome: AskOutcome) => void>();
-  // Backoff while the session can't accept mail: a re-deposited letter
+  // Backoff while the session can't accept mail: a requeued letter
   // re-fires the watcher, and without this a failing sendMessage would spin
-  // drain→fail→re-deposit at watch speed.
+  // claim→fail→requeue at watch speed.
   let lastDeliveryFailureAt = 0;
+  // Letter ids this session has already accepted. Claims make redelivery
+  // possible (a crash between delivery and ack, or an ack failure after a
+  // successful send); without dedupe the model would see the body twice.
+  // Seeded from the transcript on session_start so recovery after a crash
+  // doesn't redeliver what the previous process already handed to the agent.
+  const deliveredIds = new Set<string>();
+  const DELIVERED_IDS_CAP = 512;
+  const noteDelivered = (id: string): void => {
+    deliveredIds.delete(id); // refresh recency
+    deliveredIds.add(id);
+    if (deliveredIds.size > DELIVERED_IDS_CAP) deliveredIds.delete(deliveredIds.values().next().value!);
+  };
   // Presence watch: addr → last observed presence. A poller surfaces
   // transitions as a notification message (no full turn wake).
   const watched = new Map<string, Presence>();
@@ -192,7 +208,13 @@ export default function relay(pi: ExtensionAPI) {
   function deliver(letter: Letter): boolean {
     // Audited after the delivery attempts below: a 'deliver' record means the
     // session actually accepted the letter; refusal records 'deliver-failed'
-    // (the caller re-deposits, so logging here would duplicate every retry).
+    // (the caller requeues, so logging here would duplicate every retry).
+    // Note pi.sendMessage is fire-and-forget: asynchronous failures are
+    // swallowed by the runtime (emitted as extension errors, never rethrown),
+    // so only synchronous refusals — a disposed/uninitialized runtime during
+    // reload or shutdown — reach these catches. That is exactly the case
+    // where the letter never enters the transcript: async rejections from the
+    // triggerTurn path happen after the message is already in context.
     const auditDelivery = (event: 'deliver' | 'deliver-failed') =>
       appendAudit(root, {
         ts: Date.now(),
@@ -255,7 +277,7 @@ export default function relay(pi: ExtensionAPI) {
           return true;
         } catch {
           // session is shutting down or otherwise undeliverable — the caller
-          // re-deposits the letter so a future drain retries
+          // requeues the letter so a future drain retries
           auditDelivery('deliver-failed');
           return false;
         }
@@ -265,34 +287,75 @@ export default function relay(pi: ExtensionAPI) {
 
   function checkInbox(): void {
     if (!self) return;
+    const me = self.addr;
     if (Date.now() - lastDeliveryFailureAt < 5000) return;
-    // Refuse mode: never drain. Letters stay on disk (receipts honestly read
+    // Refuse mode: never claim. Letters stay on disk (receipts honestly read
     // 'queued') instead of being silently consumed and dropped.
     if (!inboundAccepts()) return;
-    let letters: Letter[];
+    // Claim, not drain: the inbox is detached atomically and each letter is
+    // only acked (deleted) once the session has accepted it. A claimed but
+    // unacked letter still reads 'queued' to the sender's receipt, survives
+    // a crash (recoverInboxClaims on the next session_start), and can be
+    // requeued for retry — unlink-as-read could silently lose it while the
+    // sender's receipt reported "delivered".
+    let claim: ReturnType<typeof claimInbox>;
     try {
-      letters = drain(root, self.addr);
+      claim = claimInbox(root, me);
     } catch {
       return;
     }
-    for (const letter of letters) {
+    if (!claim) return;
+    const { claimToken, fileTokens } = claim;
+    const ack = (fileToken: string) => {
+      try {
+        ackClaimedLetter(root, me, claimToken, fileToken);
+      } catch {
+        // ack failure leaves the letter claimed; recovery requeues it and
+        // deliveredIds suppresses the duplicate
+      }
+    };
+    for (const fileToken of fileTokens) {
+      let letter: Letter | null = null;
+      try {
+        letter = readClaimedLetter(root, me, claimToken, fileToken);
+      } catch {
+        // transient read failure — keep it claimed rather than discarding
+        continue;
+      }
+      if (!letter || deliveredIds.has(letter.id)) {
+        // corrupt letters are discarded like drain does; already-accepted
+        // letters are redeliveries (crash between delivery and ack)
+        ack(fileToken);
+        continue;
+      }
       let accepted = false;
       try {
         accepted = deliver(letter);
       } catch {
-        // a malformed delivery never blocks the rest of the drain
+        // a malformed delivery never blocks the rest of the claim
       }
-      if (!accepted) {
+      if (accepted) {
+        noteDelivered(letter.id);
+        ack(fileToken);
+      } else {
         lastDeliveryFailureAt = Date.now();
-        // Not handed to the session — put the letter back so a future drain
-        // retries it; otherwise drain's unlink-as-read would silently lose it
-        // while the sender's receipt reported "delivered".
+        // Not handed to the session — atomically return it to the live inbox
+        // so the watch/poll retries it.
         try {
-          deposit(root, self.addr, letter);
+          requeueClaimedLetter(root, me, claimToken, fileToken);
         } catch {
-          // inbox dir unwritable; nothing more we can do
+          // stays claimed; the next session_start recovers it
         }
       }
+    }
+    // claimInbox renamed the watched inbox dir away and created a fresh one,
+    // so the fs.watch is now on a detached directory. Re-arm on the live
+    // inbox (the 3s poll covers anything deposited in between).
+    try {
+      unwatch?.();
+      unwatch = watchInbox(root, me, checkInbox);
+    } catch {
+      // watch failure is non-fatal; the old poll timer died with the old watch
     }
   }
 
@@ -432,6 +495,26 @@ export default function relay(pi: ExtensionAPI) {
       writeRecord(root, self);
       const resumable = collectResumableSessionIds();
       sweep(root, Date.now(), (id) => resumable.has(id));
+      // Seed redelivery dedupe from the transcript: a letter delivered by a
+      // previous process but never acked (crash between delivery and ack)
+      // will be recovered below and must not be handed to the model twice.
+      for (const entry of ctx.sessionManager.getEntries()) {
+        if (entry.type !== 'custom_message' || entry.customType !== DELIVERY_TYPE) continue;
+        const id = (entry.details as { id?: unknown } | undefined)?.id;
+        if (typeof id === 'string') noteDelivered(id);
+      }
+      // Recover letters stranded in durable claims by a crash mid-delivery:
+      // return them to the live inbox so the normal watch/poll retries them.
+      // Runs before the watch is armed so requeues land in the watched inbox.
+      for (const stranded of recoverInboxClaims(root, self.addr)) {
+        for (const fileToken of stranded.fileTokens) {
+          try {
+            requeueClaimedLetter(root, self.addr, stranded.claimToken, fileToken);
+          } catch {
+            // stays claimed; the next session_start retries recovery
+          }
+        }
+      }
       unwatch?.();
       unwatch = watchInbox(root, self.addr, checkInbox);
       heartbeat = setInterval(() => writeSelf({}), 15_000);
