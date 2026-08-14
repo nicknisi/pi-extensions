@@ -16,7 +16,8 @@
   },
   "files": [
     "dist",
-    "index.ts"
+    "index.ts",
+    "shimmer.ts"
   ],
   "type": "module",
   "exports": {

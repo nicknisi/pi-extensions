@@ -4,9 +4,14 @@
  * Replaces the default working message with a random fun verb
  * on each turn. A mix of The Office, Lord of the Rings,
  * Arnold Schwarzenegger, and Predator references.
+ *
+ * The verb text shimmers (Claude Code-style sweeping highlight) while the
+ * agent works; the spinner glyph itself is untouched. Configurable via
+ * ~/.pi/agent/configs/spinner.json — see shimmer.ts for options.
  */
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { CONFIG, shimmerFrame } from './shimmer.js';
 
 const VERBS = [
   '1-up collecting',
@@ -1145,11 +1150,30 @@ function randomVerb(): string {
 }
 
 export default function (pi: ExtensionAPI) {
+  let timer: ReturnType<typeof setInterval> | undefined;
+
+  const stopTimer = () => {
+    if (timer) {
+      clearInterval(timer);
+      timer = undefined;
+    }
+  };
+
   pi.on('turn_start', async (_event, ctx) => {
-    ctx.ui.setWorkingMessage(`${randomVerb()}...`);
+    stopTimer();
+    if (CONFIG.HIDE_SPINNER) ctx.ui.setWorkingIndicator({ frames: [] });
+    const message = `${randomVerb()}...`;
+    if (!CONFIG.SHIMMER) {
+      ctx.ui.setWorkingMessage(message);
+      return;
+    }
+    const frame = () => ctx.ui.setWorkingMessage(shimmerFrame(message, ctx.ui.theme));
+    frame();
+    timer = setInterval(frame, CONFIG.SHIMMER_INTERVAL_MS);
   });
 
   pi.on('turn_end', async (_event, ctx) => {
+    stopTimer();
     ctx.ui.setWorkingMessage();
   });
 }
