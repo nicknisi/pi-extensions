@@ -1,5 +1,11 @@
 # @nicknisi/pi-spinner
 
+## 0.2.0
+
+### Minor Changes
+
+- e67eb99: Shimmer the spinner verb text (Claude Code-style sweeping highlight) while the agent works. Only the text shimmers — the spinner glyph is untouched. Configurable via `~/.pi/agent/configs/spinner.json` (`shimmer`, `shimmerIntervalMs`, `shimmerPeriodMs`, `baseColor`, `highlightColor`, `bandWidth`, `hideSpinner`).
+
 ## 0.1.2
 
 ### Patch Changes
