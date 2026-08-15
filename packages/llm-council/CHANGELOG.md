@@ -1,5 +1,13 @@
 # @nicknisi/pi-llm-council
 
+## 0.2.4
+
+### Patch Changes
+
+- 7c6a68d: Show cumulative token usage while subagents and council members are running, and expose live usage updates through the shared subagent runtime.
+- Updated dependencies [7c6a68d]
+  - @nicknisi/pi-shared@0.5.1
+
 ## 0.2.3
 
 ### Patch Changes

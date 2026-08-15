@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-llm-council",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "LLM Council — multiple models answer independently, chairman synthesizes",
   "keywords": [
     "pi",

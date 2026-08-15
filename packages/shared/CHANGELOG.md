@@ -1,5 +1,11 @@
 # @nicknisi/pi-shared
 
+## 0.5.1
+
+### Patch Changes
+
+- 7c6a68d: Show cumulative token usage while subagents and council members are running, and expose live usage updates through the shared subagent runtime.
+
 ## 0.5.0
 
 ### Minor Changes
