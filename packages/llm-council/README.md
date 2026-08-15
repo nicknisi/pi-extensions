@@ -1,6 +1,6 @@
 # llm-council
 
-An LLM Council tool for pi: multiple models answer the same question independently, in parallel, as in-process child agent sessions (via `@nicknisi/pi-shared`'s subagent runtime), then a chairman model synthesizes their (anonymized) answers into one unified response. Useful for questions that benefit from multiple perspectives or cross-checking — divergent answers flag uncertainty. Not for simple factual questions or routine tasks. Progress streams inline in the tool result with animated spinners, per-member status, and elapsed times; expanding the result shows the full markdown of every member response plus the chairman's synthesis.
+An LLM Council tool for pi: multiple models answer the same question independently, in parallel, as in-process child agent sessions (via `@nicknisi/pi-shared`'s subagent runtime), then a chairman model synthesizes their (anonymized) answers into one unified response. Useful for questions that benefit from multiple perspectives or cross-checking — divergent answers flag uncertainty. Not for simple factual questions or routine tasks. Progress streams inline in the tool result with animated spinners, per-member status, cumulative token usage, and elapsed times; expanding the result shows the full markdown of every member response plus the chairman's synthesis.
 
 ## Install
 

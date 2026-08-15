@@ -15,7 +15,12 @@ import * as path from 'node:path';
 import type { ExtensionAPI, Theme } from '@earendil-works/pi-coding-agent';
 import { getMarkdownTheme } from '@earendil-works/pi-coding-agent';
 import { Markdown, Text } from '@earendil-works/pi-tui';
-import { createSubagentRuntime, resolveContainedAgentResource, type SubagentRuntime } from '@nicknisi/pi-shared';
+import {
+  createSubagentRuntime,
+  resolveContainedAgentResource,
+  type SpawnUsage,
+  type SubagentRuntime,
+} from '@nicknisi/pi-shared';
 import { Type } from 'typebox';
 import { CONFIG, loadCouncil, type ResolvedCouncil } from './config.js';
 import { applyColor, formatElapsed, getExpandToggleKey, getVisibleWidth } from './utils.js';
@@ -82,9 +87,16 @@ function chairmanHeader(icon: string, c: { model: string; displayName?: string |
   );
 }
 
-/** "done + elapsed" sub-line. */
-function doneLine(theme: Theme, m: { startedAt?: number; doneAt?: number }): string {
-  return `${applyColor(theme, CONFIG.shared.status.doneColor, CONFIG.shared.status.doneLabel)} ${applyColor(theme, CONFIG.shared.status.elapsedColor, formatElapsed(m.startedAt, m.doneAt))}`;
+function tokenSuffix(theme: Theme, usage: SpawnUsage | undefined): string {
+  if (!usage) return '';
+  const k = usage.totalTokens / 1000;
+  const count = `${k >= 10 ? Math.round(k) : k.toFixed(1)}k tok`;
+  return applyColor(theme, CONFIG.shared.status.elapsedColor, ` · ${count}`);
+}
+
+/** "done + elapsed + tokens" sub-line. */
+function doneLine(theme: Theme, m: { startedAt?: number; doneAt?: number; usage?: SpawnUsage }): string {
+  return `${applyColor(theme, CONFIG.shared.status.doneColor, CONFIG.shared.status.doneLabel)} ${applyColor(theme, CONFIG.shared.status.elapsedColor, formatElapsed(m.startedAt, m.doneAt))}${tokenSuffix(theme, m.usage)}`;
 }
 
 /** "error message (or label) + elapsed" sub-line. */
@@ -92,15 +104,15 @@ function errorLine(theme: Theme, m: { error?: string; startedAt?: number; doneAt
   return `${applyColor(theme, CONFIG.shared.status.errorColor, m.error?.slice(0, 60) || CONFIG.shared.status.errorLabel)} ${applyColor(theme, CONFIG.shared.status.elapsedColor, formatElapsed(m.startedAt, m.doneAt))}`;
 }
 
-function workingLine(theme: Theme): string {
-  return applyColor(theme, CONFIG.shared.status.workingColor, CONFIG.shared.status.workingLabel);
+function workingLine(theme: Theme, usage: SpawnUsage | undefined, label = CONFIG.shared.status.workingLabel): string {
+  return `${applyColor(theme, CONFIG.shared.status.workingColor, label)}${tokenSuffix(theme, usage)}`;
 }
 
 /** Sub-line while members may still be running: done/error show elapsed, else "working". */
 function memberLiveSubLine(m: MemberResult, theme: Theme): string {
   if (m.status === 'done') return doneLine(theme, m);
   if (m.status === 'error') return errorLine(theme, m);
-  return workingLine(theme);
+  return workingLine(theme, m.usage);
 }
 
 /** Sub-line once members have settled (done or error only). */
@@ -207,7 +219,7 @@ function createExpandedView(details: CouncilDetails, theme: Theme, markdownTheme
             : applyColor(theme, CONFIG.shared.status.doneColor, CONFIG.shared.successPrefix.prefix);
         const cStatus =
           details.chairman.status === 'done'
-            ? applyColor(theme, CONFIG.shared.status.doneColor, CONFIG.shared.status.doneLabel)
+            ? doneLine(theme, details.chairman)
             : applyColor(theme, CONFIG.shared.status.errorColor, CONFIG.shared.status.errorLabel);
         lines.push(chairmanHeader(cIcon, details.chairman, theme));
         lines.push(indentLine(branchLine(cStatus, theme)));
@@ -245,6 +257,7 @@ interface MemberResult {
   error?: string;
   startedAt?: number;
   doneAt?: number;
+  usage?: SpawnUsage;
 }
 
 interface CouncilDetails {
@@ -258,6 +271,7 @@ interface CouncilDetails {
     error?: string;
     startedAt?: number;
     doneAt?: number;
+    usage?: SpawnUsage;
   };
 }
 
@@ -334,7 +348,12 @@ async function runCouncil(
       ...(signal ? { signal } : {}),
       ...(council.member.thinking ? { thinkingLevel: council.member.thinking } : {}),
       ...memberSpawn,
+      onUsage: (usage) => {
+        m.usage = usage;
+        emit();
+      },
     });
+    m.usage = result.usage;
     if (result.ok) {
       m.status = 'done';
       m.doneAt = Date.now();
@@ -396,8 +415,13 @@ async function runCouncil(
     extensionPaths: resolveResourceNames('extensions', council.chairman.extensions, path.join('src', 'index.ts')),
     skillPaths: resolveResourceNames('skills', council.chairman.skills, 'SKILL.md'),
     includeContextFiles: council.chairman.contextFiles,
+    onUsage: (usage) => {
+      chairman.usage = usage;
+      emit();
+    },
   });
 
+  chairman.usage = chairmanResult.usage;
   if (chairmanResult.ok) {
     chairman.status = 'done';
     chairman.doneAt = Date.now();
@@ -498,7 +522,7 @@ export default function (pi: ExtensionAPI) {
           memberSubLine: (m) => memberLiveSubLine(m, theme),
           chairmanSubLine:
             details.stage === 'chairman' && details.chairman?.status === 'working'
-              ? applyColor(theme, CONFIG.shared.status.workingColor, CONFIG.shared.status.synthesizingLabel)
+              ? workingLine(theme, details.chairman.usage, CONFIG.shared.status.synthesizingLabel)
               : applyColor(theme, CONFIG.shared.status.workingColor, CONFIG.shared.status.waitingLabel),
         }),
       );
@@ -548,19 +572,14 @@ export default function (pi: ExtensionAPI) {
         const c = details.chairman;
         let chairmanSubLine: string;
         if (c?.status === 'working')
-          chairmanSubLine = applyColor(
-            theme,
-            CONFIG.shared.status.workingColor,
-            CONFIG.shared.status.synthesizingLabel,
-          );
+          chairmanSubLine = workingLine(theme, c.usage, CONFIG.shared.status.synthesizingLabel);
         else if (c?.status === 'error')
           chairmanSubLine = applyColor(
             theme,
             CONFIG.shared.status.errorColor,
             c.error?.slice(0, 60) || CONFIG.shared.status.errorLabel,
           );
-        else if (c?.status === 'done')
-          chairmanSubLine = applyColor(theme, CONFIG.shared.status.doneColor, CONFIG.shared.status.doneLabel);
+        else if (c?.status === 'done') chairmanSubLine = doneLine(theme, c);
         else chairmanSubLine = applyColor(theme, CONFIG.shared.status.workingColor, CONFIG.shared.status.waitingLabel);
 
         const lines = [
@@ -586,7 +605,7 @@ export default function (pi: ExtensionAPI) {
                     CONFIG.shared.status.errorColor,
                     details.chairman.error?.slice(0, 60) || CONFIG.shared.status.errorLabel,
                   )
-                : applyColor(theme, CONFIG.shared.status.doneColor, CONFIG.shared.status.doneLabel),
+                : doneLine(theme, details.chairman!),
             chairmanSubLineSuffix: expandHint(theme),
           }),
         ];

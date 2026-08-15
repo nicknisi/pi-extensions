@@ -128,6 +128,8 @@ export interface SpawnOptions {
   timeoutMs?: number;
   /** Aborts the child session (session.abort()) when fired. */
   signal?: AbortSignal;
+  /** Receives cumulative usage after each completed assistant response. */
+  onUsage?: (usage: SpawnUsage) => void;
   /** Abort after this many agent turns (budget exceeded → kind 'aborted'). */
   maxTurns?: number;
   /** Abort after this many tool executions (budget exceeded → kind 'aborted'). */
@@ -361,21 +363,19 @@ function lastAssistantText(messages: readonly any[]): string {
   return '';
 }
 
+function addMessageUsage(usage: SpawnUsage, message: any): void {
+  if (message?.role !== 'assistant' || !message.usage) return;
+  usage.inputTokens += message.usage.input ?? 0;
+  usage.outputTokens += message.usage.output ?? 0;
+  usage.totalTokens += message.usage.totalTokens ?? 0;
+  if (typeof message.usage.cost?.total === 'number') {
+    usage.cost = (usage.cost ?? 0) + message.usage.cost.total;
+  }
+}
+
 function sumUsage(messages: readonly any[]): SpawnUsage {
   const usage: SpawnUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
-  let cost = 0;
-  let hasCost = false;
-  for (const m of messages) {
-    if (m?.role !== 'assistant' || !m.usage) continue;
-    usage.inputTokens += m.usage.input ?? 0;
-    usage.outputTokens += m.usage.output ?? 0;
-    usage.totalTokens += m.usage.totalTokens ?? 0;
-    if (typeof m.usage.cost?.total === 'number') {
-      cost += m.usage.cost.total;
-      hasCost = true;
-    }
-  }
-  if (hasCost) usage.cost = cost;
+  for (const message of messages) addMessageUsage(usage, message);
   return usage;
 }
 
@@ -837,7 +837,8 @@ export function createSubagentRuntime(options: {
     let turnCount = 0;
     let toolCallCount = 0;
     const transcript: TranscriptEntry[] = [];
-    session.subscribe((event: AgentSessionEvent) => {
+    const liveUsage: SpawnUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+    const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
       // Typed narrowing: a pi event rename fails the build here instead of
       // silently disabling budget enforcement.
       switch (event.type) {
@@ -858,6 +859,19 @@ export function createSubagentRuntime(options: {
           transcript.push({ kind: 'tool', label: toolName });
           if (opts.maxToolCalls !== undefined && toolCallCount > opts.maxToolCalls) {
             abortOnce(`Tool-call budget exceeded (${opts.maxToolCalls})`);
+          }
+          break;
+        }
+        case 'message_end': {
+          addMessageUsage(liveUsage, event.message);
+          if (event.message.role === 'assistant') {
+            record.usage = { ...liveUsage };
+            persist(record);
+            try {
+              opts.onUsage?.({ ...liveUsage });
+            } catch {
+              // Progress observers must never fail the child run.
+            }
           }
           break;
         }
@@ -882,6 +896,7 @@ export function createSubagentRuntime(options: {
     const text = lastAssistantText(messages);
     const usage = sumUsage(messages);
     const stateError = childSessionError(session);
+    unsubscribe();
     session.dispose();
     // Worktree handoff/cleanup policy:
     // - A run that did NOT abort (completed/failed/empty/schema_invalid)

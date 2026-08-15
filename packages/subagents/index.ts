@@ -141,10 +141,15 @@ function short(text: string, max: number): string {
   return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max - 1)}…`;
 }
 
-function formatTokens(usage: { totalTokens: number } | undefined): string {
+function formatTokenCount(usage: { totalTokens: number } | undefined): string {
   if (!usage) return '';
   const k = usage.totalTokens / 1000;
-  return `, ${k >= 10 ? Math.round(k) : k.toFixed(1)}k tok`;
+  return `${k >= 10 ? Math.round(k) : k.toFixed(1)}k tok`;
+}
+
+function formatTokens(usage: { totalTokens: number } | undefined): string {
+  const count = formatTokenCount(usage);
+  return count ? `, ${count}` : '';
 }
 
 function formatSeconds(startedAt: number, endedAt?: number): string {
@@ -248,8 +253,10 @@ function taskSubLine(task: TaskProgress, theme: Theme): string {
       return `${theme.fg('success', 'done')}${elapsed}${theme.fg('dim', formatTokens(task.tokens))}`;
     case 'error':
       return `${theme.fg('error', short(task.error ?? 'failed', 60))}${elapsed}`;
-    case 'working':
-      return theme.fg('dim', 'working…');
+    case 'working': {
+      const tokens = formatTokenCount(task.tokens);
+      return theme.fg('dim', `working…${tokens ? ` · ${tokens}` : ''}`);
+    }
     case 'background':
       return theme.fg('dim', `launched · run ${task.runId?.slice(0, 8) ?? '?'}`);
     default:
@@ -408,7 +415,7 @@ class FleetOverlay implements Component, Focusable {
     private readonly cancelRun: (runId: string) => void,
   ) {
     const items: SelectItem[] = runs.map((run) => ({ value: run.runId, ...runLane(run, theme) }));
-    this.list = new SearchableSelectList(items, Math.min(Math.max(items.length, 1), 12), getSelectListTheme());
+    this.list = new SearchableSelectList(items, 12, getSelectListTheme());
     this.list.onSelect = (item) => {
       const run = this.runs.find((r) => r.runId === item.value);
       if (run) this.openDetail(run);
@@ -420,6 +427,7 @@ class FleetOverlay implements Component, Focusable {
       const fresh = this.refresh();
       this.runs.length = 0;
       this.runs.push(...fresh);
+      this.list.setItems(fresh.map((run) => ({ value: run.runId, ...runLane(run, this.theme) })));
       if (this.mode === 'detail' && this.detail) {
         this.detail = fresh.find((r) => r.runId === this.detail!.runId) ?? this.detail;
       }
@@ -1218,7 +1226,17 @@ async function dispatchInline(
   task.startedAt = Date.now();
   renderInlineWidget(ctx, details, 0);
 
-  const done = spawnCancellable(runtime, toSpawnOptions(spec, ctx.cwd, parentSession), undefined);
+  const done = spawnCancellable(
+    runtime,
+    {
+      ...toSpawnOptions(spec, ctx.cwd, parentSession),
+      onUsage: (usage) => {
+        task.tokens = usage;
+        renderInlineWidget(ctx, details, frame);
+      },
+    },
+    undefined,
+  );
   const runId = (done as Promise<SpawnResult> & { runId: string }).runId;
   task.runId = runId;
 
@@ -1486,7 +1504,13 @@ export default function subagents(pi: ExtensionAPI) {
             emit();
             const result = await spawnCancellable(
               runtime,
-              toSpawnOptions(spec, ctx.cwd, parentSession),
+              {
+                ...toSpawnOptions(spec, ctx.cwd, parentSession),
+                onUsage: (usage) => {
+                  task.tokens = usage;
+                  emit();
+                },
+              },
               signal ?? undefined,
             );
             settle(task, result);
@@ -1518,7 +1542,13 @@ export default function subagents(pi: ExtensionAPI) {
         emit();
         const result = await spawnCancellable(
           runtime,
-          toSpawnOptions(spec, ctx.cwd, parentSession),
+          {
+            ...toSpawnOptions(spec, ctx.cwd, parentSession),
+            onUsage: (usage) => {
+              task.tokens = usage;
+              emit();
+            },
+          },
           signal ?? undefined,
         );
         settle(task, result);

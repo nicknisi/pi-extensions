@@ -20,7 +20,9 @@ import {
 export class SearchableSelectList implements Component {
   private container = new Container();
   private searchInput = new Input();
-  readonly selectList: SelectList;
+  private readonly maxVisible: number;
+  private readonly theme: SelectListTheme;
+  selectList: SelectList;
 
   onSelect?: (item: SelectItem) => void;
   onCancel?: () => void;
@@ -31,10 +33,29 @@ export class SearchableSelectList implements Component {
   }
 
   constructor(items: SelectItem[], maxVisible: number, theme: SelectListTheme) {
+    this.maxVisible = maxVisible;
+    this.theme = theme;
     this.selectList = new SelectList(items, maxVisible, theme);
     this.selectList.onSelect = (item) => this.onSelect?.(item);
     this.selectList.onCancel = () => this.onCancel?.();
     this.container.addChild(this.searchInput);
+    this.container.addChild(this.selectList);
+  }
+
+  setItems(items: SelectItem[]): void {
+    const selectedValue = this.selectList.getSelectedItem()?.value;
+    const filter = this.searchInput.getValue();
+    const filteredItems = items.filter((item) => item.value.toLowerCase().startsWith(filter.toLowerCase()));
+
+    this.container.removeChild(this.selectList);
+    this.selectList = new SelectList(items, this.maxVisible, this.theme);
+    this.selectList.onSelect = (item) => this.onSelect?.(item);
+    this.selectList.onCancel = () => this.onCancel?.();
+    this.selectList.setFilter(filter);
+    if (selectedValue) {
+      const selectedIndex = filteredItems.findIndex((item) => item.value === selectedValue);
+      if (selectedIndex >= 0) this.selectList.setSelectedIndex(selectedIndex);
+    }
     this.container.addChild(this.selectList);
   }
 
