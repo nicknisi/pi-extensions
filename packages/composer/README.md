@@ -240,11 +240,12 @@ Peer dependencies (`*`):
 - `@earendil-works/pi-coding-agent` — `ExtensionAPI`, `ExtensionContext`,
   `CustomEditor`, `KeybindingsManager`, `Theme`, `ThemeColor` types; the
   `session_start` / `session_shutdown` events; `ctx.ui.setEditorComponent`.
-- `@earendil-works/pi-tui` — `TUI` and `EditorTheme` types, `visibleWidth`
-  for width arithmetic over ANSI-styled strings, and `tui.addInputListener` /
-  `tui.requestRender` for focus tracking.
+- `@earendil-works/pi-tui` — `TUI` and `EditorTheme` types, `isViewportTUI`
+  for focus-reporting ownership, `visibleWidth` for width arithmetic over
+  ANSI-styled strings, and `tui.requestRender` for focus updates.
 
-No npm runtime dependencies; `node:fs` / `node:os` / `node:path` only.
+No npm runtime dependencies; `node:child_process` / `node:fs` / `node:os` /
+`node:path` only.
 
 ## Caveats
 
@@ -265,12 +266,13 @@ No npm runtime dependencies; `node:fs` / `node:os` / `node:path` only.
 - **Narrow terminals**: if `width < 5 + BOX_PAD_X * padMultiplier`
   (`padMultiplier` is 3 boxed, 1 unboxed) or the stock render produces fewer
   than 2 lines, the component falls back to pi's stock rendering.
-- **Focus tracking (DECSET 1004)**: pi itself never enables focus reporting, so
-  the extension enables it (`\x1b[?1004h`) and installs a `process.on("exit")`
-  hook to disable it — otherwise the shell inherits a mode that spews `[I`/`[O`
-  into the prompt. Shutdown hooks also disable it. If the process is killed
-  with a signal that bypasses the exit hook, the terminal can be left in
-  focus-reporting mode.
+- **Focus tracking (DECSET 1004)**: fullscreen pi owns focus reporting;
+  composer reasserts it during setup but only disables it in other TUI modes.
+  Composer observes raw stdin because fullscreen pi consumes CSI I / CSI O in
+  its viewport listener before extension input listeners run. When composer
+  owns reporting, shutdown and process-exit hooks disable it so the shell does
+  not inherit `[I`/`[O`. A signal that bypasses the exit hook can still leave
+  focus reporting enabled.
 - **tmux**: the focus indicator only changes state if tmux has
   `focus-events on` (and the outer terminal passes focus events through).
   Outside tmux it works only if the terminal itself emits CSI I / CSI O.

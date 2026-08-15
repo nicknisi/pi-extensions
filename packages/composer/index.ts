@@ -73,14 +73,17 @@ interface EditorInternals {
   moveToLineEnd(): void;
 }
 
+import { execFileSync } from 'node:child_process';
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { TUI, EditorTheme } from '@earendil-works/pi-tui';
 import type { KeybindingsManager } from '@earendil-works/pi-coding-agent';
-import { visibleWidth } from '@earendil-works/pi-tui';
+import { isViewportTUI, visibleWidth } from '@earendil-works/pi-tui';
 import { CONFIG, configLoadError, reloadConfig } from './config.js';
 import {
   applyColor,
   mixRgb,
+  paneHasFocusedClient,
+  parseFocusInput,
   parseLabelData,
   plainText,
   rainbowRgb,
@@ -485,25 +488,38 @@ class Composer extends CustomEditor {
 
 // ─── Extension entry ──────────────────────────────────────────────────────
 
-// Terminal focus tracking — delineates the focused tmux pane. We enable
-// terminal focus reporting (DECSET 1004) so tmux (with `focus-events on`)
-// sends CSI I / CSI O when this pane gains/loses focus, and swap the border
-// colour accordingly. pi itself never enables 1004, so we must both enable
-// it and clean it up on exit — otherwise the shell inherits a mode that
-// spews `[I`/`[O` into the prompt.
-
-const FOCUS_IN = '\x1b[I';
-const FOCUS_OUT = '\x1b[O';
+// Terminal focus tracking — delineates the focused tmux pane. Fullscreen pi
+// owns DECSET 1004; other TUI modes need composer to enable it so tmux (with
+// `focus-events on`) sends CSI I / CSI O. Observe raw stdin because fullscreen
+// pi consumes those events before extension input listeners run. When composer
+// enables 1004 itself, clean it up so the shell does not inherit `[I`/`[O`.
 
 let paneFocused = true;
+let focusCarry = '';
 let removeFocusListener: (() => void) | undefined;
+let ownsFocusReporting = false;
 let exitHookInstalled = false;
 
+function detectPaneFocus(): boolean {
+  if (!process.env.TMUX_PANE) return true;
+  try {
+    return paneHasFocusedClient(
+      process.env.TMUX_PANE,
+      execFileSync('tmux', ['list-clients', '-F', '#{client_flags}\t#{pane_id}'], { encoding: 'utf8' }),
+    );
+  } catch {
+    return true;
+  }
+}
+
 function enableFocusTracking(tui: TUI): void {
+  paneFocused = detectPaneFocus();
+  ownsFocusReporting = !isViewportTUI(tui);
   process.stdout.write('\x1b[?1004h');
   if (!exitHookInstalled) {
     exitHookInstalled = true;
     process.on('exit', () => {
+      if (!ownsFocusReporting) return;
       try {
         process.stdout.write('\x1b[?1004l');
       } catch {
@@ -512,25 +528,29 @@ function enableFocusTracking(tui: TUI): void {
     });
   }
   removeFocusListener?.();
-  removeFocusListener = tui.addInputListener((data) => {
-    const inIdx = data.lastIndexOf(FOCUS_IN);
-    const outIdx = data.lastIndexOf(FOCUS_OUT);
-    if (inIdx === -1 && outIdx === -1) return undefined;
-    paneFocused = inIdx > outIdx;
+  const onInput = (data: string | Buffer) => {
+    const parsed = parseFocusInput(focusCarry, String(data));
+    focusCarry = parsed.carry;
+    if (parsed.focused === undefined) return;
+    paneFocused = parsed.focused;
     tui.requestRender();
-    const stripped = data.replaceAll(FOCUS_IN, '').replaceAll(FOCUS_OUT, '');
-    return stripped.length === 0 ? { consume: true } : { data: stripped };
-  });
+  };
+  process.stdin.on('data', onInput);
+  removeFocusListener = () => process.stdin.off('data', onInput);
 }
 
 function disableFocusTracking(): void {
-  try {
-    process.stdout.write('\x1b[?1004l');
-  } catch {
-    /* stdout gone */
+  if (ownsFocusReporting) {
+    try {
+      process.stdout.write('\x1b[?1004l');
+    } catch {
+      /* stdout gone */
+    }
   }
   removeFocusListener?.();
   removeFocusListener = undefined;
+  ownsFocusReporting = false;
+  focusCarry = '';
   paneFocused = true;
 }
 

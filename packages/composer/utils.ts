@@ -24,6 +24,26 @@ export function parseLabelData(data: unknown): string | undefined {
   return typeof text === 'string' && text.trim().length > 0 ? text : undefined;
 }
 
+/** Whether this tmux pane is selected by a focused client. */
+export function paneHasFocusedClient(paneId: string | undefined, clients: string): boolean {
+  if (paneId === undefined) return true;
+  return clients.split(/\r?\n/).some((line) => {
+    const [flags, selectedPane] = line.split('\t');
+    return selectedPane === paneId && flags?.split(',').includes('focused');
+  });
+}
+
+/** Read terminal focus events from raw stdin, preserving a split CSI prefix. */
+export function parseFocusInput(carry: string, chunk: string): { focused: boolean | undefined; carry: string } {
+  const input = carry + chunk;
+  const focusIn = input.lastIndexOf('\x1b[I');
+  const focusOut = input.lastIndexOf('\x1b[O');
+  return {
+    focused: focusIn === -1 && focusOut === -1 ? undefined : focusIn > focusOut,
+    carry: input.endsWith('\x1b[') ? '\x1b[' : input.endsWith('\x1b') ? '\x1b' : '',
+  };
+}
+
 /** Truncate to `max` visible cells, appending an ellipsis when truncated. */
 export function truncateCells(s: string, max: number): string {
   if (visibleWidth(s) <= max) return s;
