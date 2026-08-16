@@ -16,6 +16,7 @@
  */
 
 import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
   assertPathSegment,
@@ -45,6 +46,42 @@ export const SWEEP_MAIL_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 
 export function deriveAddr(cwd: string, sessionId: string): string {
   return crypto.createHash('sha256').update(`${cwd}${sessionId}`).digest('hex').slice(0, 12);
+}
+
+/**
+ * Pin the relay root to its real location, once, before any relay I/O.
+ *
+ * The traversal hardening refuses *user-controlled* ancestor symlinks, because
+ * a user-writable symlink can be swapped between the check and the use. That
+ * is the right rule for every operation after startup — but it also rejects a
+ * legitimate, stable arrangement: a dotfiles setup where `~/.pi` is a symlink
+ * into a managed repo. Since pi keeps everything under `~/.pi`, that made the
+ * relay root unopenable and the whole extension silently inert.
+ *
+ * Resolving once at startup keeps the property that matters. Every later
+ * operation traverses only real directories, so there is no user symlink left
+ * in the path to swap; repointing `~/.pi` afterwards cannot redirect this
+ * process. It is a pin, not a bypass.
+ *
+ * The root may not exist yet on a first run, so resolve the deepest ancestor
+ * that does and re-apply the remainder.
+ */
+export function resolveRelayRoot(root: string): string {
+  const absolute = path.resolve(root);
+  const tail: string[] = [];
+  let current = absolute;
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(current), ...tail);
+    } catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+      const parent = path.dirname(current);
+      // Filesystem root does not exist: nothing sane left to resolve against.
+      if (parent === current) return absolute;
+      tail.unshift(path.basename(current));
+      current = parent;
+    }
+  }
 }
 
 export function ensureRoot(root: string): void {

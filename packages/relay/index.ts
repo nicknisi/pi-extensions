@@ -55,6 +55,7 @@ import {
   claimAlias,
   deriveAddr,
   ensureRoot,
+  resolveRelayRoot,
   isValidAliasName,
   listAliases,
   listRecords,
@@ -68,6 +69,13 @@ import {
 } from './registry.js';
 
 type AskOutcome = { replied: true; body: string; from: string } | { replied: false; reason: string };
+
+/** What to tell the caller when there is no session record to work with. */
+function describeUninitialized(startupError: string | undefined, root: string): string {
+  return startupError
+    ? `Relay failed to start: ${startupError} (relay root: ${root})`
+    : 'Relay is not initialized (no session_start yet).';
+}
 
 function toolResult(text: string, details: Record<string, unknown> = {}) {
   return { content: [{ type: 'text' as const, text }], details };
@@ -166,10 +174,19 @@ function collectResumableSessionIds(): Set<string> {
 }
 
 export default function relay(pi: ExtensionAPI) {
-  const root = process.env.PI_RELAY_DIR ?? path.join(getAgentDir(), 'relay');
+  // Resolve before any relay I/O: pi's home is commonly a dotfiles symlink,
+  // and the traversal hardening (rightly) refuses user-controlled ancestor
+  // symlinks on every operation. See resolveRelayRoot.
+  const root = resolveRelayRoot(process.env.PI_RELAY_DIR ?? path.join(getAgentDir(), 'relay'));
   const policy = new OutboundPolicy();
 
   let self: SessionRecord | undefined;
+  // Why registration failed, if it did. Without this a startup failure is
+  // indistinguishable from "session_start hasn't fired yet", and the whole
+  // extension goes quietly inert -- which is exactly how a symlinked pi home
+  // disabled relay machine-wide for a day and a half before anyone noticed.
+  let startupError: string | undefined;
+  const uninitializedText = (): string => describeUninitialized(startupError, root);
   let unwatch: (() => void) | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   const askWaiters = new Map<string, (outcome: AskOutcome) => void>();
@@ -478,6 +495,7 @@ export default function relay(pi: ExtensionAPI) {
 
   pi.on('session_start', (_event, ctx: ExtensionContext) => {
     try {
+      startupError = undefined;
       ensureRoot(root);
       const sessionId = ctx.sessionManager.getSessionId();
       const cwd = ctx.sessionManager.getCwd() ?? ctx.cwd;
@@ -524,8 +542,11 @@ export default function relay(pi: ExtensionAPI) {
       // processing"); by the time this fires, steer/triggerTurn work.
       const initialDrain = setTimeout(checkInbox, 1200);
       initialDrain.unref();
-    } catch {
-      // registration failure never breaks the session
+    } catch (error) {
+      // A failure here must never break the session -- but it must not be
+      // invisible either. Record it so every tool can say what actually
+      // happened instead of implying session_start simply hasn't run.
+      startupError = error instanceof Error ? error.message : String(error);
     }
   });
 
@@ -588,7 +609,7 @@ export default function relay(pi: ExtensionAPI) {
     }),
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      if (!self) return toolResult('Relay is not initialized (no session_start yet).');
+      if (!self) return toolResult(uninitializedText());
 
       switch (params.action) {
         case 'list':
@@ -823,7 +844,7 @@ export default function relay(pi: ExtensionAPI) {
       if (sub === 'log') {
         const limit = Math.max(1, Math.min(500, Number(rest[0] ?? 50)));
         const entries = self ? readAudit(root, limit) : [];
-        const text = self ? formatAudit(entries) : 'Relay is not initialized (no session_start yet).';
+        const text = self ? formatAudit(entries) : uninitializedText();
         if (!self || !ctx.hasUI) {
           pi.sendMessage({ customType: AUDIT_TYPE, content: text, display: true, details: { kind: 'relay-audit' } });
           return;
@@ -833,9 +854,7 @@ export default function relay(pi: ExtensionAPI) {
       }
       if (!self || !ctx.hasUI) {
         // Plain-text fallback (print/rpc mode): the entry renderer never runs there.
-        const text = self
-          ? formatListing(listRecords(root), self.addr, (r) => presenceOf(r))
-          : 'Relay is not initialized (no session_start yet).';
+        const text = self ? formatListing(listRecords(root), self.addr, (r) => presenceOf(r)) : uninitializedText();
         pi.sendMessage({
           customType: LIST_TYPE,
           content: text,

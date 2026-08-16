@@ -45,6 +45,8 @@ import {
   claimAlias,
   clearAlias,
   deriveAddr,
+  ensureRoot,
+  resolveRelayRoot,
   isValidAliasName,
   listAliases,
   listRecords,
@@ -739,5 +741,42 @@ describe('format', () => {
   it('pins refusal strings', () => {
     expect(refusalUnknown('nobody', ['"alpha" (aaaa11)'])).toContain('No session matches');
     expect(refusalAmbiguous('al', ['"alpha" (aaaa11)', '"alpine" (bbbb22)'])).toContain('ambiguous');
+  });
+});
+
+describe('relay root resolution', () => {
+  // pi's home is commonly a dotfiles symlink (`~/.pi -> ~/Developer/dotfiles/home/.pi`).
+  // The traversal hardening refuses user-controlled ancestor symlinks, so an
+  // unresolved root made every relay operation throw -- and because
+  // session_start swallowed it, relay went silently inert machine-wide.
+  // Note the rest of this suite calls fs.realpathSync.native() on its temp
+  // dirs, which is exactly why that path was never covered.
+  it('resolves a user-symlinked ancestor so the hardened root can be opened', () => {
+    const real = tmpRoot();
+    const link = path.join(tmpRoot(), 'link');
+    fs.symlinkSync(real, link, 'dir');
+    const root = path.join(link, 'relay');
+
+    // The hardening rejects the symlinked path itself -- deliberately.
+    expect(() => ensureRoot(root)).toThrow(/symlink/i);
+
+    // Resolving first yields the same directory by its real path, which opens.
+    const resolved = resolveRelayRoot(root);
+    expect(resolved).toBe(path.join(real, 'relay'));
+    expect(() => ensureRoot(resolved)).not.toThrow();
+  });
+
+  it('resolves a root whose directories do not exist yet', () => {
+    const real = tmpRoot();
+    const link = path.join(tmpRoot(), 'link');
+    fs.symlinkSync(real, link, 'dir');
+    // First run: nothing under the root exists, so the deepest existing
+    // ancestor is resolved and the missing tail re-applied.
+    expect(resolveRelayRoot(path.join(link, 'a', 'b', 'relay'))).toBe(path.join(real, 'a', 'b', 'relay'));
+  });
+
+  it('leaves an already-real path unchanged', () => {
+    const real = tmpRoot();
+    expect(resolveRelayRoot(path.join(real, 'relay'))).toBe(path.join(real, 'relay'));
   });
 });
