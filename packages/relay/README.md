@@ -101,6 +101,7 @@ The directory is created `0700` and every file `0600` — other users on the mac
 ## Caveats
 
 - **Mailbox semantics support Linux and macOS only.** Relay rejects user-controlled symlinks in configured-root components, permits protected root-owned system aliases such as macOS `/var`, pins root, mailbox, and durable-claim descriptors for each operation, and uses descriptor-relative `openat`/`renameat`/`unlinkat` calls, atomic renames, descriptor polling for watches, and `0600`/`0700` permission bits. Windows is unsupported.
+- **Bun <= 1.3.14 refused.** Those Bun versions abort the process when koffi's GC finalizer releases an N-API reference ([oven-sh/bun#39263](https://github.com/oven-sh/bun/issues/39263), fixed upstream after 1.3.14), so relay fails load with a clear error on them instead. Node.js and newer Bun load normally.
 - **One machine.** Delivery is a file landing in a directory; two sessions reach each other exactly when they share a filesystem. A container and its host cannot.
 - **Presence is heartbeat-accurate**, not instantaneous (within ~45s).
 - Delivery injects with `deliverAs: "steer"` (lands between tool calls) and `triggerTurn: true` (wakes an idle session).

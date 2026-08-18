@@ -1,12 +1,25 @@
 /** Descriptor-relative, symlink-safe filesystem operations for the relay store. Pi-free. */
 import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
+import { createRequire } from 'node:module';
 import * as path from 'node:path';
-import koffi from 'koffi';
 
 if (process.platform !== 'darwin' && process.platform !== 'linux') {
   throw new Error(`Relay filesystem operations are unsupported on ${process.platform}`);
 }
+
+// Bun <= 1.3.14 aborts the whole process when koffi's GC finalizer releases
+// an N-API reference (oven-sh/bun#39263, fixed after 1.3.14). Fail extension
+// load cleanly on those versions instead.
+const bunVersion = (globalThis as { Bun?: { version?: string } }).Bun?.version;
+if (bunVersion !== undefined) {
+  const [major = 0, minor = 0, patch = 0] = bunVersion.split('-')[0]!.split('.').map(Number);
+  if (major < 1 || (major === 1 && (minor < 3 || (minor === 3 && patch <= 14)))) {
+    throw new Error(`Relay requires Node.js or Bun > 1.3.14: koffi crashes Bun ${bunVersion} (oven-sh/bun#39263)`);
+  }
+}
+
+const koffi = createRequire(import.meta.url)('koffi') as typeof import('koffi');
 
 const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
 const DIRECTORY = fs.constants.O_DIRECTORY ?? 0;
