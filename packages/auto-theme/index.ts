@@ -12,7 +12,7 @@
  */
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { execSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 
 /** Map every known theme to its opposite-mode counterpart. */
 const PAIRS: Record<string, string> = {
@@ -28,18 +28,15 @@ const PAIRS: Record<string, string> = {
 
 const DARK_THEMES = new Set(['nightowl', 'tokyonight-night', 'catppuccin-mocha', 'dark']);
 
-function isDarkMode(): boolean {
-  try {
-    return (
-      execSync('osascript -e \'tell application "System Events" to tell appearance preferences to return dark mode\'', {
-        encoding: 'utf-8',
-        timeout: 2000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      }).trim() === 'true'
+function isDarkMode(): Promise<boolean> {
+  return new Promise((resolve) => {
+    execFile(
+      'osascript',
+      ['-e', 'tell application "System Events" to tell appearance preferences to return dark mode'],
+      { encoding: 'utf-8', timeout: 2000 },
+      (err, stdout) => resolve(!err && stdout.trim() === 'true'),
     );
-  } catch {
-    return true;
-  }
+  });
 }
 
 export default function (pi: ExtensionAPI) {
@@ -47,7 +44,7 @@ export default function (pi: ExtensionAPI) {
   let lastDark: boolean | null = null;
 
   pi.on('session_start', async (_event, ctx) => {
-    const dark = isDarkMode();
+    const dark = await isDarkMode();
     lastDark = dark;
 
     // Sync on startup if current theme doesn't match OS mode
@@ -60,8 +57,8 @@ export default function (pi: ExtensionAPI) {
     }
 
     // Poll for OS appearance changes
-    intervalId = setInterval(() => {
-      const dark = isDarkMode();
+    intervalId = setInterval(async () => {
+      const dark = await isDarkMode();
       if (dark === lastDark) return;
       lastDark = dark;
 
