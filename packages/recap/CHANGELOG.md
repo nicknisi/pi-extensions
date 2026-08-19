@@ -1,5 +1,11 @@
 # @nicknisi/pi-recap
 
+## 0.1.4
+
+### Patch Changes
+
+- 35f60f5: Fall back to the current session model when a configured model override is absent or unavailable.
+
 ## 0.1.3
 
 ### Patch Changes
