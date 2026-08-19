@@ -3,8 +3,8 @@ import { join } from 'node:path';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 
 export interface BtwConfig {
-  /** Model as provider/model-id. Model ids may themselves contain slashes. */
-  model: string;
+  /** Optional model override as provider/model-id. Model ids may themselves contain slashes. */
+  model?: string;
 }
 
 export interface LoadedBtwConfig {
@@ -12,9 +12,7 @@ export interface LoadedBtwConfig {
   warnings: string[];
 }
 
-export const DEFAULT_BTW_CONFIG: BtwConfig = {
-  model: 'fireworks/glm-latest',
-};
+export const DEFAULT_BTW_CONFIG: BtwConfig = {};
 
 export function btwConfigPath(agentDir = getAgentDir()): string {
   return join(agentDir, 'configs', 'btw.json');
@@ -45,6 +43,7 @@ export function loadBtwConfig(agentDir = getAgentDir()): LoadedBtwConfig {
     parsed && typeof parsed === 'object' && !Array.isArray(parsed)
       ? (parsed as Record<string, unknown>).model
       : undefined;
+  if (model === undefined) return { config: { ...DEFAULT_BTW_CONFIG }, warnings: [] };
   if (typeof model !== 'string' || !parseModelSpec(model)) {
     return {
       config: { ...DEFAULT_BTW_CONFIG },

@@ -1,5 +1,5 @@
 import { uuidv7 } from '@earendil-works/pi-ai';
-import { complete, getModel } from '@earendil-works/pi-ai/compat';
+import { complete } from '@earendil-works/pi-ai/compat';
 import { getAgentDir, getMarkdownTheme, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Box, Markdown, Text } from '@earendil-works/pi-tui';
 import * as fs from 'node:fs';
@@ -101,12 +101,11 @@ function capLines(text: string, max: number): string {
 
 async function generateSummary(ctx: import('@earendil-works/pi-coding-agent').ExtensionContext): Promise<string> {
   const cfg = readConfig();
-  // getModel is a static builtin-catalog read whose generics require literal
-  // provider/model ids, but recap's model comes from unvalidated JSON config.
-  // Widen the signature: an unknown provider or id yields undefined, which the
-  // guard below already reports. Custom providers are not in this catalog.
-  const lookupModel = getModel as (provider: string, id: string) => typeof ctx.model;
-  const model = cfg.model ? lookupModel(cfg.model.provider, cfg.model.id) : ctx.model;
+  const configuredModel =
+    cfg.model && typeof cfg.model.provider === 'string' && typeof cfg.model.id === 'string'
+      ? ctx.modelRegistry.find(cfg.model.provider, cfg.model.id)
+      : undefined;
+  const model = configuredModel ?? ctx.model;
   if (!model) {
     ctx.ui.notify('recap: no model available', 'warning');
     return '';

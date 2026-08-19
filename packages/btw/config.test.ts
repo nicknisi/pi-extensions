@@ -42,6 +42,12 @@ describe('loadBtwConfig', () => {
     expect(loadBtwConfig(tempDir())).toEqual({ config: DEFAULT_BTW_CONFIG, warnings: [] });
   });
 
+  it('uses the current model when the config omits model', () => {
+    const agentDir = tempDir();
+    writeConfig(agentDir, {});
+    expect(loadBtwConfig(agentDir)).toEqual({ config: DEFAULT_BTW_CONFIG, warnings: [] });
+  });
+
   it('loads a configured provider and model', () => {
     const agentDir = tempDir();
     writeConfig(agentDir, { model: 'anthropic/claude-sonnet-4-5' });

@@ -415,10 +415,14 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const modelSpec = parseModelSpec(config.model)!;
-      const model = ctx.modelRegistry.find(modelSpec.provider, modelSpec.id);
+      const modelSpec = config.model ? parseModelSpec(config.model) : undefined;
+      const configuredModel = modelSpec ? ctx.modelRegistry.find(modelSpec.provider, modelSpec.id) : undefined;
+      if (config.model && !configuredModel) {
+        ctx.ui.notify(`btw model not found: ${config.model}; using current model`, 'warning');
+      }
+      const model = configuredModel ?? ctx.model;
       if (!model) {
-        ctx.ui.notify(`btw model not found: ${config.model}`, 'error');
+        ctx.ui.notify('btw: no current model available', 'error');
         return;
       }
 

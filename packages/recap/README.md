@@ -42,10 +42,10 @@ Config file: `~/.pi/agent/configs/recap.json` (created on first `/recap-idle` wr
 }
 ```
 
-| Option        | Type                               | Default                     | Notes                                                                                                                                                                       |
-| ------------- | ---------------------------------- | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `idleMinutes` | number                             | `3`                         | Minutes of inactivity before an auto-recap fires. Set via `/recap-idle`.                                                                                                    |
-| `model`       | `{ provider: string; id: string }` | session model (`ctx.model`) | Optional override. Must be a model in pi's builtin catalog (`getModel` lookup); custom providers are not supported. Unknown provider/id logs a warning and skips the recap. |
+| Option        | Type                               | Default                     | Notes                                                                                        |
+| ------------- | ---------------------------------- | --------------------------- | -------------------------------------------------------------------------------------------- |
+| `idleMinutes` | number                             | `3`                         | Minutes of inactivity before an auto-recap fires. Set via `/recap-idle`.                     |
+| `model`       | `{ provider: string; id: string }` | session model (`ctx.model`) | Optional override. If omitted or not registered in Pi, recap uses the current session model. |
 
 No environment variables are read.
 
@@ -61,7 +61,7 @@ No environment variables are read.
 Peer deps (all `@earendil-works/*`, provided by the pi host):
 
 - `@earendil-works/pi-ai` — `uuidv7` (session id for the completion call)
-- `@earendil-works/pi-ai/compat` — `complete`, `getModel` (one-shot summarization; `getModel` resolves config-specified models from the builtin catalog)
+- `@earendil-works/pi-ai/compat` — `complete` (one-shot summarization)
 - `@earendil-works/pi-coding-agent` — `ExtensionAPI`, `getMarkdownTheme`; uses `pi.registerCommand`, `pi.registerEntryRenderer`, `pi.appendEntry`, `pi.on`, `ctx.sessionManager.getBranch`, `ctx.modelRegistry.getApiKeyAndHeaders`, `ctx.isIdle`, `ctx.ui.notify`
 - `@earendil-works/pi-tui` — `Box`, `Text`, `Markdown` for the card renderer
 
@@ -71,7 +71,7 @@ No npm runtime deps, no workspace deps.
 
 - TUI only: the timer and renderer are installed in `session_start` only when `ctx.mode === "tui"`. `/recap` technically works in other modes but nothing renders the entry there.
 - Depends on several pi internals that could change across versions: `sessionManager.getBranch()`, `modelRegistry.getApiKeyAndHeaders()`, `ctx.isIdle()`, and the `session_start`/`before_agent_start`/`agent_settled` event names.
-- `getModel` is called through a deliberately widened signature (see code comment): its generics require literal catalog ids, but the config value is unvalidated JSON. An unknown model yields `undefined` and the recap is skipped with a warning. Custom-provider models cannot be used.
+- A configured model is resolved through `ctx.modelRegistry`, so registered custom providers work. An omitted or unresolved override falls back to the current session model.
 - The card background is a hardcoded truecolor escape (`#131320`) chosen to sit darker than the tokyonight base/message backgrounds (`theme.bg` only accepts named tokens). With other themes it may clash.
 - Entry content extraction is structural (filters blocks by `type === "text"` / `type === "toolCall"`), so changes to pi's message block shape would silently empty the transcript it summarizes.
 - The timer is cleared on `session_shutdown`; if a session never shuts down cleanly the interval lives until process exit.
