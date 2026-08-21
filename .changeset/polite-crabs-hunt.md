@@ -1,6 +1,6 @@
 ---
-"@nicknisi/pi-recap": patch
-"@nicknisi/pi-session-name": patch
+'@nicknisi/pi-recap': patch
+'@nicknisi/pi-session-name': patch
 ---
 
 Fix model fallback and OAuth auth support in recap and session-name
