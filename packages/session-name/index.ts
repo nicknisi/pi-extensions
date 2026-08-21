@@ -294,7 +294,7 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
     const model = resolveTitleModel(ctx);
     if (!model) return null;
     const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-    if (!auth.ok || !auth.apiKey) return null;
+    if (!auth.ok) return null;
 
     const controller = new AbortController();
     titleAbort = controller;

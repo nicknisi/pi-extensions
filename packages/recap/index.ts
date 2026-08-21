@@ -26,6 +26,7 @@ let lastActivity = Date.now();
 let firedThisIdle = false;
 let timer: ReturnType<typeof setInterval> | null = null;
 let piRef: ExtensionAPI | null = null;
+let lastModel: import('@earendil-works/pi-coding-agent').ExtensionContext['model'] = undefined;
 
 function readConfig(): Config {
   try {
@@ -105,14 +106,14 @@ async function generateSummary(ctx: import('@earendil-works/pi-coding-agent').Ex
     cfg.model && typeof cfg.model.provider === 'string' && typeof cfg.model.id === 'string'
       ? ctx.modelRegistry.find(cfg.model.provider, cfg.model.id)
       : undefined;
-  const model = configuredModel ?? ctx.model;
+  const model = configuredModel ?? ctx.model ?? lastModel;
   if (!model) {
     ctx.ui.notify('recap: no model available', 'warning');
     return '';
   }
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-  if (!auth?.ok || !auth.apiKey) {
-    ctx.ui.notify('recap: no API key for model', 'warning');
+  if (!auth?.ok) {
+    ctx.ui.notify(`recap: ${auth.error ?? 'no API key for model'}`, 'warning');
     return '';
   }
   const conversation = buildConversation(ctx.sessionManager.getBranch());
@@ -129,9 +130,9 @@ async function generateSummary(ctx: import('@earendil-works/pi-coding-agent').Ex
       ],
     },
     {
-      apiKey: auth.apiKey,
       // Spread conditionally: optional in ProviderStreamOptions, and
       // exactOptionalPropertyTypes rejects an explicit undefined.
+      ...(auth.apiKey !== undefined && { apiKey: auth.apiKey }),
       ...(auth.headers !== undefined && { headers: auth.headers }),
       ...(auth.env !== undefined && { env: auth.env }),
       reasoningEffort: 'low',
@@ -186,13 +187,15 @@ export default function (pi: ExtensionAPI) {
     }, TICK_MS);
   });
 
-  pi.on('before_agent_start', async () => {
+  pi.on('before_agent_start', async (_e, ctx) => {
     lastActivity = Date.now();
     firedThisIdle = false;
+    lastModel = ctx.model ?? lastModel;
   });
 
-  pi.on('agent_settled', async () => {
+  pi.on('agent_settled', async (_e, ctx) => {
     lastActivity = Date.now();
+    lastModel = ctx.model ?? lastModel;
   });
 
   pi.on('session_shutdown', async (_e, ctx) => {
