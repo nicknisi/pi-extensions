@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-claude-design",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Connect pi to Anthropic's Claude Design MCP server: /design-login command plus auth CLI for pi-mcp-adapter",
   "keywords": [
     "pi",
