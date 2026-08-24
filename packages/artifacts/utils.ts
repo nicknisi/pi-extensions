@@ -184,3 +184,52 @@ export async function createGist(absPath: string, title: string, isPublic: boole
   if (isPublic) args.push('--public');
   return run('gh', args);
 }
+
+/** Locate a headless-capable browser binary. darwin: known app paths; elsewhere: PATH names. */
+function findBrowser(): string | null {
+  if (process.platform === 'darwin') {
+    for (const p of [
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+    ]) {
+      if (existsSync(p)) return p;
+    }
+    return null;
+  }
+  // linux/win: rely on PATH; spawn errors surface as a clear message from run()
+  return 'google-chrome';
+}
+
+/**
+ * Screenshot a URL to a PNG via headless Chrome-family flags.
+ * The artifact server must already be running (the caller ensures it).
+ */
+export async function screenshotUrl(url: string, outPath: string, width: number, height: number): Promise<void> {
+  const browser = findBrowser();
+  if (!browser) {
+    throw new Error(
+      'no Chrome-family browser found (looked in /Applications). Install Chrome or Chromium to render images.',
+    );
+  }
+  await run(browser, [
+    '--headless',
+    '--disable-gpu',
+    '--hide-scrollbars',
+    `--window-size=${width},${height}`,
+    `--screenshot=${outPath}`,
+    url,
+  ]);
+  if (!existsSync(outPath)) throw new Error('the browser exited without writing a screenshot.');
+}
+
+/** Copy a PNG file to the clipboard as an image (macOS only). Returns false on other platforms or failure. */
+export async function copyImageToClipboard(absPath: string): Promise<boolean> {
+  if (process.platform !== 'darwin') return false;
+  try {
+    await run('osascript', ['-e', `set the clipboard to (read (POSIX file "${absPath}") as «class PNGf»)`]);
+    return true;
+  } catch {
+    return false;
+  }
+}

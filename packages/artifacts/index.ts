@@ -15,9 +15,12 @@ import {
   listArtifacts,
   openInBrowser,
   artifactPath,
+  artifactDir,
   copyToClipboard,
   revealFile,
   createGist,
+  screenshotUrl,
+  copyImageToClipboard,
 } from './utils.js';
 import { renderMarkdownDocument, renderHtmlDocument } from './templates.js';
 
@@ -96,10 +99,16 @@ export default function artifacts(pi: ExtensionAPI) {
         },
       ),
       method: Type.Optional(
-        Type.Union([Type.Literal('clipboard'), Type.Literal('reveal'), Type.Literal('gist')], {
+        Type.Union([Type.Literal('clipboard'), Type.Literal('reveal'), Type.Literal('gist'), Type.Literal('image')], {
           description:
-            "share only. clipboard (default): copy the self-contained HTML. reveal: show the file in the OS file manager. gist: `gh gist create` (requires gh CLI + auth) — uploads under the user's GitHub account, copies the URL, opens it.",
+            "share only. clipboard (default): copy the self-contained HTML. reveal: show the file in the OS file manager. gist: `gh gist create` (requires gh CLI + auth) — uploads under the user's GitHub account, copies the URL, opens it. image: screenshot the rendered artifact to <slug>.png via a headless Chrome-family browser (copies the PNG to the clipboard on macOS).",
         }),
+      ),
+      width: Type.Optional(
+        Type.Integer({ description: 'share method=image only. Viewport width in px. Default: 1280.', minimum: 200 }),
+      ),
+      height: Type.Optional(
+        Type.Integer({ description: 'share method=image only. Viewport height in px. Default: 800.', minimum: 200 }),
       ),
       public: Type.Optional(
         Type.Boolean({ description: 'share method=gist only. Make the gist public. Default: false (secret gist).' }),
@@ -209,6 +218,24 @@ export default function artifacts(pi: ExtensionAPI) {
             return {
               content: [{ type: 'text' as const, text: `Revealed in the file manager:\n${absPath}` }],
               details: { action, slug, title, method, absPath } as Record<string, unknown>,
+            };
+          }
+          if (method === 'image') {
+            const url = await artifactUrl(slug); // starts the lazy server the browser will hit
+            const pngPath = join(artifactDir(), `${slug}.png`);
+            await screenshotUrl(url, pngPath, params.width ?? 1280, params.height ?? 800);
+            const copied = await copyImageToClipboard(pngPath);
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: `Rendered ${title} to an image (${params.width ?? 1280}×${params.height ?? 800}):\n${pngPath}${copied ? '\nCopied to the clipboard as an image — paste it anywhere.' : ''}`,
+                },
+              ],
+              details: { action, slug, title, method, absPath: pngPath, imageCopied: copied } as Record<
+                string,
+                unknown
+              >,
             };
           }
           // gist
