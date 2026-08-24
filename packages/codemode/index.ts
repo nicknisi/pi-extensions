@@ -65,6 +65,25 @@ type CodemodeSpawnOptions = SpawnOptions & { text?: boolean };
 // just structured spans written through the session.
 const RUNSCOPE_TYPE = 'codemode-runscope';
 
+// ── Config (~/.pi/agent/configs/codemode.json) ──────────────────────────
+interface CodemodeConfig {
+  /** Default model for child spawns ("provider/id"). null = the session's current model. */
+  childModel: string | null;
+  /** Default thinking level for child spawns. null = the session's current thinking level. */
+  childThinkingLevel: string | null;
+}
+
+const DEFAULT_CONFIG: CodemodeConfig = { childModel: null, childThinkingLevel: null };
+
+function loadConfig(): CodemodeConfig {
+  try {
+    const raw = fs.readFileSync(path.join(getAgentDir(), 'configs', 'codemode.json'), 'utf8');
+    return { ...DEFAULT_CONFIG, ...(JSON.parse(raw) as Partial<CodemodeConfig>) };
+  } catch {
+    return DEFAULT_CONFIG;
+  }
+}
+
 type RunscopeKind = 'spawn_start' | 'spawn_end' | 'stage_start' | 'stage_end' | 'gate_result';
 
 interface RunscopeEntry {
@@ -122,6 +141,8 @@ interface CodemodeDetails {
   durationMs: number;
   error?: string;
   stack?: string;
+  /** Live spawn counts, present on partial (streaming) updates only. */
+  progress?: { active: number; completed: number; failed: number };
 }
 
 /** Outcome of a codemode run: formatted text for display + the raw default export. */
@@ -229,7 +250,8 @@ function spinnerDot(theme: Theme, frame: number): string {
 }
 
 export default function codemode(pi: ExtensionAPI) {
-  const runtime = createSubagentRuntime({ namespace: 'codemode', artifactsDir: ARTIFACTS_ROOT });
+  const config = loadConfig();
+  const runtime = createSubagentRuntime({ namespace: 'codemode', artifactsDir: ARTIFACTS_ROOT, maxConcurrent: 6 });
 
   // Append a runscope span to the parent session JSONL. Best-effort: a ledger
   // write must never fail a codemode run.
@@ -321,14 +343,62 @@ export default function codemode(pi: ExtensionAPI) {
     ownerSession?: string | undefined;
     externalSignal?: AbortSignal | undefined;
     bindResult?: boolean;
+    /** Current session model as "provider/id" — fallback default for child spawns. */
+    sessionModel?: string | undefined;
+    /** Current session thinking level — fallback default for child spawns. */
+    sessionThinkingLevel?: string | undefined;
+    /** Live progress callback (the tool maps this to its onUpdate partials). */
+    onProgress?: ((details: CodemodeDetails) => void) | undefined;
   }): Promise<CodemodeOutcome> {
-    const { code, label, timeoutMs, cwd, ownerSession, externalSignal, bindResult = false } = input;
+    const {
+      code,
+      label,
+      timeoutMs,
+      cwd,
+      ownerSession,
+      externalSignal,
+      bindResult = false,
+      sessionModel,
+      sessionThinkingLevel,
+    } = input;
     const logs: string[] = [];
     const controller = new AbortController();
+    const startedAt = Date.now();
+    const progress = { active: 0, completed: 0, failed: 0 };
+    const notify = (): void => {
+      if (!input.onProgress) return;
+      try {
+        input.onProgress({ label, logs: [...logs], durationMs: Date.now() - startedAt, progress: { ...progress } });
+      } catch {
+        // progress reporting must never fail the run
+      }
+    };
+    // Child model defaults: explicit spawn option > configs/codemode.json >
+    // the session's current model/thinking (pi's own resolution only when all unset).
+    const withChildDefaults = (opts: SpawnOptions): SpawnOptions => {
+      const model = opts.model ?? config.childModel ?? sessionModel;
+      const thinkingLevel = opts.thinkingLevel ?? config.childThinkingLevel ?? sessionThinkingLevel;
+      return {
+        ...opts,
+        ...(model !== undefined ? { model } : {}),
+        ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
+      };
+    };
     const sessionRuntime: SubagentRuntime = {
       namespace: tracedRuntime.namespace,
       spawn: (opts) => sessionRuntime.spawnDetached(opts).done,
-      spawnDetached: (opts) => tracedRuntime.spawnDetached(ownerSession ? { ...opts, ownerSession } : opts),
+      spawnDetached: (opts) => {
+        const handle = tracedRuntime.spawnDetached(withChildDefaults(ownerSession ? { ...opts, ownerSession } : opts));
+        progress.active++;
+        notify();
+        void handle.done.then((res) => {
+          progress.active--;
+          if (res.ok) progress.completed++;
+          else progress.failed++;
+          notify();
+        });
+        return handle;
+      },
       listRuns: () => tracedRuntime.listRuns(),
       activeCount: () => tracedRuntime.activeCount(),
     };
@@ -346,6 +416,7 @@ export default function codemode(pi: ExtensionAPI) {
         })
         .join(' ');
       logs.push(truncate(line, MAX_LOG_CHARS));
+      notify();
     };
 
     const spawn = (options: CodemodeSpawnOptions): Promise<SpawnResult> => {
@@ -468,13 +539,12 @@ export default function codemode(pi: ExtensionAPI) {
         }
       };
 
-      return runWorkflow({ ...spec, stages: wrappedStages }, sessionRuntime, full);
+      return runWorkflow({ ...spec, concurrency: spec.concurrency ?? 6, stages: wrappedStages }, sessionRuntime, full);
     };
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-codemode-'));
     const file = path.join(dir, 'snippet.ts');
     fs.writeFileSync(file, bindingsPrelude() + code);
-    const startedAt = Date.now();
 
     const runSnippet = async (): Promise<unknown> => {
       const { mod } = await bundleRequire({
@@ -562,7 +632,8 @@ export default function codemode(pi: ExtensionAPI) {
       '{ ok: true, text, data?, usage, durationMs, runId }; on failure { ok: false, kind:',
       "'crashed'|'empty'|'schema_invalid'|'aborted', error, text, usage, durationMs, runId }.",
       'spawn never rejects — check result.ok. SpawnOptions: { prompt: string (required); agent?:',
-      "string label; model?: string 'provider/id'; tools?: string[] allowlist (undefined = read-only",
+      "string label; model?: string 'provider/id' (default: configs/codemode.json childModel, else the session's",
+      'current model); tools?: string[] allowlist (undefined = read-only',
       '[read, grep, find, ls]; pass [read, bash, edit, write] explicitly for builders); systemPrompt?:',
       'string; replaceSystemPrompt?: boolean; extensionPaths?: string[]; skillPaths?: string[];',
       'includeContextFiles?: boolean; outputSchema?: TypeBox-like JSON schema object (validated;',
@@ -571,8 +642,8 @@ export default function codemode(pi: ExtensionAPI) {
       'text?: boolean (opt into raw text mode; REQUIRED when outputSchema is omitted — a spawn with',
       'neither outputSchema nor text:true is rejected immediately); cwd?: string; timeoutMs?: number',
       '(default 15 min);',
-      'maxTurns?: number; maxToolCalls?: number; thinkingLevel?: string }. Composition — Promise.all',
-      'Composition — Promise.all',
+      'maxTurns?: number; maxToolCalls?: number; thinkingLevel?: string (default: childThinkingLevel config, else',
+      "the session's current level) }. Composition — Promise.all",
       'fan-out, sequential pipelines, map/reduce over files — is your code. For dependent multi-stage',
       'work use runWorkflow(spec, opts?): { name, stages: [{ id, prompt (string or (ctx, item?, index?)',
       '=> string; ctx = { results, treeDiffs, cwd, runDir }), needs?: string[] (default: previous stage),',
@@ -592,6 +663,8 @@ export default function codemode(pi: ExtensionAPI) {
       'Wrap risky non-spawn steps (parsing, arithmetic on untrusted shapes) in try/catch — a thrown error fails the whole run.',
       'Every spawn() must declare its output contract: pass outputSchema for structured data (validated; lands in result.data) or text:true for raw text. A spawn with NEITHER throws immediately — it does not return unparsed text.',
       'Prefer runWorkflow over hand-rolled Promise.all when stages depend on each other, need gates/retries, or edit the working tree.',
+      'Give independent workflow stages needs: [] — a stage without needs chains to the previous stage and runs sequentially.',
+      "Children inherit childModel/childThinkingLevel from ~/.pi/agent/configs/codemode.json, else the session's current model + thinking level; pass model:/thinkingLevel: per spawn or workflow stage to override.",
       'Use log(...) for progress notes; they come back in the result details.',
       'Do not attempt imports — the snippet is bundled standalone and only spawn/runWorkflow/log are available.',
       'Never write busy-wait or long synchronous loops — they block the host event loop and can freeze the session (the timeout cannot preempt synchronous JS).',
@@ -602,7 +675,7 @@ export default function codemode(pi: ExtensionAPI) {
       timeoutMs: Type.Optional(Type.Number({ description: 'Wall-clock cap. Default 10 min, max 30 min.' })),
     }),
 
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const label = params.label ?? 'codemode';
       const timeoutMs = Math.min(Math.max(params.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1000), MAX_TIMEOUT_MS);
       const outcome = await runCodemode({
@@ -612,6 +685,11 @@ export default function codemode(pi: ExtensionAPI) {
         cwd: ctx.cwd,
         ownerSession: ctx.sessionManager.getSessionFile(),
         externalSignal: signal ?? undefined,
+        sessionModel: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+        sessionThinkingLevel: ctx.thinkingLevel,
+        onProgress: onUpdate
+          ? (details) => onUpdate({ content: [{ type: 'text' as const, text: '' }], details })
+          : undefined,
       });
       return {
         content: [{ type: 'text' as const, text: outcome.text }],
@@ -647,6 +725,22 @@ export default function codemode(pi: ExtensionAPI) {
       const logs = details.logs ?? [];
       const label = fg(theme, 'accent', details.label);
       const duration = fg(theme, 'dim', formatDuration(details.durationMs));
+
+      // ── Streaming (partial) state: spinner + live spawn counts + recent logs ──
+      if (options.isPartial) {
+        const p = details.progress;
+        const header = `${spinnerDot(theme, ensureSpinner(ctx))}${label} ${duration}`;
+        const lines = [header];
+        if (p) {
+          const failed = p.failed > 0 ? ` ${fg(theme, 'dim', '·')} ${fg(theme, 'error', `${p.failed} failed`)}` : '';
+          lines.push(branchLine(theme, `${p.active} running ${fg(theme, 'dim', '·')} ${p.completed} done${failed}`));
+        }
+        for (const entry of logs.slice(-3)) {
+          for (const line of entry.split('\n')) lines.push(indentLine(fg(theme, 'dim', line)));
+        }
+        return makeText(ctx?.lastComponent, lines.join('\n'));
+      }
+      clearSpinner(ctx);
 
       // ── Error state ──────────────────────────────────────────────
       if (details.error) {
@@ -714,6 +808,8 @@ export default function codemode(pi: ExtensionAPI) {
         cwd: ctx.cwd,
         ownerSession: ctx.sessionManager.getSessionFile(),
         externalSignal: ctx.signal ?? undefined,
+        sessionModel: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+        sessionThinkingLevel: ctx.thinkingLevel,
         bindResult: true,
       });
     } finally {
@@ -848,6 +944,8 @@ export default function codemode(pi: ExtensionAPI) {
           cwd: ctx.cwd,
           ownerSession: ctx.sessionManager.getSessionFile(),
           externalSignal: ctx.signal ?? undefined,
+          sessionModel: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+          sessionThinkingLevel: ctx.thinkingLevel,
           bindResult: true,
         });
       } finally {
