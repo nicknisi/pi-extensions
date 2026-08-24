@@ -1,0 +1,45 @@
+{
+  "name": "@nicknisi/pi-claude-design",
+  "version": "0.0.0",
+  "description": "Connect pi to Anthropic's Claude Design MCP server: /design-login command plus auth CLI for pi-mcp-adapter",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-package"
+  ],
+  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/claude-design#readme",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicknisi/pi-extensions.git",
+    "directory": "packages/claude-design"
+  },
+  "bin": {
+    "claude-design-auth": "./bin/claude-design-auth.mjs"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "index.ts",
+    "auth.ts",
+    "skills"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  }
+}

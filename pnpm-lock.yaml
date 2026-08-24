@@ -69,6 +69,8 @@ importers:
 
   packages/claude-compat: {}
 
+  packages/claude-design: {}
+
   packages/cloak: {}
 
   packages/codemode:

@@ -46,17 +46,18 @@ Local paths are added to pi's settings without copying — edits in the repo are
 
 ### Behavior & plumbing
 
-| Package                                  | What it does                                                                                                                 | Adds                                                |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| [agent-urls](packages/agent-urls/)       | `agent://` / `history://` URIs for pi-subagents runs; list and read run outputs/transcripts                                  | `/agent`, `list_agent_runs`, `read_agent_url` tools |
-| [artifacts](packages/artifacts/)         | `artifact` tool: render markdown/HTML to styled browser pages from a lazy localhost server, with live reload                 | `artifact` tool, `/artifacts`                       |
-| [auto-theme](packages/auto-theme/)       | Sync pi theme with macOS system appearance (dark↔light pairs)                                                                | —                                                   |
-| [claude-compat](packages/claude-compat/) | Claude Code compatibility: `CLAUDE_PLUGIN_ROOT` path shimming + `` !`command` `` dynamic SKILL.md placeholders (allowlisted) | two extension entry points                          |
-| [cloak](packages/cloak/)                 | Redact secrets from `read` tool results before they reach model context, via glob-scoped regex rules                         | `/cloak-status`, `cloak.json`                       |
-| [fast](packages/fast/)                   | Toggle premium faster inference for supported Anthropic Claude and OpenAI Codex models                                       | `/fast`, footer status                              |
-| [model-switch](packages/model-switch/)   | Cycle or fuzzy-pick from a machine-local, sectioned model list, skipping missing or unauthenticated entries                  | `/model-cycle`, configurable shortcuts              |
-| [session-name](packages/session-name/)   | Auto-name sessions (heuristic or LLM), mirror to terminal title, name-focused session picker                                 | `/sn`, `/sessions`                                  |
-| [stash](packages/stash/)                 | `ctrl+s` parks the prompt draft on a LIFO stack; pop or auto-restore                                                         | `ctrl+s`, stash widget                              |
+| Package                                  | What it does                                                                                                                 | Adds                                                      |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| [agent-urls](packages/agent-urls/)       | `agent://` / `history://` URIs for pi-subagents runs; list and read run outputs/transcripts                                  | `/agent`, `list_agent_runs`, `read_agent_url` tools       |
+| [artifacts](packages/artifacts/)         | `artifact` tool: render markdown/HTML to styled browser pages from a lazy localhost server, with live reload                 | `artifact` tool, `/artifacts`                             |
+| [auto-theme](packages/auto-theme/)       | Sync pi theme with macOS system appearance (dark↔light pairs)                                                                | —                                                         |
+| [claude-compat](packages/claude-compat/) | Claude Code compatibility: `CLAUDE_PLUGIN_ROOT` path shimming + `` !`command` `` dynamic SKILL.md placeholders (allowlisted) | two extension entry points                                |
+| [claude-design](packages/claude-design/) | Claude Design (claude.ai/design) in pi: `design` skill over the official MCP server, plus login commands and auth CLI        | `design` skill, `/design-login`, `claude-design-auth` CLI |
+| [cloak](packages/cloak/)                 | Redact secrets from `read` tool results before they reach model context, via glob-scoped regex rules                         | `/cloak-status`, `cloak.json`                             |
+| [fast](packages/fast/)                   | Toggle premium faster inference for supported Anthropic Claude and OpenAI Codex models                                       | `/fast`, footer status                                    |
+| [model-switch](packages/model-switch/)   | Cycle or fuzzy-pick from a machine-local, sectioned model list, skipping missing or unauthenticated entries                  | `/model-cycle`, configurable shortcuts                    |
+| [session-name](packages/session-name/)   | Auto-name sessions (heuristic or LLM), mirror to terminal title, name-focused session picker                                 | `/sn`, `/sessions`                                        |
+| [stash](packages/stash/)                 | `ctrl+s` parks the prompt draft on a LIFO stack; pop or auto-restore                                                         | `ctrl+s`, stash widget                                    |
 
 ### Library
 

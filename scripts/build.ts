@@ -143,7 +143,12 @@ function verify(name: string): string[] {
   return problems;
 }
 
-const names = buildOrder(workspacePackages());
+/** JS-only packages (e.g. a plain .mjs bin) have nothing to compile or verify. */
+function hasTsSources(name: string): boolean {
+  return readdirSync(join(packagesDir, name)).some((f) => f.endsWith('.ts'));
+}
+
+const names = buildOrder(workspacePackages()).filter(hasTsSources);
 const failed: string[] = [];
 
 for (const name of names) {
