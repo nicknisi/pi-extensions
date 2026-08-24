@@ -12,7 +12,7 @@ pi install /Users/nicknisi/Developer/pi-extensions/packages/artifacts
 
 ## What it adds
 
-- **Tool `artifact`** — action-based (`create` | `update` | `open` | `list`). Registered with a `promptSnippet` ("emit visual output as a browser HTML artifact instead of terminal text") so the model knows when to reach for it.
+- **Tool `artifact`** — action-based (`create` | `update` | `open` | `list` | `share`). Registered with a `promptSnippet` ("emit visual output as a browser HTML artifact instead of terminal text") so the model knows when to reach for it.
 - **Command `/artifacts`** — starts the lazy server and opens the index page (`/`) in the browser.
 - **Event hook** — `session_shutdown`: stops the HTTP server.
 - **Browser UI** — styled artifact pages plus an index page at `/`; live reload via an `/events` SSE endpoint. No TUI widgets, overlays, keybindings, or custom message/entry types: tool results use pi's default rendering (the tool returns structured `details` — `action`, `slug`, `title`, `kind`, `url`, `absPath` — and a text summary containing the clickable localhost URL).
@@ -21,20 +21,23 @@ pi install /Users/nicknisi/Developer/pi-extensions/packages/artifacts
 
 Parameters (TypeBox schema):
 
-| Param     | Type / values                            | Default                             | Notes                                                                                 |
-| --------- | ---------------------------------------- | ----------------------------------- | ------------------------------------------------------------------------------------- |
-| `action`  | `create` \| `update` \| `open` \| `list` | required                            | `update` on a missing slug creates it                                                 |
-| `title`   | string                                   | required for create/update/open     | slug derived from it (kebab-case, max 80 chars)                                       |
-| `kind`    | `markdown` \| `html`                     | required for create/update          | never auto-detected from content                                                      |
-| `content` | string                                   | —                                   | inline markdown or HTML                                                               |
-| `path`    | string                                   | —                                   | alternative to `content`: read file relative to cwd (2 MB cap; `kind` still required) |
-| `open`    | boolean                                  | `true` on create, `false` on update | auto-open in browser after write                                                      |
+| Param     | Type / values                                       | Default                               | Notes                                                                                 |
+| --------- | --------------------------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------- |
+| `action`  | `create` \| `update` \| `open` \| `list` \| `share` | required                              | `update` on a missing slug creates it                                                 |
+| `title`   | string                                              | required for create/update/open/share | slug derived from it (kebab-case, max 80 chars)                                       |
+| `method`  | `clipboard` \| `reveal` \| `gist`                   | `clipboard` (share only)              | how to hand off the file: clipboard copy, file-manager reveal, or GitHub gist         |
+| `public`  | boolean                                             | `false` (share method=gist only)      | make the gist public; default is a secret gist                                        |
+| `kind`    | `markdown` \| `html`                                | required for create/update            | never auto-detected from content                                                      |
+| `content` | string                                              | —                                     | inline markdown or HTML                                                               |
+| `path`    | string                                              | —                                     | alternative to `content`: read file relative to cwd (2 MB cap; `kind` still required) |
+| `open`    | boolean                                             | `true` on create, `false` on update   | auto-open in browser after write                                                      |
 
 Behavior per action:
 
 - `create` / `update` — write `<slug>.html` and return slug + localhost URL + absolute path. `update` pushes an SSE reload event to connected browser tabs, so iterating on a report reuses one file and one tab. If `open` is false and the server isn't running, no URL is returned (`(server not running — use action: open to view)`).
 - `open` — starts the server (if needed) and opens the artifact in the browser. Errors if the slug doesn't exist.
 - `list` — lists artifacts newest-first (title, kind, timestamp, slug, absolute path). Does **not** start the server; URLs are included only if the server is already running.
+- `share` — hands the artifact file off, since every artifact is already one self-contained HTML file. `clipboard` (default) copies the rendered HTML (pbcopy / clip / wl-copy); `reveal` shows the file in the OS file manager (Finder via `open -R`), ready to AirDrop or drag into Slack; `gist` runs `gh gist create` under the user's GitHub account (requires the `gh` CLI, authed), copies the URL to the clipboard, and opens it — secret unless `public: true`. Gists display as source, not a rendered page, so `gist` is for durable attributable upload, not for showing someone the rendered report.
 
 Example tool call (as the model would emit it):
 

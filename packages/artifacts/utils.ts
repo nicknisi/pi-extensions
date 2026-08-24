@@ -1,7 +1,7 @@
 /** Pure helpers: slugify, artifact file I/O, browser open. */
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { join, normalize, sep } from 'node:path';
+import { dirname, join, normalize, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 
 import { ARTIFACT_DIR } from './config.js';
@@ -135,4 +135,52 @@ export function openInBrowser(url: string): void {
   spawn(cmd, args, { detached: true, stdio: 'ignore' })
     .on('error', (err) => console.warn(`openInBrowser: ${cmd} failed: ${err.message}`))
     .unref();
+}
+
+/** Run a command, resolve with trimmed stdout. Rejects with stderr (or spawn error) on failure. */
+function run(cmd: string, args: string[], input?: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args);
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.stderr.on('data', (d) => (err += d));
+    child.on('error', (e) => reject(new Error(`${cmd} is not available: ${e.message}`)));
+    child.on('close', (code) =>
+      code === 0 ? resolve(out.trim()) : reject(new Error(err.trim() || `${cmd} exited with code ${code}`)),
+    );
+    if (input != null) child.stdin.write(input);
+    child.stdin.end();
+  });
+}
+
+/** Copy text to the system clipboard (pbcopy / clip / wl-copy). */
+export async function copyToClipboard(text: string): Promise<void> {
+  const [cmd, args] =
+    process.platform === 'darwin'
+      ? (['pbcopy', []] as const)
+      : process.platform === 'win32'
+        ? (['clip', []] as const)
+        : (['wl-copy', []] as const);
+  await run(cmd, [...args], text);
+}
+
+/** Reveal a file in the OS file manager (Finder / Explorer / xdg-open on its directory). */
+export function revealFile(absPath: string): void {
+  const [cmd, args] =
+    process.platform === 'darwin'
+      ? ['open', ['-R', absPath]]
+      : process.platform === 'win32'
+        ? ['explorer', [`/select,${absPath}`]]
+        : ['xdg-open', [dirname(absPath)]];
+  spawn(cmd, args, { detached: true, stdio: 'ignore' })
+    .on('error', (err) => console.warn(`revealFile: ${cmd} failed: ${err.message}`))
+    .unref();
+}
+
+/** Upload an artifact file as a GitHub gist via the gh CLI. Returns the gist URL. */
+export async function createGist(absPath: string, title: string, isPublic: boolean): Promise<string> {
+  const args = ['gist', 'create', absPath, '--desc', title];
+  if (isPublic) args.push('--public');
+  return run('gh', args);
 }
