@@ -17,7 +17,9 @@
   "files": [
     "dist",
     "index.ts",
-    "engine.ts"
+    "engine.ts",
+    "examples",
+    "skills"
   ],
   "type": "module",
   "exports": {
@@ -36,6 +38,9 @@
   "pi": {
     "extensions": [
       "./index.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   }
 }

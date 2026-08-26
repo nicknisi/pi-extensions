@@ -11,17 +11,18 @@
 //      long-term-elegant production-ready answer?"
 //   2. The Holy Grail described SEPARATELY — the unconstrained ideal — with
 //      every dependency outside our authority named.
-//   3. A judge picks WITHOUT punting to the user: choose the Holy Grail when
-//      it is proportionate and implementable through interfaces we control;
-//      otherwise the strongest practical option with a clear path toward it.
-//      One rejection reason per losing candidate. Never block just because
-//      the Grail needs an upstream change.
-//   4. checkpoint() gates the plan write — eyeball the choice before spending
-//      tokens on the full plan.
-//   5. Plan writer: per step, what changes, where, and how to verify.
+//   3. An advisor ranks the options with a recommendation, curbing Grail
+//      ideas that need upstream changes we don't control.
+//   4. THE DECISION GATE IS THE HUMAN: ask() lists the options with the
+//      recommendation on top. The whole point of the workflow is that you
+//      only decide AFTER it finishes mining — including rejecting everything.
+//   5. Plan writer elaborates the CHOSEN option: per step, what changes,
+//      where, and how to verify.
 //
 // HOW TO ADAPT: pass { problem, scope, constraints } via args —
 //   /wf run autoplan {"problem":"choose a timeout fallback","scope":"packages/workflows only","constraints":["keep cancellation terminal"]}
+// Or just say "autoplan this" — the bundled skill derives the args from the
+// conversation.
 
 export const meta = {
   name: 'autoplan',
@@ -55,40 +56,68 @@ const grail = await agent(
   { label: 'grail' },
 );
 
-phase('judge');
-const verdict = await agent(
+phase('advisor');
+// The advisor RECOMMENDS but does not decide — the human is the gate. It
+// curbs Holy Grail ideas that need changes outside our authority.
+const advice = await agent(
   `${CONTEXT}\n\nCANDIDATES:\n${candidates.map((c, i) => `--- Candidate ${CANDIDATE_IDS[i]} ---\n${c}`).join('\n\n')}\n\n` +
-    `HOLY GRAIL:\n${grail}\n\nPick the right option WITHOUT asking the user to decide. Choose the Holy Grail ` +
-    `when it is proportionate, production-ready, in scope, and implementable through interfaces we control. ` +
-    `Otherwise choose the strongest practical in-scope candidate with a clear path toward the Grail. ` +
-    `Record one rejection reason for every other candidate.`,
+    `HOLY GRAIL:\n${grail}\n\nRank the options for practicality and simplicity, preferring interfaces we ` +
+    `control; reject any Grail that needs an upstream change as UNIMPLEMENTABLE NOW (note it, don't pick it). ` +
+    `Return a short title + one-line gist per option (candidates AND the grail if it qualifies), the ` +
+    `recommended id, why, and one rejection reason per loser.`,
   {
-    label: 'judge',
+    label: 'advisor',
     schema: {
       type: 'object',
       properties: {
-        choice: { type: 'string' },
-        isGrail: { type: 'boolean' },
-        gist: { type: 'string' },
+        options: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { id: { type: 'string' }, title: { type: 'string' }, gist: { type: 'string' } },
+            required: ['id', 'title', 'gist'],
+          },
+        },
+        recommended: { type: 'string' },
+        why: { type: 'string' },
         rejections: {
           type: 'array',
           items: { type: 'object', properties: { id: { type: 'string' }, reason: { type: 'string' } } },
         },
       },
-      required: ['choice', 'gist', 'rejections'],
+      required: ['options', 'recommended', 'why', 'rejections'],
     },
   },
 );
 
-log(`judge picked: ${verdict.choice} (${verdict.gist})`);
-await checkpoint(`plan "${verdict.choice}"`);
+phase('decision gate');
+// The human decides — after the mining, not during. Recommendation first.
+const ordered = [...advice.options].sort((a, b) =>
+  a.id === advice.recommended ? -1 : b.id === advice.recommended ? 1 : 0,
+);
+const REJECT = 'none — reject all / re-mine';
+const choice = await ask(`Recommended: ${advice.recommended} — ${advice.why}\n\nPick a direction:`, [
+  ...ordered.map((o) => `${o.id}: ${o.title} — ${o.gist}`),
+  REJECT,
+]);
+if (!choice || choice === REJECT) {
+  return {
+    decided: false,
+    options: advice.options,
+    recommended: advice.recommended,
+    why: advice.why,
+    rejections: advice.rejections,
+  };
+}
+const picked = ordered.find((o) => choice.startsWith(`${o.id}:`)) ?? ordered[0];
+log(`human picked: ${picked.id} ${picked.title}`);
 
 phase('plan');
 const plan = await agent(
-  `${CONTEXT}\n\nWrite the implementation plan for the selected option:\n${verdict.gist}\n\n` +
+  `${CONTEXT}\n\nWrite the implementation plan for the SELECTED option (${picked.id}): ${picked.title} — ${picked.gist}\n\n` +
     `For each step state WHAT changes, WHERE (exact files), and HOW TO VERIFY it. ` +
-    `End with a "rejected alternatives" section: ${JSON.stringify(verdict.rejections)}`,
+    `End with a "rejected alternatives" section: ${JSON.stringify(advice.rejections)}`,
   { label: 'planner' },
 );
 
-return { choice: verdict.choice, gist: verdict.gist, rejections: verdict.rejections, plan };
+return { decided: true, choice: picked, why: advice.why, rejections: advice.rejections, plan };
