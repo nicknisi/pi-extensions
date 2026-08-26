@@ -20,7 +20,7 @@ Claude Code-style `/goal` and `/loop` for pi. `/goal <condition>` makes the sess
 /goal clear          remove the active goal
 ```
 
-Clear aliases: `clear`, `stop`, `off`, `reset`, `none`, `cancel`. Tab completion is provided for `clear` and `stop`.
+Clear aliases: `clear`, `stop`, `off`, `reset`, `none`, `cancel`. Tab completion is provided for `clear` and `stop`. Stop means stop: clearing also stops a running `/loop` (a runaway "goal" is usually a loop, which `/goal` subcommands otherwise can't see) and aborts the in-flight turn so the stop is immediate.
 
 Setting a goal immediately sends the condition as a user message (`deliverAs: "followUp"` when idle, `"steer"` mid-turn). After each `agent_end`, the evaluator reads the transcript tail (last ~20000 chars, text content only) and returns `YES`/`NO` plus a one-sentence reason. On `NO`, the reason is fed back as guidance for the next turn. On `YES`, the goal clears automatically. If the evaluator itself errors, the session keeps working toward the condition (the failure is treated as transient, not as a goal verdict).
 
