@@ -6,6 +6,9 @@
  *                       met, then clears the goal automatically.
  * /goal                 show status (condition, duration, turns, last reason).
  * /goal clear           remove the active goal (stop|off|reset|none|cancel ok).
+ *                       Stop means stop: also stops a running /loop and aborts
+ *                       the in-flight turn, since a runaway "goal" report is
+ *                       usually a loop the user can't see from /goal.
  *
  * /loop [interval] <prompt>   re-run a prompt while the session stays open.
  *   /loop 5m check if the deploy finished
@@ -371,16 +374,32 @@ function setGoal(ctx: ExtensionContext, condition: string): void {
 }
 
 function clearGoal(ctx: ExtensionContext, silent = false): void {
-  if (!goal) {
-    if (!silent) notify(ctx, 'No goal set');
-    return;
-  }
-  const cond = goal.condition;
+  const cond = goal?.condition;
   goal = null;
+  // Stop means stop. A runaway "goal" report is usually a running /loop the
+  // user can't see from /goal subcommands — take it down too, and abort the
+  // in-flight turn so the stop is immediate instead of letting the current
+  // turn (and one queued continuation) play out after the clear.
+  const stoppedLoop = loop ? { prompt: loop.prompt, iterations: loop.iterations } : null;
+  if (loop) stopLoop(ctx, true);
   persist(ctx);
   if (!goal && !loop) clearStateFile(ctx.cwd);
   refreshStatus(ctx);
-  if (!silent) notify(ctx, `Goal cleared: ${short(cond)}`);
+  if (cond !== undefined || stoppedLoop) {
+    try {
+      ctx.abort();
+    } catch {
+      /* best effort — cleared state already guarantees no new continuations */
+    }
+  }
+  if (silent) return;
+  const parts: string[] = [];
+  if (cond !== undefined) parts.push(`Goal cleared: ${short(cond)}`);
+  if (stoppedLoop)
+    parts.push(
+      `Loop stopped (${stoppedLoop.iterations} run${stoppedLoop.iterations === 1 ? '' : 's'}): ${short(stoppedLoop.prompt)}`,
+    );
+  notify(ctx, parts.length > 0 ? parts.join('\n') : 'No goal set');
 }
 
 function goalStatus(ctx: ExtensionContext): void {
@@ -593,14 +612,14 @@ export default function (pi: ExtensionAPI): void {
 
   pi.registerCommand('goal', {
     description:
-      "Set a completion condition and pi keeps working until a model confirms it's met. /goal <condition> | /goal (status) | /goal clear",
+      "Set a completion condition and pi keeps working until a model confirms it's met. /goal <condition> | /goal (status) | /goal clear — clear also stops a running /loop and aborts the in-flight turn",
     getArgumentCompletions: (prefix: string) =>
       ['clear', 'stop']
         .filter((v) => v.startsWith(prefix))
         .map((v) => ({
           value: v + ' ',
           label: v,
-          description: v === 'clear' ? 'remove the active goal' : 'alias of clear',
+          description: v === 'clear' ? 'stop the goal (and any running loop)' : 'alias of clear',
         })),
     handler: async (args: string, ctx: ExtensionContext) => cmdGoal(args, ctx),
   });
