@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-orchestrate",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Multi-agent orchestration across pi sessions",
   "keywords": [
     "pi",

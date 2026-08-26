@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-codemode",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Execute model-written TypeScript that orchestrates subagents compositionally — one codemode tool over the first-party in-process runtime",
   "keywords": [
     "pi",

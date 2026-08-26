@@ -1,5 +1,15 @@
 # @nicknisi/pi-workflows
 
+## 0.3.0
+
+### Minor Changes
+
+- e68a84f: Human-steerable runs: session-scoped `pause`/`resume` (tool actions and `/wf pause|resume`) hold a run before its next `agent()` spawn; new script globals `checkpoint(label?)` (confirm-gated pause; reject stops the run) and `ask(question, options?)` (select/confirm mid-run); the footer status now tracks `phase()` markers. Adds three examples ported from osolmaz/pi-workflows: `autoplan.js`, `sanity-check.js`, `autoimplement.js`.
+
+### Patch Changes
+
+- fd87186: `autoplan.js`: the human is now the decision gate — the advisor only recommends, and `ask()` presents the options (recommendation first, reject-all always offered) matching the osolmaz demo. Bundled `autoplan` skill so "autoplan this" triggers the workflow with conversation-derived args. Fixes `files` so `examples/` and `skills/` actually publish to npm.
+
 ## 0.2.2
 
 ### Patch Changes
