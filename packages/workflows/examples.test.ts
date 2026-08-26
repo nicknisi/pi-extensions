@@ -22,8 +22,15 @@ const examples = fs
   .map((f) => path.join(examplesDir, f));
 
 describe('examples smoke: compile + meta', () => {
-  it('discovers exactly the three example files', () => {
-    expect(examples.map((e) => path.basename(e)).sort()).toEqual(['bake-off.js', 'gates.js', 'lanes.js']);
+  it('discovers exactly the six example files', () => {
+    expect(examples.map((e) => path.basename(e)).sort()).toEqual([
+      'autoimplement.js',
+      'autoplan.js',
+      'bake-off.js',
+      'gates.js',
+      'lanes.js',
+      'sanity-check.js',
+    ]);
   });
 
   for (const file of examples) {

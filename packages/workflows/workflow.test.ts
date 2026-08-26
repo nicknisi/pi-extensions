@@ -12,7 +12,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { runScript, type EngineSpawnFn, type EngineSpawnResult } from './engine.js';
+import { createRunGate, runScript, type EngineSpawnFn, type EngineSpawnResult } from './engine.js';
 
 const tmpdirs: string[] = [];
 
@@ -243,6 +243,105 @@ describe('engine: agent opts + failures', () => {
       cwd: '/tmp',
     });
     expect(r.value).toBe('PASS');
+  });
+});
+
+describe('engine: gate (pause/resume)', () => {
+  const tick = () => new Promise((r) => setTimeout(r, 10));
+
+  it('a paused gate holds agent() before the spawn until resumed', async () => {
+    const gate = createRunGate();
+    let spawns = 0;
+    const spawn: EngineSpawnFn = async () => {
+      spawns++;
+      return { ok: true, text: 'ok', usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } };
+    };
+    gate.pause();
+    const run = runScript({ script: 'await agent("x"); return "done";', spawn, cwd: '/tmp', gate });
+    await tick();
+    expect(spawns).toBe(0); // held at the gate, spawn never fired
+    gate.resume();
+    const r = await run;
+    expect(spawns).toBe(1);
+    expect(r.value).toBe('done');
+  });
+
+  it('abort() rejects a parked run instead of hanging it', async () => {
+    const gate = createRunGate();
+    gate.pause();
+    const run = runScript({ script: 'await agent("x"); return "done";', spawn: fakeSpawn(), cwd: '/tmp', gate });
+    gate.abort();
+    await expect(run).rejects.toThrow('aborted');
+  });
+
+  it('abort() rejects future waits too (no re-arm after stop)', async () => {
+    const gate = createRunGate();
+    gate.abort();
+    await expect(gate.wait()).rejects.toThrow('aborted');
+  });
+});
+
+describe('engine: checkpoint + ask', () => {
+  it('checkpoint without a host is a logged no-op', async () => {
+    const r = await runScript({
+      script: 'await checkpoint("review"); return "ok";',
+      spawn: fakeSpawn(),
+      cwd: '/tmp',
+    });
+    expect(r.value).toBe('ok');
+    expect(r.logs.some((l) => l.includes("checkpoint 'review' skipped"))).toBe(true);
+  });
+
+  it('checkpoint with a host is invoked with its label and gates the run', async () => {
+    const calls: Array<string | undefined> = [];
+    const r = await runScript({
+      script: 'await checkpoint(); await checkpoint("ship?"); return "ok";',
+      spawn: fakeSpawn(),
+      cwd: '/tmp',
+      checkpoint: async (label) => {
+        calls.push(label);
+      },
+    });
+    expect(r.value).toBe('ok');
+    expect(calls).toEqual([undefined, 'ship?']);
+  });
+
+  it('a throwing checkpoint host stops the run (rejected gate = stop)', async () => {
+    await expect(
+      runScript({
+        script: 'await checkpoint("review"); return "unreachable";',
+        spawn: fakeSpawn(),
+        cwd: '/tmp',
+        checkpoint: async () => {
+          throw new Error('rejected');
+        },
+      }),
+    ).rejects.toThrow('rejected');
+  });
+
+  it('ask without a host throws (never invent an answer)', async () => {
+    const r = await runScript({
+      script: 'try { await ask("continue?"); } catch (e) { return e.message; }',
+      spawn: fakeSpawn(),
+      cwd: '/tmp',
+    });
+    expect(r.value).toBe('ask() unavailable in this host');
+  });
+
+  it('ask passes question + options to the host and returns the answer', async () => {
+    const seen: Array<{ q: string; opts?: string[] }> = [];
+    const r = await runScript({
+      script: 'const a = await ask("pick", ["a", "b"]); const b = await ask("ok?"); return { a, b };',
+      spawn: fakeSpawn(),
+      cwd: '/tmp',
+      ask: async (q, opts) => {
+        seen.push({ q, ...(opts ? { opts } : {}) });
+        return opts ? 'b' : true;
+      },
+    });
+    expect(r.value).toEqual({ a: 'b', b: true });
+    expect(seen).toEqual([{ q: 'pick', opts: ['a', 'b'] }, { q: 'ok?' }]);
+    expect(r.logs.some((l) => l === '? pick')).toBe(true);
   });
 });
 

@@ -8,8 +8,10 @@ Four pieces compose the workflow platform: `@nicknisi/pi-shared`'s **subagent ru
 
 ## What it adds
 
-- **`workflow` tool** (model-facing) — actions: `run` (inline JS `script` OR `name` of a saved workflow file), `list`, `status <runId>`, `stop <runId>`.
-- **`/wf` command** (human-facing) — `/wf list | /wf run <name> [argsJson] | /wf status <runId> | /wf stop <runId>`.
+- **`workflow` tool** (model-facing) — actions: `run` (inline JS `script` OR `name` of a saved workflow file), `list`, `status <runId>`, `stop <runId>`, `pause`, `resume`.
+- **`/wf` command** (human-facing) — `/wf list | /wf run <name> [argsJson] | /wf status <runId> | /wf stop <runId> | /wf pause | /wf resume`.
+- **Human gates inside scripts** — `checkpoint(label?)` pauses the run on a confirm dialog (reject/dismiss stops the run); `ask(question, options?)` asks mid-run (select with options, yes/no without, `undefined` when dismissed).
+- **Footer status** — while a run is active the footer shows `wf <name> [running|paused] <last phase>`.
 
 ## The script contract
 
@@ -30,13 +32,17 @@ return { answered: results.length, results };
 | `agent(prompt, opts)`        | Spawns a hermetic in-process child via the subagent runtime (namespace `workflows`). Throws `${kind}: ${error}` on failure — wrap with a `safeAgent` that returns `{ ok, value, error }` so a failure inside `parallel()` reports which stage died instead of collapsing the wave to `null`. Returns `res.data ?? res.text ?? null`. |
 | `parallel(thunks)`           | `Promise.all` over zero-arg thunks — pass `() => agent(...)`, not `agent(...)`.                                                                                                                                                                                                                                                      |
 | `pipeline(items, ...stages)` | Folds items through stages: each stage maps over the previous stage's outputs in parallel, producing the next array.                                                                                                                                                                                                                 |
-| `phase(name)`                | Logging marker only — NOT a budget boundary. Appends `── name` to the result logs.                                                                                                                                                                                                                                                   |
+| `phase(name)`                | Logging marker that also drives the footer status (`wf <name> [state] <phase>`). NOT a budget boundary.                                                                                                                                                                                                                              |
 | `log(...args)`               | Captured into the result logs.                                                                                                                                                                                                                                                                                                       |
+| `checkpoint(label?)`         | Human gate: suspends the run on a confirm dialog; rejecting throws and stops the run. Without a UI host it is a logged no-op. Put it before destructive or expensive steps.                                                                                                                                                          |
+| `ask(question, options?)`    | Human answer mid-run: a select when `options` are given, a yes/no confirm otherwise; `undefined` when dismissed. Without a UI host it throws — never invent an answer.                                                                                                                                                               |
 | `args`                       | The `args` JSON value passed to `run`.                                                                                                                                                                                                                                                                                               |
 | `budget`                     | `{ total, spent, remaining }` over the run's token usage. `total` defaults to `Infinity`; `spent` accumulates across `agent()` calls. Read-only.                                                                                                                                                                                     |
 | `cwd`                        | The session working directory.                                                                                                                                                                                                                                                                                                       |
 
 `agent()` opts: `model` (`'provider/id'`), `tools` (allowlist — default read-only `['read','grep','find','ls']`; pass `['read','bash','edit','write']` for builders), `label` (child agent label), `systemPrompt`, `schema` (validated; parsed JSON lands in `result.data`), `effort` (thinking level), `timeoutMs`, `maxTurns`, `worktree` (run the child in an isolated git worktree; on settle the change set is captured to a `.patch` and `agent()` returns `{ value, patchPath, runId }` instead of the bare value — opt-in, so non-worktree calls are unchanged), `agentType` (accepted but ignored — no agent-type registry; resolve `systemPrompt` in the script itself).
+
+`agent()` awaits the run's pause gate before every spawn: `pause` lets the in-flight step finish, then holds the run before the next one; `resume` releases it. Pause/resume are session-scoped (`/wf pause`, `/wf resume`, or the tool actions) — they apply to every active run, in practice one. Stopping or timing out a run aborts the gate, so a parked run rejects instead of hanging.
 
 The script executes **in the host process with full Node access** — `process`, `require`, and `fs` are all reachable, the same trust boundary as the `bash` tool. Keep the returned value small: summaries, counts, key findings — never raw file dumps.
 
@@ -71,6 +77,9 @@ The `examples/` directory ships standalone, copy-and-adapt workflow scripts — 
 - **`lanes.js`** — N parallel agents editing FILE-DISJOINT lanes of one repo under a hard-rules preamble (each lane owns a fixed file set; no git, no installs; the parent integrates centrally). Use it when a task splits into independent edits that don't overlap on files. Adapt by setting `VERIFY` to your typecheck command and filling the `LANES` array with `{ name, files, brief }` per lane.
 - **`gates.js`** — three judge/verify prompt builders returning prompt strings: adversarial refutation (defeats confirmation bias), deep-research coverage (defeats silent source omission), and a 3-way code-review verdict (defeats verdict collapse). Use it when you need a reliable gate inside your own workflow. Adapt by copying the builder whose failure mode you need and calling it from an `agent()` with a JSON schema. Prompt patterns distilled from `@quintinshaw/pi-dynamic-workflows`.
 - **`bake-off.js`** — race N models on the SAME task in isolated worktrees (`worktree: true`), then an advisory judge reads each contender's `.patch` and picks a winner. Use it on hard build tasks where a single GLM-5.2-class builder produces decent-but-flawed code; the 2x token cost buys a measurably better hit rate. Adapt by setting `CONTENDERS` to the models to race and passing `task` in `args`; the workflow returns the winner's `patchPath` to apply via `/patches`.
+- **`autoplan.js`** — 3 solution candidates in parallel + a Holy Grail pass, a judge that picks WITHOUT punting to the user (one rejection reason per loser), then a `checkpoint` before the full plan write. Ported from osolmaz/pi-workflows. Pass `{ problem, scope, constraints }` in `args`.
+- **`sanity-check.js`** — read-only contribution review: evidence collection, four parallel area reviewers (necessity, duplication, contracts, scope/tests), then a verifier that tries to REFUTE every finding before the keep/simplify/refactor/drop/needs-evidence verdict. Ported from osolmaz/pi-workflows. Pass `{ baseRef }` in `args`.
+- **`autoimplement.js`** — implement a supplied plan (never devises one) behind an `ask` plan gate, then a bounded build → verify → review/fix loop where P0/P1 block and the round cap prevents an unbounded fix spiral. Ported from osolmaz/pi-workflows. Pass `{ task, plan, verify }` in `args`.
 
 ## Dependencies
 
@@ -81,6 +90,8 @@ The `examples/` directory ships standalone, copy-and-adapt workflow scripts — 
 ## Caveats
 
 - The script runs in the host process with full Node access — the same trust boundary as the `bash` and `codemode` tools. Your model, your session.
+- `checkpoint`/`ask` need an interactive UI host. In a headless/RPC host `checkpoint` degrades to a logged no-op and `ask` throws — scripts that require an answer fail loudly instead of inventing one.
+- Pause/resume are session-scoped and best-effort for tool-initiated runs: slash commands may queue behind an in-flight turn, so a `pause` issued mid-turn engages at the next `agent()` boundary after it's processed. For a guaranteed human gate, put `checkpoint`/`ask` in the script itself.
 - Project-local workflows (`.pi/workflows/`) load only in trusted projects; untrusted projects are limited to global workflows so a cloned repo cannot silently inject orchestration scripts.
 - `agent()` cannot spawn children of its own (the ecosystem recursion guard refuses nested orchestration). For dependent multi-stage work where stages spawn, use `@nicknisi/pi-codemode`'s `runWorkflow` instead.
 - `stop` cancels only runs spawned by this host process; persisted runs from other hosts show in `status` but are not cancellable here.

@@ -105,7 +105,11 @@ interface UiLike {
  * checkpoint is a confirm dialog — aborting it rejects so a dismissed gate
  * stops the run instead of silently continuing.
  */
-function makeRunControls(label: string, ui: UiLike, activeRuns: ActiveRuns): {
+function makeRunControls(
+  label: string,
+  ui: UiLike,
+  activeRuns: ActiveRuns,
+): {
   gate: RunGate;
   onLog: (line: string) => void;
   checkpoint: (checkpointLabel?: string) => Promise<void>;
@@ -123,7 +127,10 @@ function makeRunControls(label: string, ui: UiLike, activeRuns: ActiveRuns): {
     },
   };
   const checkpoint = async (checkpointLabel?: string): Promise<void> => {
-    const ok = await ui.confirm('Workflow checkpoint', checkpointLabel ? `${checkpointLabel} — continue?` : 'Continue?');
+    const ok = await ui.confirm(
+      'Workflow checkpoint',
+      checkpointLabel ? `${checkpointLabel} — continue?` : 'Continue?',
+    );
     if (!ok) throw new Error(`checkpoint${checkpointLabel ? ` '${checkpointLabel}'` : ''} rejected`);
   };
   const ask: EngineAskFn = async (question, options) => {
@@ -340,7 +347,7 @@ export default function workflows(pi: ExtensionAPI): void {
       '',
       'Script contract — injected globals: agent(prompt, opts), parallel(thunks),',
       'pipeline(items, ...stages), phase(name), log(...args), args, budget ({total, spent,',
-      'remaining}), cwd, checkpoint(label?), ask(question, options?). The script\'s FIRST statement',
+      "remaining}), cwd, checkpoint(label?), ask(question, options?). The script's FIRST statement",
       'SHOULD be `export const meta = { name, description }` (rewritten so the vm compiles;',
       'meta.name/description surface in the result).',
       '',
@@ -692,7 +699,9 @@ async function cmdWf(
   if (sub === 'pause' || sub === 'resume') {
     const n = sub === 'pause' ? pauseAll(activeRuns) : resumeAll(activeRuns);
     ctx.ui.notify(
-      n === 0 ? 'No active workflow run in this session.' : `${sub === 'pause' ? 'Paused' : 'Resumed'} ${n} run${n === 1 ? '' : 's'}.`,
+      n === 0
+        ? 'No active workflow run in this session.'
+        : `${sub === 'pause' ? 'Paused' : 'Resumed'} ${n} run${n === 1 ? '' : 's'}.`,
       n === 0 ? 'warning' : 'info',
     );
     return;
