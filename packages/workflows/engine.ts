@@ -2,7 +2,7 @@
  * The workflow script engine — pi-free and testable.
  *
  * A workflow script is a JavaScript statement body with injected globals
- * (args, agent, parallel, pipeline, phase, log, budget, cwd) and a leading
+ * (args, agent, parallel, pipeline, phase, log, budget, cwd, checkpoint, ask) and a leading
  * `export const meta = { name, description }` declaration. It returns a value
  * by evaluating a trailing expression or a top-level `return` (the body is
  * wrapped in an async function so a bare `return` compiles).
@@ -71,6 +71,58 @@ export interface EngineBudget {
   remaining: number;
 }
 
+// ── Run gate (pause/resume) ────────────────────────────────────────────────
+// A per-run hold. agent() awaits gate.wait() before every spawn, so pausing
+// lets the in-flight step finish and holds the run before the next one — the
+// script contract's equivalent of osolmaz/pi-workflows' `/workflow pause`.
+// abort() rejects current AND future waiters so a stopped run never hangs
+// parked at a gate.
+
+export interface RunGate {
+  readonly paused: boolean;
+  pause(): void;
+  resume(): void;
+  /** Reject all current and future waiters (run stopped/timed out). */
+  abort(): void;
+  wait(): Promise<void>;
+}
+
+export function createRunGate(): RunGate {
+  let paused = false;
+  let aborted = false;
+  let waiters: Array<{ resolve: () => void; reject: (e: Error) => void }> = [];
+  return {
+    get paused() {
+      return paused;
+    },
+    pause() {
+      paused = true;
+    },
+    resume() {
+      paused = false;
+      const w = waiters;
+      waiters = [];
+      for (const { resolve } of w) resolve();
+    },
+    abort() {
+      aborted = true;
+      const w = waiters;
+      waiters = [];
+      for (const { reject } of w) reject(new Error('run aborted while paused'));
+    },
+    wait() {
+      if (aborted) return Promise.reject(new Error('run aborted while paused'));
+      if (!paused) return Promise.resolve();
+      return new Promise<void>((resolve, reject) => {
+        waiters.push({ resolve, reject });
+      });
+    },
+  };
+}
+
+/** Script-global human question: select when options given, confirm otherwise. undefined = dismissed. */
+export type EngineAskFn = (question: string, options?: string[]) => Promise<string | boolean | undefined>;
+
 export interface ScriptMeta {
   name?: string;
   description?: string;
@@ -84,6 +136,19 @@ export interface RunScriptOptions {
   cwd: string;
   budgetTotal?: number;
   onLog?: (line: string) => void;
+  /** Pause gate; agent() awaits it before every spawn. */
+  gate?: RunGate;
+  /**
+   * Host-side human gate for the `checkpoint(label?)` global. When omitted,
+   * checkpoint is a no-op that logs a skip note (pi-free hosts, tests).
+   */
+  checkpoint?: (label?: string) => Promise<void>;
+  /**
+   * Host-side human question for the `ask(question, options?)` global. When
+   * omitted, ask throws — a script that needs an answer should fail loudly
+   * rather than invent one.
+   */
+  ask?: EngineAskFn;
 }
 
 export interface RunScriptResult {
@@ -168,6 +233,8 @@ export async function runScript(opts: RunScriptOptions): Promise<RunScriptResult
     if (typeof agentOpts.agentType === 'string') {
       log(`(agentType '${agentOpts.agentType}' accepted but ignored — no agent-type registry)`);
     }
+    // Pause gate: hold here (between steps) until resumed. Rejects on abort.
+    await opts.gate?.wait();
     const spawnOpts: EngineSpawnOptions = {
       prompt,
       ...(typeof agentOpts.label === 'string' ? { agent: agentOpts.label } : {}),
@@ -191,6 +258,25 @@ export async function runScript(opts: RunScriptOptions): Promise<RunScriptResult
     return res.data ?? res.text ?? null;
   };
 
+  // checkpoint(label?): script-internal human gate. The host decides what
+  // "continue?" means (a confirm dialog in pi); default is a logged no-op.
+  const checkpoint = async (label?: string): Promise<void> => {
+    if (!opts.checkpoint) {
+      log(`(checkpoint${label ? ` '${label}'` : ''} skipped — no host gate)`);
+      return;
+    }
+    log(`⏸ checkpoint${label ? `: ${label}` : ''}`);
+    await opts.checkpoint(label);
+  };
+
+  // ask(question, options?) — human answer inside a run. select with options,
+  // confirm without. Default throws: never invent an answer.
+  const ask: EngineAskFn = async (question, options) => {
+    if (!opts.ask) throw new Error('ask() unavailable in this host');
+    log(`? ${question}`);
+    return opts.ask(question, options);
+  };
+
   const parallel = <T>(thunks: Array<() => Promise<T>>): Promise<T[]> => Promise.all(thunks.map((t) => t()));
 
   // pipeline(items, ...stages): each stage maps over the previous stage's
@@ -206,7 +292,7 @@ export async function runScript(opts: RunScriptOptions): Promise<RunScriptResult
   // Compile + run. compileScript is extracted so callers (tests, future
   // tooling) can compile + read `meta` without a real spawn.
   const compiled = compileScript(script);
-  const value = await compiled.fn(args, agent, parallel, pipeline, phase, log, budget, cwd);
+  const value = await compiled.fn(args, agent, parallel, pipeline, phase, log, budget, cwd, checkpoint, ask);
   return { value, meta: compiled.meta, logs, usage, durationMs: Date.now() - startedAt };
 }
 
@@ -222,6 +308,8 @@ export type CompiledFn = (
   log: unknown,
   budget: unknown,
   cwd: string,
+  checkpoint: unknown,
+  ask: unknown,
 ) => Promise<unknown>;
 
 export interface CompiledScript {
@@ -245,7 +333,7 @@ export interface CompiledScript {
 export function compileScript(script: string): CompiledScript {
   const metaHolder: { value: ScriptMeta | undefined } = { value: undefined };
   const stripped = script.replace(STRIP_META, 'const meta = metaHolder.value =');
-  const wrapped = `(async function(args, agent, parallel, pipeline, phase, log, budget, cwd, metaHolder){\n${stripped}\n})`;
+  const wrapped = `(async function(args, agent, parallel, pipeline, phase, log, budget, cwd, checkpoint, ask, metaHolder){\n${stripped}\n})`;
   const raw = new vm.Script(wrapped, { filename: 'workflow.js' }).runInThisContext() as (
     args: unknown,
     agent: unknown,
@@ -255,12 +343,14 @@ export function compileScript(script: string): CompiledScript {
     log: unknown,
     budget: unknown,
     cwd: string,
+    checkpoint: unknown,
+    ask: unknown,
     metaHolder: { value: ScriptMeta | undefined },
   ) => Promise<unknown>;
-  // Bind metaHolder so callers invoke an 8-arg fn; the holder rides the call
+  // Bind metaHolder so callers invoke a 10-arg fn; the holder rides the call
   // (runInThisContext cannot see a closure variable, so it must be a parameter).
-  const fn: CompiledFn = (args, agent, parallel, pipeline, phase, log, budget, cwd) =>
-    raw(args, agent, parallel, pipeline, phase, log, budget, cwd, metaHolder);
+  const fn: CompiledFn = (args, agent, parallel, pipeline, phase, log, budget, cwd, checkpoint, ask) =>
+    raw(args, agent, parallel, pipeline, phase, log, budget, cwd, checkpoint, ask, metaHolder);
 
   // Stub dry-run to read `meta`. Well-formed scripts declare `meta` first, so
   // it is assigned synchronously before the first `await`; we await the whole
@@ -274,6 +364,8 @@ export function compileScript(script: string): CompiledScript {
     return values as U[];
   };
   const stubBudget = { total: Infinity, spent: 0, remaining: Infinity };
+  const stubCheckpoint = async (): Promise<void> => {};
+  const stubAsk = async (): Promise<undefined> => undefined;
   void fn(
     undefined,
     stubAgent,
@@ -283,6 +375,8 @@ export function compileScript(script: string): CompiledScript {
     () => {},
     stubBudget,
     '/tmp',
+    stubCheckpoint,
+    stubAsk,
   ).catch(() => {});
 
   // `meta` is a getter so a caller that re-runs `fn` with real globals sees

@@ -40,10 +40,13 @@ import {
 } from '@nicknisi/pi-shared';
 import { Type } from 'typebox';
 import {
+  createRunGate,
   runScript,
+  type EngineAskFn,
   type EngineSpawnFn,
   type EngineSpawnOptions,
   type EngineSpawnResult,
+  type RunGate,
   type RunScriptResult,
 } from './engine.js';
 
@@ -62,6 +65,89 @@ const MAX_LOG_CHARS = 2000;
 // Scoped per factory invocation (session) — two concurrent sessions in one
 // process must never share (or cross-abort) each other's runs.
 type Cancellables = Map<string, AbortController>;
+
+// ── Active workflow runs (this session), for pause/resume + footer status. ──
+// A run has no id of its own (runIds belong to child spawns), so pause/resume
+// are session-scoped: they apply to every in-flight run. In practice one.
+interface ActiveRun {
+  label: string;
+  gate: RunGate;
+  /** Refresh the footer status line to reflect pause/phase state. */
+  refresh: () => void;
+}
+type ActiveRuns = Set<ActiveRun>;
+
+function pauseAll(activeRuns: ActiveRuns): number {
+  for (const run of activeRuns) {
+    run.gate.pause();
+    run.refresh();
+  }
+  return activeRuns.size;
+}
+
+function resumeAll(activeRuns: ActiveRuns): number {
+  for (const run of activeRuns) {
+    run.gate.resume();
+    run.refresh();
+  }
+  return activeRuns.size;
+}
+
+interface UiLike {
+  setStatus: (id: string, text: string | undefined) => void;
+  confirm: (title: string, message: string) => Promise<boolean>;
+  select: (title: string, options: string[]) => Promise<string | undefined>;
+}
+
+/**
+ * Per-run scaffolding: gate (pause/resume/abort), footer status that tracks
+ * phase() markers, and the checkpoint/ask host functions backed by pi's UI.
+ * checkpoint is a confirm dialog — aborting it rejects so a dismissed gate
+ * stops the run instead of silently continuing.
+ */
+function makeRunControls(label: string, ui: UiLike, activeRuns: ActiveRuns): {
+  gate: RunGate;
+  onLog: (line: string) => void;
+  checkpoint: (checkpointLabel?: string) => Promise<void>;
+  ask: EngineAskFn;
+  dispose: () => void;
+} {
+  const gate = createRunGate();
+  let lastPhase = '';
+  const run: ActiveRun = {
+    label,
+    gate,
+    refresh: () => {
+      const state = gate.paused ? 'paused' : 'running';
+      ui.setStatus('workflows', `wf ${label} [${state}]${lastPhase ? ` ${lastPhase}` : ''}`);
+    },
+  };
+  const checkpoint = async (checkpointLabel?: string): Promise<void> => {
+    const ok = await ui.confirm('Workflow checkpoint', checkpointLabel ? `${checkpointLabel} — continue?` : 'Continue?');
+    if (!ok) throw new Error(`checkpoint${checkpointLabel ? ` '${checkpointLabel}'` : ''} rejected`);
+  };
+  const ask: EngineAskFn = async (question, options) => {
+    if (options && options.length > 0) return ui.select(question, options);
+    return ui.confirm('Workflow', question);
+  };
+  activeRuns.add(run);
+  run.refresh();
+  return {
+    gate,
+    checkpoint,
+    ask,
+    onLog: (line) => {
+      if (line.startsWith('── ')) {
+        lastPhase = line.slice(3);
+        run.refresh();
+      }
+    },
+    dispose: () => {
+      activeRuns.delete(run);
+      ui.setStatus('workflows', undefined);
+    },
+  };
+}
 
 function spawnCancellable(
   cancellables: Cancellables,
@@ -236,6 +322,7 @@ function formatRunResult(result: RunScriptResult, label: string): string {
 
 export default function workflows(pi: ExtensionAPI): void {
   const cancellables: Cancellables = new Map();
+  const activeRuns: ActiveRuns = new Set();
   const runtime = createSubagentRuntime({ namespace: NAMESPACE, artifactsDir: ARTIFACTS_ROOT });
   sweepRunArtifactsOnce(ARTIFACTS_ROOT);
 
@@ -246,14 +333,21 @@ export default function workflows(pi: ExtensionAPI): void {
       'Run a JavaScript workflow script that orchestrates subagents over the first-party runtime,',
       "or manage runs. Actions: 'run' (compile a script in a vm and execute it with injected",
       'globals), "list" (saved workflow files), "status" (a run record by runId), "stop" (cancel a',
-      "run by runId). For 'run', pass EITHER `script` (inline JS) OR `name` (a saved workflow file",
+      'run by runId), "pause"/"resume" (hold active runs before their next agent step, then',
+      "continue them). For 'run', pass EITHER `script` (inline JS) OR `name` (a saved workflow file",
       'stem from ~/.pi/agent/workflows/*.js or .pi/workflows/*.js). Optional `args` (any JSON value)',
       "is passed in as the script's `args` global.",
       '',
       'Script contract — injected globals: agent(prompt, opts), parallel(thunks),',
       'pipeline(items, ...stages), phase(name), log(...args), args, budget ({total, spent,',
-      "remaining}), cwd. The script's FIRST statement SHOULD be `export const meta = { name,",
-      'description }` (rewritten so the vm compiles; meta.name/description surface in the result).',
+      'remaining}), cwd, checkpoint(label?), ask(question, options?). The script\'s FIRST statement',
+      'SHOULD be `export const meta = { name, description }` (rewritten so the vm compiles;',
+      'meta.name/description surface in the result).',
+      '',
+      'checkpoint(label?) gates the run on a human confirm (dismiss/reject throws and stops the',
+      'run); ask(question, options?) asks the human mid-run — select when options are given,',
+      'yes/no confirm otherwise, undefined when dismissed. Use them before destructive or',
+      'expensive steps.',
       'The script returns a value via a trailing expression or a top-level `return` (the body is',
       'wrapped in an async function).',
       '',
@@ -279,9 +373,17 @@ export default function workflows(pi: ExtensionAPI): void {
       'Keep the returned value small — summaries, counts, key findings — never raw file contents.',
     ],
     parameters: Type.Object({
-      action: Type.Union([Type.Literal('run'), Type.Literal('list'), Type.Literal('status'), Type.Literal('stop')], {
-        description: 'Action: run | list | status | stop',
-      }),
+      action: Type.Union(
+        [
+          Type.Literal('run'),
+          Type.Literal('list'),
+          Type.Literal('status'),
+          Type.Literal('stop'),
+          Type.Literal('pause'),
+          Type.Literal('resume'),
+        ],
+        { description: 'Action: run | list | status | stop | pause | resume' },
+      ),
       script: Type.Optional(Type.String({ description: 'Inline JS workflow script (action: run).' })),
       name: Type.Optional(Type.String({ description: 'Saved workflow file stem (action: run).' })),
       args: Type.Optional(
@@ -333,6 +435,15 @@ export default function workflows(pi: ExtensionAPI): void {
           content: [{ type: 'text' as const, text: formatRun(record) }],
           details: { runId: record.runId, status: record.status },
         };
+      }
+
+      if (action === 'pause' || action === 'resume') {
+        const n = action === 'pause' ? pauseAll(activeRuns) : resumeAll(activeRuns);
+        const text =
+          n === 0
+            ? 'No active workflow run in this session.'
+            : `${action === 'pause' ? 'Paused' : 'Resumed'} ${n} active run${n === 1 ? '' : 's'}.`;
+        return { content: [{ type: 'text' as const, text }], details: { affected: n } };
       }
 
       if (action === 'stop') {
@@ -421,6 +532,10 @@ export default function workflows(pi: ExtensionAPI): void {
         ctx.sessionManager.getSessionFile(),
         controller.signal,
       );
+      const controls = makeRunControls(label, ctx.ui, activeRuns);
+      // A parked run (gate.wait / checkpoint) must not leak when the tool is
+      // aborted or times out — aborting the gate rejects its waiters.
+      controller.signal.addEventListener('abort', () => controls.gate.abort(), { once: true });
       const timeoutPromise = new Promise<never>((_, reject) => {
         controller.signal.addEventListener(
           'abort',
@@ -442,7 +557,10 @@ export default function workflows(pi: ExtensionAPI): void {
             args: params.args,
             spawn: spawnFn,
             cwd: ctx.cwd,
-            onLog: () => {},
+            onLog: controls.onLog,
+            gate: controls.gate,
+            checkpoint: controls.checkpoint,
+            ask: controls.ask,
           }),
           timeoutPromise,
         ]);
@@ -466,6 +584,7 @@ export default function workflows(pi: ExtensionAPI): void {
       } finally {
         clearTimeout(timer);
         signal?.removeEventListener('abort', onToolAbort);
+        controls.dispose();
       }
     },
   });
@@ -473,16 +592,16 @@ export default function workflows(pi: ExtensionAPI): void {
   // ── /wf — thin human-facing wrapper ───────────────────────────────────
   pi.registerCommand('wf', {
     description:
-      'Workflows: /wf list | /wf run <name> [argsJson] | /wf status <runId> | /wf stop <runId>. Saved workflows live in ~/.pi/agent/workflows/*.js (global) and .pi/workflows/*.js (project, trusted only).',
+      'Workflows: /wf list | /wf run <name> [argsJson] | /wf status <runId> | /wf stop <runId> | /wf pause | /wf resume. Saved workflows live in ~/.pi/agent/workflows/*.js (global) and .pi/workflows/*.js (project, trusted only).',
     getArgumentCompletions: (argumentPrefix) => {
       if (argumentPrefix.includes(' ')) return null;
       const prefix = argumentPrefix.trim();
-      const subs = ['list', 'run', 'status', 'stop'].filter((s) => s.startsWith(prefix));
+      const subs = ['list', 'run', 'status', 'stop', 'pause', 'resume'].filter((s) => s.startsWith(prefix));
       if (subs.length === 0) return null;
       return subs.map((s) => ({ value: s + ' ', label: s }));
     },
     handler: async (args, ctx) => {
-      await cmdWf(args, ctx, runtime, cancellables);
+      await cmdWf(args, ctx, runtime, cancellables, activeRuns);
     },
   });
 }
@@ -494,6 +613,7 @@ async function cmdWf(
   ctx: ExtensionCommandContext,
   runtime: SubagentRuntime,
   cancellables: Cancellables,
+  activeRuns: ActiveRuns,
 ): Promise<void> {
   const parts = args.trim().split(/\s+/).filter(Boolean);
   const sub = parts[0];
@@ -537,7 +657,11 @@ async function cmdWf(
         parsedArgs = argsJson;
       }
     }
-    ctx.ui.setStatus('workflows', `running ${name}…`);
+    const controls = makeRunControls(name, ctx.ui, activeRuns);
+    if (ctx.signal) {
+      if (ctx.signal.aborted) controls.gate.abort();
+      else ctx.signal.addEventListener('abort', () => controls.gate.abort(), { once: true });
+    }
     try {
       const spawnFn = makeSpawnFn(
         cancellables,
@@ -546,13 +670,31 @@ async function cmdWf(
         ctx.sessionManager.getSessionFile(),
         ctx.signal ?? undefined,
       );
-      const result = await runScript({ script: src, args: parsedArgs, spawn: spawnFn, cwd: ctx.cwd });
+      const result = await runScript({
+        script: src,
+        args: parsedArgs,
+        spawn: spawnFn,
+        cwd: ctx.cwd,
+        onLog: controls.onLog,
+        gate: controls.gate,
+        checkpoint: controls.checkpoint,
+        ask: controls.ask,
+      });
       ctx.ui.notify(formatRunResult(result, name), 'info');
     } catch (err) {
       ctx.ui.notify(`${name} failed: ${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
-      ctx.ui.setStatus('workflows', undefined);
+      controls.dispose();
     }
+    return;
+  }
+
+  if (sub === 'pause' || sub === 'resume') {
+    const n = sub === 'pause' ? pauseAll(activeRuns) : resumeAll(activeRuns);
+    ctx.ui.notify(
+      n === 0 ? 'No active workflow run in this session.' : `${sub === 'pause' ? 'Paused' : 'Resumed'} ${n} run${n === 1 ? '' : 's'}.`,
+      n === 0 ? 'warning' : 'info',
+    );
     return;
   }
 
@@ -593,7 +735,10 @@ async function cmdWf(
     return;
   }
 
-  ctx.ui.notify('Usage: /wf list | /wf run <name> [argsJson] | /wf status <runId> | /wf stop <runId>', 'warning');
+  ctx.ui.notify(
+    'Usage: /wf list | /wf run <name> [argsJson] | /wf status <runId> | /wf stop <runId> | /wf pause | /wf resume',
+    'warning',
+  );
 }
 
 // ── Run lookup / cancellation resolution ──────────────────────────────────
