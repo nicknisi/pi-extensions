@@ -1,5 +1,11 @@
 # @nicknisi/pi-artifacts
 
+## 1.1.0
+
+### Minor Changes
+
+- e4e2a96: Add a `share` action for artifacts: copy the self-contained HTML to the clipboard, reveal the file in the OS file manager, upload as a GitHub gist, or screenshot the rendered artifact to a PNG.
+
 ## 1.0.2
 
 ### Patch Changes

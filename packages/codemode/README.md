@@ -228,7 +228,19 @@ The snippet executes **in-process with the host's full privileges**. This is the
 
 ## Configuration
 
-None.
+Optional, via `~/.pi/agent/configs/codemode.json`:
+
+```json
+{
+  "childModel": "provider/model-id",
+  "childThinkingLevel": "xhigh"
+}
+```
+
+- `childModel` — default model for every child spawn (standalone `spawn` and workflow stages). `null` (default) falls back to the session's current model. An explicit `model:` on a spawn/stage overrides it.
+- `childThinkingLevel` — default thinking level for child spawns. `null` (default) falls back to the session's current thinking level. An explicit `thinkingLevel:` overrides it.
+
+Child concurrency is capped at 6 per codemode run (process-wide ceiling 8). While a `codemode` tool call runs, the TUI streams live progress (running/done/failed spawn counts and the last few log lines) into the tool row.
 
 ## Caveats
 
