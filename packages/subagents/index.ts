@@ -60,6 +60,25 @@ import {
 } from '@nicknisi/pi-shared';
 import { Type } from 'typebox';
 import { scopeFleetRuns, type FleetScope } from './fleet.js';
+import {
+  applyProfile,
+  discoverProfiles,
+  profileSearchDirs,
+  resolveProfileSkills,
+  type AgentProfile,
+  type DiscoveredProfiles,
+} from './profiles.js';
+
+export type { AgentProfile } from './profiles.js';
+
+export interface SubagentsOptions {
+  /**
+   * Extra profile directories, searched after the project (`.pi/agents/`) and
+   * user (`<agentDir>/agents/`) dirs — the hook for a distribution's bundled
+   * default personas.
+   */
+  profileDirs?: string[];
+}
 
 const ARTIFACTS_ROOT = path.join(getAgentDir(), 'subagent-runs');
 const PATCHES_STATE_DIR = path.join(getAgentDir(), 'subagent-patches');
@@ -88,12 +107,16 @@ const BG_WIDGET_KEY = 'subagents-bg';
 interface TaskSpec {
   task: string;
   agent?: string | undefined;
+  profile?: string | undefined;
   model?: string | undefined;
   tools?: string[] | undefined;
   systemPrompt?: string | undefined;
   background?: boolean | undefined;
   allowTreeMutation?: boolean | undefined;
   worktree?: boolean | undefined;
+  /** Resolved by profile merging — not part of the tool schema. */
+  skillPaths?: string[] | undefined;
+  replaceSystemPrompt?: boolean | undefined;
 }
 
 type TaskStatus = 'pending' | 'working' | 'done' | 'error' | 'background';
@@ -131,9 +154,54 @@ function toSpawnOptions(spec: TaskSpec, cwd: string, parentSession: string | und
   if (spec.agent) opts.agent = spec.agent;
   if (spec.model) opts.model = spec.model;
   if (spec.systemPrompt) opts.systemPrompt = spec.systemPrompt;
+  if (spec.replaceSystemPrompt) opts.replaceSystemPrompt = true;
+  if (spec.skillPaths && spec.skillPaths.length > 0) opts.skillPaths = spec.skillPaths;
   if (spec.worktree) opts.worktree = true;
   if (parentSession) opts.parentSession = parentSession;
   return opts;
+}
+
+// ── Profiles ─────────────────────────────────────────────────────────────────
+
+/** Skill name -> SKILL.md path, from the parent session's discovered catalog. */
+function skillRegistry(pi: ExtensionAPI): Map<string, string> {
+  const registry = new Map<string, string>();
+  for (const cmd of pi.getCommands()) {
+    if (cmd.source !== 'skill') continue;
+    const name = cmd.name.startsWith('skill:') ? cmd.name.slice('skill:'.length) : cmd.name;
+    const skillPath = cmd.sourceInfo?.path;
+    if (skillPath && !registry.has(name)) registry.set(name, skillPath);
+  }
+  return registry;
+}
+
+/** Rescan profile dirs (cheap: a few readdirs) so edits apply without a restart. */
+function loadProfiles(cwd: string, extraDirs: string[]): DiscoveredProfiles {
+  return discoverProfiles(profileSearchDirs(cwd, getAgentDir(), extraDirs));
+}
+
+type ProfileMerge =
+  | { ok: true; spec: TaskSpec; missingSkills: string[]; profile: AgentProfile }
+  | { ok: false; error: string };
+
+/** Strict profile resolution + merge: unknown profile names fail loudly. */
+function mergeProfile(spec: TaskSpec, discovered: DiscoveredProfiles, registry: Map<string, string>): ProfileMerge {
+  const profile = discovered.profiles.get(spec.profile!);
+  if (!profile) {
+    const known = [...discovered.profiles.keys()];
+    const knownText = known.length > 0 ? `Known profiles: ${known.join(', ')}.` : 'No profiles are defined.';
+    const parseErrors =
+      discovered.errors.length > 0 ? ` Unloadable profile files: ${discovered.errors.join('; ')}` : '';
+    return { ok: false, error: `unknown profile '${spec.profile}'. ${knownText}${parseErrors}` };
+  }
+  const { skillPaths, missing } = resolveProfileSkills(profile, registry);
+  return { ok: true, spec: applyProfile(spec, profile, skillPaths), missingSkills: missing, profile };
+}
+
+function profileCatalogLine(profiles: Map<string, AgentProfile>): string {
+  if (profiles.size === 0) return '';
+  const items = [...profiles.values()].map((p) => `${p.name} (${short(p.description, 60)})`);
+  return ` Available profiles: ${items.join('; ')}.`;
 }
 
 function short(text: string, max: number): string {
@@ -1294,8 +1362,31 @@ async function dispatchInline(
   }
 }
 
-export default function subagents(pi: ExtensionAPI) {
+export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = {}) {
   const runtime = createSubagentRuntime({ namespace: 'subagents', artifactsDir: ARTIFACTS_ROOT });
+  const extraProfileDirs = options.profileDirs ?? [];
+  // Registration-time snapshot for the tool description; execution rescans.
+  const initialProfiles = loadProfiles(process.cwd(), extraProfileDirs);
+
+  // Soft profile resolution for `&<name>` / `/again`: a matching profile is
+  // applied; a non-matching name stays a plain label (back-compat with
+  // `&scout`-style ad-hoc labels).
+  const resolveInlineSpec = (ctx: ExtensionContext, spec: TaskSpec): TaskSpec => {
+    if (!spec.agent) return spec;
+    const discovered = loadProfiles(ctx.cwd, extraProfileDirs);
+    if (!discovered.profiles.has(spec.agent)) {
+      if (discovered.profiles.size > 0 && ctx.hasUI) {
+        ctx.ui.notify(`No profile '${spec.agent}' — running as a plain label`, 'info');
+      }
+      return spec;
+    }
+    const merged = mergeProfile({ ...spec, profile: spec.agent }, discovered, skillRegistry(pi));
+    if (!merged.ok) return spec; // unreachable after the has() check; stay safe
+    if (merged.missingSkills.length > 0 && ctx.hasUI) {
+      ctx.ui.notify(`Profile '${spec.agent}': skipped unresolved skills ${merged.missingSkills.join(', ')}`, 'warning');
+    }
+    return merged.spec;
+  };
   // GC old artifacts (7d retention, incl. worktrees + patches) and reap
   // ghost 'running' records left by dead host processes. Once per process.
   sweepRunArtifactsOnce(ARTIFACTS_ROOT);
@@ -1351,11 +1442,17 @@ export default function subagents(pi: ExtensionAPI) {
       'Tasks whose tools include edit, write, or bash mutate the shared working tree: they require',
       'allowTreeMutation: true and run sequentially after the parallel batch. Prefer worktree: true',
       'for builders instead — isolated worktrees stay parallel and hand off a patch for central integration.',
-    ].join(' '),
+      'A task may name a profile — a persona file bundling a skill basket, tool allowlist, model, and',
+      'system prompt — instead of assembling those per task; explicit task fields override profile values.',
+      profileCatalogLine(initialProfiles.profiles),
+    ]
+      .filter(Boolean)
+      .join(' '),
     promptSnippet: 'Fan out parallel child agents for independent subtasks',
     promptGuidelines: [
       `Use dispatch for independent parallel subtasks (max ${MAX_TASKS}); never for sequential work or trivial questions.`,
       'Children default to read-only tools (read, grep, find, ls). Pass tools explicitly for builders.',
+      'Prefer profile: "<name>" when a defined profile matches the work — it attaches the persona\'s skills, tools, and prompt.',
       'Set background: true for long-running tasks; results surface via the fleet tool.',
       'Tasks with edit/write/bash tools need allowTreeMutation: true and serialize after the parallel batch — or set worktree: true to isolate them and keep them parallel.',
     ],
@@ -1364,6 +1461,12 @@ export default function subagents(pi: ExtensionAPI) {
         Type.Object({
           task: Type.String({ description: 'The full prompt for this child agent' }),
           agent: Type.Optional(Type.String({ description: 'Label, e.g. "reviewer"' })),
+          profile: Type.Optional(
+            Type.String({
+              description:
+                'Profile (persona) name to launch as — attaches its skill basket, tools, model, and system prompt. Unknown names fail the task. Explicit task fields override profile values.',
+            }),
+          ),
           model: Type.Optional(Type.String({ description: 'Model spec, e.g. "anthropic/claude-haiku-4-5"' })),
           tools: Type.Optional(
             Type.Array(Type.String(), { description: 'Tool allowlist; default read-only (read, grep, find, ls)' }),
@@ -1387,12 +1490,40 @@ export default function subagents(pi: ExtensionAPI) {
     }),
 
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const specs = params.tasks as TaskSpec[];
-      if (specs.length === 0) {
+      const rawSpecs = params.tasks as TaskSpec[];
+      if (rawSpecs.length === 0) {
         return toolResult('dispatch requires at least one task.');
       }
-      if (specs.length > MAX_TASKS) {
-        return toolResult(`Too many tasks (${specs.length}); max is ${MAX_TASKS}. Split into multiple dispatch calls.`);
+      if (rawSpecs.length > MAX_TASKS) {
+        return toolResult(
+          `Too many tasks (${rawSpecs.length}); max is ${MAX_TASKS}. Split into multiple dispatch calls.`,
+        );
+      }
+
+      // Strict profile resolution first, so progress rows, labels, and the
+      // mutation rules all see the merged spec. Unknown profile → that task
+      // is refused (like an undeclared mutating task); unresolved skills
+      // warn but never fail.
+      const profileFailures = new Map<TaskSpec, string>();
+      const profileWarnings: string[] = [];
+      let specs = rawSpecs;
+      if (rawSpecs.some((spec) => spec.profile)) {
+        const discovered = loadProfiles(ctx.cwd, extraProfileDirs);
+        const registry = skillRegistry(pi);
+        specs = rawSpecs.map((raw) => {
+          if (!raw.profile) return raw;
+          const merged = mergeProfile(raw, discovered, registry);
+          if (!merged.ok) {
+            profileFailures.set(raw, merged.error);
+            return raw;
+          }
+          if (merged.missingSkills.length > 0) {
+            profileWarnings.push(
+              `profile '${merged.profile.name}': skipped unresolved skills ${merged.missingSkills.join(', ')}`,
+            );
+          }
+          return merged.spec;
+        });
       }
 
       if (ctx.hasUI) widgetUi = ctx.ui;
@@ -1435,11 +1566,23 @@ export default function subagents(pi: ExtensionAPI) {
       };
 
       const lines: string[] = [];
+      if (profileWarnings.length > 0) {
+        lines.push(profileWarnings.map((w) => `> ⚠ ${w}`).join('\n'));
+      }
 
       // Refuse undeclared tree-mutating tasks outright; declared ones serialize after the parallel batch.
       const runnable: TaskSpec[] = [];
       const mutating: TaskSpec[] = [];
       for (const spec of specs) {
+        const profileFailure = profileFailures.get(spec);
+        if (profileFailure) {
+          const task = progress.get(spec)!;
+          task.status = 'error';
+          task.error = profileFailure;
+          task.doneAt = Date.now();
+          lines.push(`## ✗ ${task.label} — refused\n\n${profileFailure}`);
+          continue;
+        }
         if (wantsTreeMutation(spec)) {
           if (spec.allowTreeMutation === true) {
             mutating.push(spec);
@@ -1821,7 +1964,7 @@ export default function subagents(pi: ExtensionAPI) {
       ctx.ui.notify('Usage: &<agent> <prompt> (e.g. &scout how does auth work)', 'warning');
       return { action: 'handled' };
     }
-    const spec: TaskSpec = { task: parsed.prompt, agent: parsed.agentType };
+    const spec = resolveInlineSpec(ctx, { task: parsed.prompt, agent: parsed.agentType });
     void dispatchInline(pi, ctx, runtime, spec);
     return { action: 'handled' };
   });
@@ -1872,11 +2015,11 @@ export default function subagents(pi: ExtensionAPI) {
       }
       const amendment = args.trim();
       const prompt = amendment ? `${last.data.prompt}\n\n${amendment}` : last.data.prompt;
-      const spec: TaskSpec = {
+      const spec = resolveInlineSpec(ctx, {
         task: prompt,
         agent: last.data.agentType,
         worktree: last.data.worktree ? true : undefined,
-      };
+      });
       void dispatchInline(pi, ctx, runtime, spec);
     },
   });

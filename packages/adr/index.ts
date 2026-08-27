@@ -9,7 +9,7 @@
  *  - ADRs are NNNN-kebab-title.md directly in docs/decisions/
  *  - superseded ADRs move to docs/decisions/superseded/ (excluded by the
  *    non-recursive readdir — no status parsing)
- *  - template files (0000-*, *template*) are excluded
+ *  - template files (0000-*) are excluded
  *
  * Recomputed per prompt, so the index is never stale within a session.
  * No-ops when no docs/decisions/ exists.
@@ -36,7 +36,7 @@ export function findAdrDir(start: string): string | null {
 /** Active ADR filenames, sorted by number. Templates excluded. */
 export function listAdrs(dir: string): string[] {
   return readdirSync(dir)
-    .filter((f) => ADR_FILE.test(f) && !/template/i.test(f))
+    .filter((f) => ADR_FILE.test(f) && !f.startsWith('0000-'))
     .sort();
 }
 

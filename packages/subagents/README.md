@@ -11,6 +11,7 @@ First-party subagent dispatch and fleet for pi — fan out parallel child agents
 - **`/patches` command** — staging area for worktree-subagent `.patch` handoffs. Opens a keyboard-driven overlay over every pending patch with diffstat and a pre-flight stamp (`clean` / `conflicts` / `stale`, checked via `git apply --check` **without** applying). `Enter` applies the whole patch (`git apply --3way`); `e` expands the full diff with per-hunk navigation (`n`/`p`); `s` applies the focused hunk; `d` discards. Apply/discard decisions persist to `~/.pi/agent/subagent-patches/state.json` so `/patches` survives restart.
 - **`&` dispatch prefix** — `&scout how does auth work` at position zero dispatches a single subagent inline (reusing the same spawn/cancel path as the `dispatch` tool). Live progress shows in a widget above the editor; the final result lands as a collapsible `subagents:inline` transcript block rendered with the same vocabulary as a dispatch tool result, and the answer reaches the model's context. Each dispatch is captured as a session custom entry so it survives restart.
 - **`/again [amendment]` command** — re-fires the last `&` dispatch verbatim, or with the amendment appended.
+- **Profiles (personas)** — named agent-definition markdown files bundling a skill basket, tool allowlist, model, and system prompt. A dispatch task passes `profile: "reviewer"` (or the editor uses `&reviewer …`) instead of hand-assembling those per task. See **Profiles** below.
 
 ## Usage
 
@@ -123,9 +124,59 @@ Children are **hermetic by construction**: no user extensions, skills, prompt te
 
 `spawn()` never rejects; results are a discriminated union (`ok | crashed | empty | schema_invalid | aborted`). See `packages/shared/README.md` for the full runtime API.
 
+## Profiles
+
+A profile is a markdown file — frontmatter on top, persona system prompt below — that names a reusable child persona: which skills it carries, which tools it may use, optionally which model it runs, and how it should behave. Hermetic children get **no** skills by default; a profile is the curated basket that opts specific ones in.
+
+```markdown
+---
+name: reviewer
+description: Code review — correctness, tests, simplicity
+skills: pr, review-checklist
+tools: read, grep, find, ls
+model: anthropic/claude-sonnet-4-5
+---
+
+Review the change against the task. Prefer the smallest correct fix.
+```
+
+| Field         | Meaning                                                                                                                                                                                                                                                      |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `name`        | Profile name (defaults to the file stem).                                                                                                                                                                                                                    |
+| `description` | Required — shown in the dispatch tool's profile catalog.                                                                                                                                                                                                     |
+| `skills`      | Skill basket: bare names resolve against the parent session's skill catalog (wherever pi discovered them — user dir, project, packages, `--skill` flags); entries with a `/` or `.md` resolve relative to the profile file. Missing skills warn, never fail. |
+| `tools`       | Tool allowlist. Omitted = dispatch's read-only default.                                                                                                                                                                                                      |
+| `model`       | Optional model spec.                                                                                                                                                                                                                                         |
+| `worktree`    | Default the task to worktree isolation — set this on builder personas so their `edit`/`write`/`bash` tools stay parallel and need no `allowTreeMutation`.                                                                                                    |
+| `replace`     | Replace pi's system prompt with the persona prompt instead of appending.                                                                                                                                                                                     |
+
+Lists accept comma-separated scalars or `- item` block lists. Unknown keys are ignored, so agent files shared with other harnesses load. The parser is deliberately small — flat `key: value` frontmatter, not full YAML.
+
+**Discovery** (first-wins by name, highest precedence first):
+
+1. `<cwd>/.pi/agents/*.md` — project profiles
+2. `~/.pi/agent/agents/*.md` — user profiles
+3. Host-provided extra dirs (`SubagentsOptions.profileDirs`) — e.g. a distribution's bundled defaults
+
+Dirs are rescanned on each dispatch, so edits apply without a restart (the tool _description_'s profile catalog refreshes on session start).
+
+**Merge semantics:** explicit task fields win — call beats persona, persona beats defaults. `profile` on a dispatch task is strict: an unknown name refuses that task and lists the known profiles. The `&` prefix resolves softly: `&reviewer fix this` applies the `reviewer` profile when it exists and otherwise keeps the old plain-label behavior. `replace` applies only when the persona's own prompt is used.
+
+```json
+{ "tasks": [{ "task": "Review this diff for correctness", "profile": "reviewer" }] }
+```
+
 ## Configuration
 
-None. No config files, no environment variables.
+None required. Embedders can pass options through the factory:
+
+```ts
+import subagents from '@nicknisi/pi-subagents';
+
+export default (pi: ExtensionAPI) => subagents(pi, { profileDirs: ['/path/to/bundled/profiles'] });
+```
+
+`profileDirs` appends lowest-precedence profile directories — the hook for a distribution (e.g. arc) to ship default personas that user and project files can shadow.
 
 ## Caveats
 
