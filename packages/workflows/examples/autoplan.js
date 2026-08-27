@@ -100,16 +100,19 @@ const choice = await ask(`Recommended: ${advice.recommended} — ${advice.why}\n
   ...ordered.map((o) => `${o.id}: ${o.title} — ${o.gist}`),
   REJECT,
 ]);
-if (!choice || choice === REJECT) {
+const picked = choice && choice !== REJECT ? ordered.find((o) => choice.startsWith(`${o.id}:`)) : undefined;
+if (!picked) {
+  // Dismissed, reject-all, or off-list custom text — never silently decide
+  // for the human; hand the outcome (and any custom answer) back to re-mine.
   return {
     decided: false,
+    ...(choice && choice !== REJECT ? { custom: choice } : {}),
     options: advice.options,
     recommended: advice.recommended,
     why: advice.why,
     rejections: advice.rejections,
   };
 }
-const picked = ordered.find((o) => choice.startsWith(`${o.id}:`)) ?? ordered[0];
 log(`human picked: ${picked.id} ${picked.title}`);
 
 phase('plan');

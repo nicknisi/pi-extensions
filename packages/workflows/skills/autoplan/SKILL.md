@@ -25,5 +25,6 @@ If `workflow` `list` shows no `autoplan`, install it first: copy `examples/autop
 
 - `decided: false` — the user rejected every option or dismissed the gate. Present the options and
   the advisor's recommendation; offer to re-mine with new constraints or a proposed new option.
-  Never write a plan for an undecided run.
+  When the result carries `custom`, the user typed an off-list answer — treat it as their proposed
+  direction and offer to re-mine around it. Never write a plan for an undecided run.
 - `decided: true` — present `choice` and the `plan`. Elaborate sections on request.
