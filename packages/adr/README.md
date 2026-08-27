@@ -19,7 +19,7 @@ Pairs with a user-level prompt template (`~/.pi/agent/prompts/adr.md`, not part 
 ## Install
 
 ```bash
-pi install /Users/nicknisi/Developer/pi-extensions/packages/adr
+pi install npm:@nicknisi/pi-adr
 ```
 
 ## Dependencies
