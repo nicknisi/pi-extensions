@@ -2,8 +2,6 @@
 
 Injects the repo's ADR index (`docs/decisions/`) into the system prompt as a steering veto list, so the agent knows which directions are already settled before it proposes anything.
 
-Inspired by Kent C. Dodds' [Turn your agent on auto-pilot with ADRs](https://www.youtube.com/watch?v=vRoqBBI51Vo): decisions die in chat transcripts; numbered records in the repo keep agents from re-litigating them.
-
 ## What it adds
 
 - `before_agent_start` hook — walks up from cwd to the nearest ancestor with `docs/decisions/` and appends a framing sentence plus the sorted filename list to the system prompt. Filenames only (~10 tokens per ADR); full files are read on demand by the agent. Recomputed per prompt, so it's never stale. No-ops when no `docs/decisions/` exists.
