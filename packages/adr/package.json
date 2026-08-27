@@ -1,0 +1,34 @@
+{
+  "name": "@nicknisi/pi-adr",
+  "version": "0.1.0",
+  "description": "Injects the repo's ADR index (docs/decisions/) into the system prompt as a steering veto list",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-package"
+  ],
+  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/adr#readme",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicknisi/pi-extensions.git",
+    "directory": "packages/adr"
+  },
+  "files": [
+    "index.ts"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "default": "./index.ts"
+    }
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
