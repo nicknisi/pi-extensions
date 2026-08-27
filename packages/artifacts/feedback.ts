@@ -6,6 +6,7 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 
 import { annotationsPath, isSafeSlug, readArtifact, sourcePath } from './utils.js';
+import { injectAnnotations } from './annotate.js';
 
 export interface TextQuoteAnchor {
   exact: string;
@@ -149,6 +150,19 @@ function findAnchor(quote: TextQuoteAnchor, text: string): boolean {
     const after = text.slice(idx + exact.length);
     return (!prefix || before.endsWith(prefix)) && (!suffix || after.startsWith(suffix));
   });
+}
+
+/**
+ * Baked share render: the artifact with its annotations embedded and the layer
+ * in static (read-only) mode. Null when there's nothing to bake — callers fall
+ * back to the clean stored file.
+ */
+export function bakeAnnotations(slug: string): { html: string; count: number } | null {
+  const anns = readAnnotations(slug);
+  if (anns.length === 0) return null;
+  const html = readArtifact(slug);
+  if (html == null) return null;
+  return { html: injectAnnotations(html, slug, JSON.stringify(anns), { static: true }), count: anns.length };
 }
 
 /**

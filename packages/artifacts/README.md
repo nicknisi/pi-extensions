@@ -41,6 +41,8 @@ Behavior per action:
 - `list` — lists artifacts newest-first (title, kind, timestamp, slug, absolute path). Does **not** start the server; URLs are included only if the server is already running.
 - `share` — hands the artifact file off, since every artifact is already one self-contained HTML file. `clipboard` (default) copies the rendered HTML (pbcopy / clip / wl-copy); `reveal` shows the file in the OS file manager (Finder via `open -R`), ready to AirDrop or drag into Slack; `gist` runs `gh gist create` under the user's GitHub account (requires the `gh` CLI, authed), copies the URL to the clipboard, and opens it — secret unless `public: true`. Gists display as source, not a rendered page, so `gist` is for durable attributable upload, not for showing someone the rendered report. `image` starts the server (if needed), screenshots the rendered page with a headless Chrome-family browser (`--headless --screenshot`, discovered in /Applications on macOS or `google-chrome` on PATH elsewhere), and writes `<slug>.png` next to the artifact — on macOS the PNG is also placed on the clipboard as an image, ready to paste into Slack or docs. For share cards, author a full-bleed full-document `html` artifact so the card fills the viewport.
 
+  **Comments ride along**: when the artifact has annotation comments, `clipboard` and `gist` bake them into the shared file — highlights painted on the text plus a read-only comments panel behind an "N comments" pill (the layer's static mode; nothing can be edited or submitted from a shared file). Pass `annotations: false` to share the clean file. `reveal` and `image` are unchanged — `image` incidentally captures highlights, since the served page hydrates them.
+
 Example tool call (as the model would emit it):
 
 ````json

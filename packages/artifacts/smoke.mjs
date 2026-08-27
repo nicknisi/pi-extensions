@@ -5,6 +5,7 @@
  *   node packages/artifacts/smoke.mjs clean
  *   node packages/artifacts/smoke.mjs persist
  *   node packages/artifacts/smoke.mjs stale
+ *   node packages/artifacts/smoke.mjs share
  *
  * Each subcommand is self-contained: it boots the real server from `dist/`
  * against a temp fixture artifact dir and exercises it with `fetch`. Exits
@@ -261,13 +262,37 @@ async function stale() {
   console.log('PASS stale');
 }
 
+// ─── share ───────────────────────────────────────────────────────────────────
+async function share() {
+  const { utils, templates, feedback } = await boot();
+  const slug = 'sprint-report';
+  writeFixture(utils, templates, slug, 'Sprint Report', SOURCE);
+
+  assert('share', feedback.bakeAnnotations(slug) === null, 'bake should be null with no annotations');
+
+  const list = [ann('a1', PASSAGE_A, 'which migration?'), ann('b1', PASSAGE_B, 'link the runbook')];
+  feedback.writeAnnotations(slug, list);
+  const baked = feedback.bakeAnnotations(slug);
+  assert('share', baked !== null && baked.count === 2, 'bake did not return both comments');
+  assert('share', baked.html.includes(MARKER), 'baked file missing the annotation layer');
+  assert(
+    'share',
+    baked.html.includes('"id":"a1"') && baked.html.includes('link the runbook'),
+    'baked file missing the annotation payload',
+  );
+  assert('share', baked.html.includes('STATIC = true'), 'baked file not in static mode');
+  assert('share', !readFileSync(utils.artifactPath(slug), 'utf-8').includes(MARKER), 'bake polluted the stored file');
+
+  console.log('PASS share');
+}
+
 const cmd = process.argv[2];
 checkBuilt();
 
-const table = { clean, persist, stale };
+const table = { clean, persist, stale, share };
 const fn = table[cmd];
 if (!fn) {
-  console.error(`usage: node packages/artifacts/smoke.mjs <clean|persist|stale>`);
+  console.error(`usage: node packages/artifacts/smoke.mjs <clean|persist|stale|share>`);
   process.exit(2);
 }
 fn().catch((e) => die(cmd, e && e.stack ? e.stack : String(e)));

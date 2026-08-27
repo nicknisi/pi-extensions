@@ -7,7 +7,7 @@ import { basename, extname } from 'node:path';
 import { HOST } from './config.js';
 import { isSafeSlug, listArtifacts, safeArtifactPath } from './utils.js';
 import { renderCommentMarkdown, renderIndexPage } from './templates.js';
-import { annotateSnippet } from './annotate.js';
+import { injectAnnotations } from './annotate.js';
 import {
   artifactText,
   composeFeedback,
@@ -289,15 +289,10 @@ function handle(req: IncomingMessage, res: ServerResponse, clients: Set<ServerRe
   const mime = MIME[ext] ?? 'application/octet-stream';
 
   // Inject the annotation layer at serve time into .html artifact pages only —
-  // the stored file stays byte-clean. Splice before </body> (append if absent),
-  // mirroring renderHtmlDocument.
+  // the stored file stays byte-clean.
   if (ext === '.html') {
     const slug = basename(safe).replace(/\.html$/, '');
-    const original = readFileSync(safe, 'utf-8');
-    const snippet = annotateSnippet(slug, JSON.stringify(readAnnotations(slug)));
-    const bodyClose = original.search(/<\/body>/i);
-    const injected =
-      bodyClose !== -1 ? original.slice(0, bodyClose) + snippet + original.slice(bodyClose) : original + snippet;
+    const injected = injectAnnotations(readFileSync(safe, 'utf-8'), slug, JSON.stringify(readAnnotations(slug)));
     res.writeHead(200, { 'Content-Type': mime });
     res.end(injected);
     return;

@@ -10,10 +10,29 @@
  */
 
 /**
+ * Splice the annotation layer into an artifact HTML document, before `</body>`
+ * (appended if absent). Used at serve time (live mode) and bake time (static).
+ */
+export function injectAnnotations(
+  html: string,
+  slug: string,
+  annotationsJson: string,
+  opts?: { static?: boolean },
+): string {
+  const snippet = annotateSnippet(slug, annotationsJson, opts);
+  const bodyClose = html.search(/<\/body>/i);
+  return bodyClose !== -1 ? html.slice(0, bodyClose) + snippet + html.slice(bodyClose) : html + snippet;
+}
+
+/**
  * @param slug            the artifact slug (used for PUT/POST bodies)
  * @param annotationsJson `JSON.stringify(annotations)` — the sidecar contents
+ * @param opts.static     baked-share mode: read-only (no annotate mode, editing,
+ *                        or submit); highlights paint and comments sit behind a
+ *                        "N comments" pill
  */
-export function annotateSnippet(slug: string, annotationsJson: string): string {
+export function annotateSnippet(slug: string, annotationsJson: string, opts?: { static?: boolean }): string {
+  const staticMode = opts?.static === true;
   // Escape `<` so a `</script>` inside any comment/quote cannot close the tag.
   // The result is still valid JS (\u003c in a string/JSON literal), so hydration
   // parses correctly.
@@ -194,6 +213,7 @@ export function annotateSnippet(slug: string, annotationsJson: string): string {
 <script>
 (function () {
   var SLUG = ${JSON.stringify(slug)};
+  var STATIC = ${staticMode ? 'true' : 'false'};
   window.__ARTIFACT_ANNOTATIONS__ = ${safeJson};
 
   var state = {
@@ -465,7 +485,7 @@ export function annotateSnippet(slug: string, annotationsJson: string): string {
   }
 
   function onSelect() {
-    if (state.mode !== "annotate") return;
+    if (STATIC || state.mode !== "annotate") return;
     var sel = window.getSelection();
     if (!sel || sel.isCollapsed) return;
     var exact = sel.toString();
@@ -489,10 +509,12 @@ export function annotateSnippet(slug: string, annotationsJson: string): string {
   // ── render ────────────────────────────────────────────────────────────────
   function render() {
     var count = state.annotations.length;
-    btn.innerHTML = state.mode === "annotate" ? "Annotating" + badge(count) : "Annotate" + badge(count);
-    panel.classList.toggle("open", state.mode === "annotate");
+    btn.innerHTML = STATIC
+      ? count + (count === 1 ? " comment" : " comments")
+      : (state.mode === "annotate" ? "Annotating" : "Annotate") + badge(count);
+    if (!STATIC) panel.classList.toggle("open", state.mode === "annotate");
 
-    var hint = state.mode === "annotate"
+    var hint = !STATIC && state.mode === "annotate"
       ? '<p class="hint">Select text in the page to add a comment. Esc to exit.</p>'
       : "";
     var items = state.annotations.map(function (a, i) {
@@ -502,8 +524,10 @@ export function annotateSnippet(slug: string, annotationsJson: string): string {
           '<div class="actions"><button class="link" data-editsave="' + i + '">save</button>' +
           '<button class="link" data-editcancel>cancel</button></div>'
         : '<div class="comment md-preview">' + (a._html || escapeHtml(a.comment)) + '</div>' +
-          '<div class="actions"><button class="link" data-edit="' + i + '">edit</button>' +
-          '<button class="link" data-del="' + i + '">delete</button></div>';
+          (STATIC
+            ? ''
+            : '<div class="actions"><button class="link" data-edit="' + i + '">edit</button>' +
+              '<button class="link" data-del="' + i + '">delete</button></div>');
       return '<div class="item" data-i="' + i + '">' + stale +
         '<div class="quote">"' + escapeHtml(a.quote.exact) + '"</div>' + body +
         '</div>';
@@ -569,7 +593,10 @@ export function annotateSnippet(slug: string, annotationsJson: string): string {
   }
 
   // ── events ─────────────────────────────────────────────────────────────
-  btn.addEventListener("click", function () { setMode(state.mode === "annotate" ? "off" : "annotate"); });
+  btn.addEventListener("click", function () {
+    if (STATIC) { panel.classList.toggle("open"); return; }
+    setMode(state.mode === "annotate" ? "off" : "annotate");
+  });
   panel.addEventListener("click", function (e) {
     var t = e.target;
     if (t.hasAttribute("data-close")) { setMode("off"); return; }
@@ -624,12 +651,14 @@ export function annotateSnippet(slug: string, annotationsJson: string): string {
   });
   document.addEventListener("keydown", function (e) {
     if (e.key !== "Escape") return;
+    if (STATIC) { panel.classList.remove("open"); return; }
     if (popover.style.display !== "none") { hidePopover(); return; }
     if (state.editing != null) { state.editing = null; render(); return; }
     if (state.mode === "annotate") setMode("off");
   });
 
   // ── boot ────────────────────────────────────────────────────────────────
+  if (STATIC) panel.querySelector("footer").style.display = "none";
   reHighlightAll();
   render();
 })();

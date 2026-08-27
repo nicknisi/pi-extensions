@@ -2,8 +2,11 @@
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+import { bakeAnnotations } from './feedback.js';
 
 import { artifactUrl, isRunning, notifyReload, runningPort, setFeedbackSender, stopServer } from './server.js';
 import type { FeedbackSender } from './server.js';
@@ -106,7 +109,7 @@ export default function artifacts(pi: ExtensionAPI) {
         ],
         {
           description:
-            'create: write new artifact. update: overwrite existing (or create if missing) + live-reload open tabs. open: start server + open in browser. list: list artifacts (no server start). share: hand the artifact file off — clipboard, file manager, or a GitHub gist (gist only when the user asks for an upload; it shows the source, not a rendered page).',
+            'create: write new artifact. update: overwrite existing (or create if missing) + live-reload open tabs. open: start server + open in browser. list: list artifacts (no server start). share: hand the artifact file off — clipboard, file manager, or a GitHub gist (gist only when the user asks for an upload; it shows the source, not a rendered page). When the artifact has annotation comments, clipboard and gist bake them in (highlights + read-only panel) unless annotations: false.',
         },
       ),
       method: Type.Optional(
@@ -123,6 +126,12 @@ export default function artifacts(pi: ExtensionAPI) {
       ),
       public: Type.Optional(
         Type.Boolean({ description: 'share method=gist only. Make the gist public. Default: false (secret gist).' }),
+      ),
+      annotations: Type.Optional(
+        Type.Boolean({
+          description:
+            'share only. When the artifact has annotation comments, bake them into the shared file (highlights + read-only comments panel) for the clipboard and gist methods. Default: true.',
+        }),
       ),
       title: Type.Optional(
         Type.String({
@@ -210,15 +219,17 @@ export default function artifacts(pi: ExtensionAPI) {
           return errResult(`no artifact with slug "${slug}" — create it first.`, { slug, title });
         }
         const method = params.method ?? 'clipboard';
+        const baked = params.annotations === false ? null : bakeAnnotations(slug);
+        const bakedNote = baked ? ` — ${baked.count} comment${baked.count === 1 ? '' : 's'} baked in` : '';
         try {
           if (method === 'clipboard') {
-            const html = readArtifact(slug)!;
+            const html = baked?.html ?? readArtifact(slug)!;
             await copyToClipboard(html);
             return {
               content: [
                 {
                   type: 'text' as const,
-                  text: `Copied ${title} to the clipboard (${Math.round(html.length / 1024)} KB of self-contained HTML).\n${absPath}`,
+                  text: `Copied ${title} to the clipboard (${Math.round(html.length / 1024)} KB of self-contained HTML)${bakedNote}.\n${absPath}`,
                 },
               ],
               details: { action, slug, title, method, absPath } as Record<string, unknown>,
@@ -249,19 +260,28 @@ export default function artifacts(pi: ExtensionAPI) {
               >,
             };
           }
-          // gist
-          const url = await createGist(absPath, title, params.public ?? false);
-          await copyToClipboard(url).catch(() => {}); // clipboard is a nicety, never the failure mode
-          openInBrowser(url);
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Gist created (${params.public ? 'public' : 'secret'}), URL copied to clipboard:\n${url}\n\nNote: gist.github.com shows the source. Share the file itself for the rendered page.`,
-              },
-            ],
-            details: { action, slug, title, method, url, absPath } as Record<string, unknown>,
-          };
+          // gist — baked comments ride in a temp file so the stored artifact stays clean
+          let gistPath = absPath;
+          try {
+            if (baked) {
+              gistPath = join(tmpdir(), `${slug}-with-comments.html`);
+              writeFileSync(gistPath, baked.html, 'utf-8');
+            }
+            const url = await createGist(gistPath, title, params.public ?? false);
+            await copyToClipboard(url).catch(() => {}); // clipboard is a nicety, never the failure mode
+            openInBrowser(url);
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: `Gist created (${params.public ? 'public' : 'secret'})${bakedNote}, URL copied to clipboard:\n${url}\n\nNote: gist.github.com shows the source. Share the file itself for the rendered page.`,
+                },
+              ],
+              details: { action, slug, title, method, url, absPath } as Record<string, unknown>,
+            };
+          } finally {
+            if (gistPath !== absPath) rmSync(gistPath, { force: true });
+          }
         } catch (e) {
           return errResult(`share (${method}) failed: ${e instanceof Error ? e.message : String(e)}`, { slug, title });
         }
