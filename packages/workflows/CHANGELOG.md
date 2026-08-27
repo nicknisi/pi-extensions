@@ -1,5 +1,11 @@
 # @nicknisi/pi-workflows
 
+## 0.3.1
+
+### Patch Changes
+
+- fb2c012: `autoplan.js`: an off-list answer at the decision gate no longer silently resolves to the advisor's recommendation. The run returns `decided: false` with the custom text so it can be re-mined, matching the "the human is the gate" design.
+
 ## 0.3.0
 
 ### Minor Changes

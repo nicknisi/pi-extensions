@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-workflows",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Model-facing front door to the first-party workflow engine — run JS workflow scripts over the subagent runtime, replacing the third-party @quintinshaw/pi-dynamic-workflows extension",
   "keywords": [
     "pi",

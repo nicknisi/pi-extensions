@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-adr",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Injects the repo's ADR index (docs/decisions/) into the system prompt as a steering veto list",
   "keywords": [
     "pi",

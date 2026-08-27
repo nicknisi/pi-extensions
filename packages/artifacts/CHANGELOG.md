@@ -1,5 +1,11 @@
 # @nicknisi/pi-artifacts
 
+## 1.2.0
+
+### Minor Changes
+
+- ede2c77: Add an annotation + feedback loop to artifacts. Served artifact pages now carry an inert comment layer (injected at serve time, never written to the stored file): select text, comment, and submit to send the composed markdown back to the agent as a follow-up message. Comments persist to a `<slug>.annotations.json` sidecar and survive live reloads and restarts; stale comments (whose quoted text no longer appears) are flagged. New endpoints `PUT /api/annotations`, `POST /api/feedback`, and `POST /api/render` (GFM preview); markdown artifacts also write a `<slug>.md` source mirror for source-line references. `share` (clipboard and gist) bakes current comments into the shared file — highlights plus a read-only comments panel — with an `annotations: false` opt-out. Served artifact pages also carry a Share button (Copy image / Copy PDF / Copy file / Create gist link) via `POST /api/share`, so sharing no longer requires an agent round-trip. Image renders with the comments panel open; PDF prints with a Review comments section appended. New `pdf` share method on the tool as well.
+
 ## 1.1.0
 
 ### Minor Changes
