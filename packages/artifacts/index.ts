@@ -2,11 +2,10 @@
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
-import { readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { bakeAnnotations } from './feedback.js';
+import { shareBaked } from './feedback.js';
 
 import { artifactUrl, isRunning, notifyReload, runningPort, setFeedbackSender, stopServer } from './server.js';
 import type { FeedbackSender } from './server.js';
@@ -16,14 +15,11 @@ import {
   writeArtifact,
   writeSourceMirror,
   artifactExists,
-  readArtifact,
   listArtifacts,
   openInBrowser,
   artifactPath,
   artifactDir,
-  copyToClipboard,
   revealFile,
-  createGist,
   screenshotUrl,
   copyImageToClipboard,
 } from './utils.js';
@@ -219,17 +215,16 @@ export default function artifacts(pi: ExtensionAPI) {
           return errResult(`no artifact with slug "${slug}" — create it first.`, { slug, title });
         }
         const method = params.method ?? 'clipboard';
-        const baked = params.annotations === false ? null : bakeAnnotations(slug);
-        const bakedNote = baked ? ` — ${baked.count} comment${baked.count === 1 ? '' : 's'} baked in` : '';
+        const bake = params.annotations !== false;
         try {
           if (method === 'clipboard') {
-            const html = baked?.html ?? readArtifact(slug)!;
-            await copyToClipboard(html);
+            const res = await shareBaked(slug, title, 'copy', { bake });
+            const note = res.count ? ` — ${res.count} comment${res.count === 1 ? '' : 's'} baked in` : '';
             return {
               content: [
                 {
                   type: 'text' as const,
-                  text: `Copied ${title} to the clipboard (${Math.round(html.length / 1024)} KB of self-contained HTML)${bakedNote}.\n${absPath}`,
+                  text: `Copied ${title} to the clipboard (${Math.round((res.bytes ?? 0) / 1024)} KB of self-contained HTML)${note}.\n${absPath}`,
                 },
               ],
               details: { action, slug, title, method, absPath } as Record<string, unknown>,
@@ -260,28 +255,20 @@ export default function artifacts(pi: ExtensionAPI) {
               >,
             };
           }
-          // gist — baked comments ride in a temp file so the stored artifact stays clean
-          let gistPath = absPath;
-          try {
-            if (baked) {
-              gistPath = join(tmpdir(), `${slug}-with-comments.html`);
-              writeFileSync(gistPath, baked.html, 'utf-8');
-            }
-            const url = await createGist(gistPath, title, params.public ?? false);
-            await copyToClipboard(url).catch(() => {}); // clipboard is a nicety, never the failure mode
-            openInBrowser(url);
-            return {
-              content: [
-                {
-                  type: 'text' as const,
-                  text: `Gist created (${params.public ? 'public' : 'secret'})${bakedNote}, URL copied to clipboard:\n${url}\n\nNote: gist.github.com shows the source. Share the file itself for the rendered page.`,
-                },
-              ],
-              details: { action, slug, title, method, url, absPath } as Record<string, unknown>,
-            };
-          } finally {
-            if (gistPath !== absPath) rmSync(gistPath, { force: true });
-          }
+          // gist
+          const res = await shareBaked(slug, title, 'gist', { public: params.public ?? false, bake });
+          const url = res.url!;
+          const note = res.count ? ` — ${res.count} comment${res.count === 1 ? '' : 's'} baked in` : '';
+          openInBrowser(url);
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: `Gist created (${params.public ? 'public' : 'secret'})${note}, URL copied to clipboard:\n${url}\n\nNote: gist.github.com shows the source. Share the file itself for the rendered page.`,
+              },
+            ],
+            details: { action, slug, title, method, url, absPath } as Record<string, unknown>,
+          };
         } catch (e) {
           return errResult(`share (${method}) failed: ${e instanceof Error ? e.message : String(e)}`, { slug, title });
         }

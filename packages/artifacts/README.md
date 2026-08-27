@@ -15,7 +15,7 @@ pi install /Users/nicknisi/Developer/pi-extensions/packages/artifacts
 - **Tool `artifact`** — action-based (`create` | `update` | `open` | `list` | `share`). Registered with a `promptSnippet` ("emit visual output as a browser HTML artifact instead of terminal text") so the model knows when to reach for it.
 - **Command `/artifacts`** — starts the lazy server and opens the index page (`/`) in the browser.
 - **Event hook** — `session_shutdown`: stops the HTTP server.
-- **Browser UI** — styled artifact pages plus an index page at `/`; live reload via an `/events` SSE endpoint. No TUI widgets, overlays, keybindings, or custom message/entry types: tool results use pi's default rendering (the tool returns structured `details` — `action`, `slug`, `title`, `kind`, `url`, `absPath` — and a text summary containing the clickable localhost URL).
+- **Browser UI** — styled artifact pages plus an index page at `/`; live reload via an `/events` SSE endpoint. Every served artifact page carries a **Share** button (bottom-right): _Copy file_ puts the self-contained HTML on your clipboard (comments baked in when they exist), _Create gist link_ uploads via `gh` and copies the URL — no agent round-trip needed. No TUI widgets, overlays, keybindings, or custom message/entry types: tool results use pi's default rendering (the tool returns structured `details` — `action`, `slug`, `title`, `kind`, `url`, `absPath` — and a text summary containing the clickable localhost URL).
 - **Annotation layer** — every served artifact page carries an inert comment layer (see [Annotations](#annotations)): select text, comment, and send the comments back to the running agent as a follow-up message.
 
 ## The `artifact` tool
@@ -89,7 +89,7 @@ Project-local, mirroring plan-mode's `.pi/plans` convention:
 ## Server (lazy, localhost-only)
 
 - `node:http` server started on first `open`/auto-open (not at extension load), bound strictly to `127.0.0.1`, random free port (`listen(0)`) remembered for the process lifetime. One server per pi process, matching the cwd-relative storage model.
-- Routes: `/` (index page), `/<slug>.html` (static artifact files, annotation layer injected at serve time), `/events` (SSE endpoint), `PUT /api/annotations` (draft persistence), `POST /api/feedback` (compose + deliver to the agent).
+- Routes: `/` (index page), `/<slug>.html` (static artifact files, annotation layer injected at serve time), `/events` (SSE endpoint), `PUT /api/annotations` (draft persistence), `POST /api/feedback` (compose + deliver to the agent), `POST /api/render` (comment markdown preview), `POST /api/share` (the in-page Share button; copy or gist).
 - **SSE live reload**: server and tool run in the same process, so `update` pushes a `reload` event directly to connected clients (no `fs.watch`). Every rendered page embeds a snippet that subscribes to `/events` and reloads only on events matching its own slug (or `*`).
 - **Index page** at `/`: artifact list newest-first with kind badge and timestamp. Titles/kind/mtime recovered by regex-parsing each file's `<title>` and `artifact-*` metas — no sidecar manifest.
 - Request paths are URL-decoded, normalized, and prefix-checked against the artifacts dir — nothing outside it is served. No auth: localhost-only, serving files the agent just wrote locally.
@@ -122,7 +122,7 @@ Artifact: sprint-report (http://127.0.0.1:PORT/sprint-report.html)
 
 `(source line N)` appears for markdown artifacts when the quote is found verbatim in the source mirror (`.md`); it is omitted for raw HTML artifacts and quotes that span markdown formatting. If delivery fails, nothing is lost: when the server is up but has no live session to deliver to, it answers 503 with the composed message in the response and the page offers a Copy button; when the server itself is gone (e.g. `/new` stopped it), the draft comments stay in the sidecar and can be submitted after the next `open`.
 
-**Threat model**: same as the server itself — loopback-only (`127.0.0.1`), no auth. The write endpoints add slug validation (the same path-traversal guard used for serving) and a 1 MB request-body cap. The annotation script is injected into raw-HTML artifacts too, so it is built to tolerate arbitrary agent-authored DOM (fixed-position UI + CSS Highlight ranges; no mutation of page content).
+**Threat model**: same as the server itself — loopback-only (`127.0.0.1`), no auth. The write endpoints add slug validation (the same path-traversal guard used for serving) and a 1 MB request-body cap. The annotation script is injected into raw-HTML artifacts too, so it is built to tolerate arbitrary agent-authored DOM (fixed-position UI + CSS Highlight ranges; no mutation of page content). Note any local page can POST these endpoints: worst case is an uninvited _secret_ gist of an artifact (created under your account, visible to you) or feedback delivered to the agent — annoying, not destructive.
 
 ## `/artifacts` command
 

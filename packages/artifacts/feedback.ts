@@ -4,8 +4,18 @@
  */
 
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-import { annotationsPath, isSafeSlug, readArtifact, sourcePath } from './utils.js';
+import {
+  annotationsPath,
+  artifactPath,
+  copyToClipboard,
+  createGist,
+  isSafeSlug,
+  readArtifact,
+  sourcePath,
+} from './utils.js';
 import { injectAnnotations } from './annotate.js';
 
 export interface TextQuoteAnchor {
@@ -163,6 +173,50 @@ export function bakeAnnotations(slug: string): { html: string; count: number } |
   const html = readArtifact(slug);
   if (html == null) return null;
   return { html: injectAnnotations(html, slug, JSON.stringify(anns), { static: true }), count: anns.length };
+}
+
+export interface ShareResult {
+  /** comments baked in (0 = clean file shared) */
+  count: number;
+  /** gist only: the created URL (also copied to the system clipboard) */
+  url?: string;
+  /** copy only: bytes placed on the clipboard */
+  bytes?: number;
+}
+
+/**
+ * Share an artifact, baking comments in when present (unless bake: false).
+ * `copy` puts the self-contained HTML on the system clipboard; `gist` uploads
+ * via `gh gist create` from a temp file (the stored artifact stays clean).
+ * Shared by the `artifact` tool and the in-page Share button (POST /api/share).
+ */
+export async function shareBaked(
+  slug: string,
+  title: string,
+  method: 'copy' | 'gist',
+  opts?: { public?: boolean; bake?: boolean },
+): Promise<ShareResult> {
+  const baked = opts?.bake === false ? null : bakeAnnotations(slug);
+  const count = baked?.count ?? 0;
+  if (method === 'copy') {
+    const html = baked?.html ?? readArtifact(slug);
+    if (html == null) throw new Error(`no artifact with slug "${slug}"`);
+    await copyToClipboard(html);
+    return { count, bytes: html.length };
+  }
+  // gist — the baked render uploads from a temp file; the artifact stays clean
+  let path = artifactPath(slug);
+  try {
+    if (baked) {
+      path = join(tmpdir(), `${slug}-with-comments.html`);
+      writeFileSync(path, baked.html, 'utf-8');
+    }
+    const url = await createGist(path, title, opts?.public ?? false);
+    await copyToClipboard(url).catch(() => {}); // clipboard is a nicety, never the failure mode
+    return { count, url };
+  } finally {
+    if (baked) rmSync(path, { force: true });
+  }
 }
 
 /**

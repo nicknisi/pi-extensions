@@ -264,9 +264,27 @@ async function stale() {
 
 // ─── share ───────────────────────────────────────────────────────────────────
 async function share() {
-  const { utils, templates, feedback } = await boot();
+  const { server, utils, templates, feedback } = await boot();
   const slug = 'sprint-report';
   writeFixture(utils, templates, slug, 'Sprint Report', SOURCE);
+  await server.ensureServer();
+  const base = `http://127.0.0.1:${server.runningPort()}`;
+  const post = (body) =>
+    fetch(`${base}/api/share`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  // Endpoint validation (the in-page Share button's route).
+  assert('share', (await post({ slug: '../x', method: 'copy' })).status === 400, 'bad slug not rejected');
+  assert('share', (await post({ slug, method: 'pigeon' })).status === 400, 'bad method not rejected');
+  assert('share', (await post({ slug: 'nope', method: 'copy' })).status === 404, 'missing artifact not 404');
+
+  const copyRes = await post({ slug, method: 'copy' });
+  assert('share', copyRes.status === 200, `copy returned ${copyRes.status}`);
+  const copyBody = await copyRes.json();
+  assert('share', copyBody.ok === true && copyBody.bytes > 0, 'copy response missing ok/bytes');
 
   assert('share', feedback.bakeAnnotations(slug) === null, 'bake should be null with no annotations');
 
@@ -283,6 +301,11 @@ async function share() {
   assert('share', baked.html.includes('STATIC = true'), 'baked file not in static mode');
   assert('share', !readFileSync(utils.artifactPath(slug), 'utf-8').includes(MARKER), 'bake polluted the stored file');
 
+  // Copy endpoint bakes comments when they exist.
+  const bakedCopy = await (await post({ slug, method: 'copy' })).json();
+  assert('share', bakedCopy.count === 2, `endpoint copy baked ${bakedCopy.count} comments, want 2`);
+
+  server.stopServer();
   console.log('PASS share');
 }
 

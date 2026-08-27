@@ -5,7 +5,7 @@ import { readFileSync, existsSync, statSync } from 'node:fs';
 import { basename, extname } from 'node:path';
 
 import { HOST } from './config.js';
-import { isSafeSlug, listArtifacts, safeArtifactPath } from './utils.js';
+import { isSafeSlug, listArtifacts, readArtifact, safeArtifactPath } from './utils.js';
 import { renderCommentMarkdown, renderIndexPage } from './templates.js';
 import { injectAnnotations } from './annotate.js';
 import {
@@ -14,6 +14,7 @@ import {
   deleteAnnotations,
   isStale,
   readAnnotations,
+  shareBaked,
   sourceLine,
   writeAnnotations,
   type Annotation,
@@ -237,11 +238,48 @@ async function handleRender(req: IncomingMessage, res: ServerResponse): Promise<
   sendJson(res, 200, { html: renderCommentMarkdown(body.markdown) });
 }
 
+/** POST /api/share — the in-page Share button: copy the file or create a gist. */
+async function handleShare(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const raw = await readBody(req, res);
+  if (raw === null) return; // 413 already sent
+  let body: { slug?: unknown; method?: unknown };
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    sendJson(res, 400, { error: 'malformed JSON' });
+    return;
+  }
+  if (typeof body.slug !== 'string' || !isSafeSlug(body.slug)) {
+    sendJson(res, 400, { error: 'invalid slug' });
+    return;
+  }
+  if (body.method !== 'copy' && body.method !== 'gist') {
+    sendJson(res, 400, { error: 'method must be copy or gist' });
+    return;
+  }
+  const html = readArtifact(body.slug);
+  if (html == null) {
+    sendJson(res, 404, { error: 'no such artifact' });
+    return;
+  }
+  const title = html.match(/<title>(.*?)<\/title>/s)?.[1]?.trim() || body.slug;
+  try {
+    const result = await shareBaked(body.slug, title, body.method);
+    sendJson(res, 200, { ok: true, ...result });
+  } catch (e) {
+    sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
 function handle(req: IncomingMessage, res: ServerResponse, clients: Set<ServerResponse>): void {
   // split always yields at least one element.
   const url = (req.url ?? '/').split('?')[0]!;
 
   // Feedback endpoints (before the static-file fallthrough)
+  if (url === '/api/share' && req.method === 'POST') {
+    void handleShare(req, res);
+    return;
+  }
   if (url === '/api/render' && req.method === 'POST') {
     void handleRender(req, res);
     return;

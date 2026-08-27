@@ -61,14 +61,39 @@ export function annotateSnippet(slug: string, annotationsJson: string, opts?: { 
   from { opacity: 0; transform: translateX(-50%) translateY(8px); }
   to { opacity: 1; transform: translateX(-50%); }
 }
-#artifact-annotate-btn {
+#artifact-ui {
   position: fixed; bottom: 20px; right: 20px; z-index: 2147483000;
+  display: flex; gap: 8px; align-items: center;
+}
+#artifact-annotate-btn {
   font: 600 13px/1 system-ui, sans-serif;
   background: var(--aa-accent); color: var(--aa-bg);
   border: none; border-radius: 999px; padding: 10px 16px; cursor: pointer;
   box-shadow: 0 2px 8px rgba(0,0,0,.25);
   transition: transform .15s ease, box-shadow .15s ease;
 }
+#artifact-share-btn {
+  font: 600 13px/1 system-ui, sans-serif;
+  background: var(--aa-bg); color: var(--aa-fg);
+  border: 1px solid var(--aa-border); border-radius: 999px; padding: 10px 16px; cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0,0,0,.25);
+  transition: transform .15s ease, box-shadow .15s ease;
+}
+#artifact-share-btn:hover { transform: translateY(-2px); box-shadow: 0 5px 14px rgba(0,0,0,.3); }
+#artifact-share-menu {
+  position: fixed; bottom: 64px; right: 20px; z-index: 2147483001; min-width: 220px;
+  background: var(--aa-bg); color: var(--aa-fg);
+  border: 1px solid var(--aa-border); border-radius: 10px; padding: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.28);
+  font: 13px system-ui, sans-serif; display: none;
+  animation: aa-pop .16s ease;
+}
+#artifact-share-menu button {
+  all: unset; display: block; width: 100%; box-sizing: border-box;
+  padding: 8px 12px; border-radius: 6px; cursor: pointer;
+  font: 13px system-ui, sans-serif; color: var(--aa-fg);
+}
+#artifact-share-menu button:hover { background: color-mix(in srgb, var(--aa-fg) 8%, transparent); }
 #artifact-annotate-btn:hover { transform: translateY(-2px); box-shadow: 0 5px 14px rgba(0,0,0,.3); }
 #artifact-annotate-btn.active {
   outline: 2px solid var(--aa-fg);
@@ -265,9 +290,28 @@ export function annotateSnippet(slug: string, annotationsJson: string, opts?: { 
   if (tok("--border")) host.setProperty("--aa-host-border", tok("--border"));
   if (tok("--code-bg")) host.setProperty("--aa-host-code-bg", tok("--code-bg"));
 
+  var ui = document.createElement("div");
+  ui.id = "artifact-ui";
+  root.appendChild(ui);
+
+  // Share control: every live (non-static) artifact page gets it. Routes through
+  // POST /api/share so gist uses the host's gh auth and copy uses the system
+  // clipboard — no browser permission prompts.
+  var shareBtn = null, shareMenu = null;
+  if (!STATIC) {
+    shareBtn = document.createElement("button");
+    shareBtn.id = "artifact-share-btn";
+    shareBtn.textContent = "Share";
+    ui.appendChild(shareBtn);
+
+    shareMenu = document.createElement("div");
+    shareMenu.id = "artifact-share-menu";
+    root.appendChild(shareMenu);
+  }
+
   var btn = document.createElement("button");
   btn.id = "artifact-annotate-btn";
-  root.appendChild(btn);
+  ui.appendChild(btn);
 
   var panel = document.createElement("div");
   panel.id = "artifact-annotate-panel";
@@ -649,8 +693,39 @@ export function annotateSnippet(slug: string, annotationsJson: string, opts?: { 
   popTextarea.addEventListener("keydown", function (e) {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); addPending(); }
   });
+  if (shareBtn && shareMenu) {
+    shareBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      if (shareMenu.style.display === "block") { shareMenu.style.display = "none"; return; }
+      var n = state.annotations.length;
+      shareMenu.innerHTML =
+        '<button data-share="copy">Copy file' +
+        (n ? " — with " + n + (n === 1 ? " comment" : " comments") : "") +
+        '</button><button data-share="gist">Create gist link</button>';
+      shareMenu.style.display = "block";
+    });
+    shareMenu.addEventListener("click", function (e) {
+      var m = e.target.getAttribute("data-share");
+      if (!m) return;
+      shareMenu.style.display = "none";
+      fetch("/api/share", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug: SLUG, method: m }),
+      }).then(function (r) { return r.json(); })
+        .then(function (b) {
+          if (!b.ok) { showToast(b.error || "Share failed"); return; }
+          if (b.url) { showToast("Gist created — link copied"); window.open(b.url, "_blank"); }
+          else showToast("Copied " + Math.max(1, Math.round((b.bytes || 0) / 1024)) + " KB of HTML — paste it anywhere");
+        })
+        .catch(function () { showToast("Share failed — server unreachable"); });
+    });
+    document.addEventListener("click", function () { shareMenu.style.display = "none"; });
+  }
+
   document.addEventListener("keydown", function (e) {
     if (e.key !== "Escape") return;
+    if (shareMenu && shareMenu.style.display === "block") { shareMenu.style.display = "none"; return; }
     if (STATIC) { panel.classList.remove("open"); return; }
     if (popover.style.display !== "none") { hidePopover(); return; }
     if (state.editing != null) { state.editing = null; render(); return; }
