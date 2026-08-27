@@ -36,7 +36,7 @@ export function findAdrDir(start: string): string | null {
 /** Active ADR filenames, sorted by number. Templates excluded. */
 export function listAdrs(dir: string): string[] {
   return readdirSync(dir)
-    .filter(f => ADR_FILE.test(f) && !/template/i.test(f))
+    .filter((f) => ADR_FILE.test(f) && !/template/i.test(f))
     .sort();
 }
 
@@ -50,7 +50,7 @@ export default function (pi: ExtensionAPI) {
     if (!dir) return;
     const adrs = listAdrs(dir);
     if (adrs.length === 0) return;
-    const list = adrs.map(f => `- docs/decisions/${f}`).join('\n');
+    const list = adrs.map((f) => `- docs/decisions/${f}`).join('\n');
     return { systemPrompt: `${event.systemPrompt}\n\n${FRAMING}\n\n${list}` };
   });
 }

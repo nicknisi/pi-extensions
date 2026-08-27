@@ -36,6 +36,8 @@ importers:
         specifier: ^3.2.4
         version: 3.2.7(@types/node@24.13.3)(jiti@2.7.0)(yaml@2.9.0)
 
+  packages/adr: {}
+
   packages/agent-urls: {}
 
   packages/answer:
