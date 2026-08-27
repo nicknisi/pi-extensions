@@ -69,6 +69,25 @@ export function renderMarkdown(content: string, flags: RenderFlags): string {
   return marked.parse(content) as string;
 }
 
+/**
+ * Render an annotation comment's markdown for display (popover preview, panel
+ * items). Plain GFM with soft breaks — no diff/code/mermaid renderers, since the
+ * page has no d2h/hljs stylesheets for this content. Strips script/iframe and
+ * inline event handlers: the author is the local user, but a pasted snippet
+ * should not execute in the artifact page.
+ */
+const commentMarked = new Marked({ gfm: true, breaks: true });
+
+export function renderCommentMarkdown(md: string): string {
+  const html = commentMarked.parse(md) as string;
+  return html
+    .replace(/<script\b[\s\S]*?(<\/script\s*>|$)/gi, '')
+    .replace(/<iframe\b[\s\S]*?(<\/iframe\s*>|$)/gi, '')
+    .replace(/\son\w+\s*=\s*"[^"]*"/gi, '')
+    .replace(/\son\w+\s*=\s*'[^']*'/gi, '')
+    .replace(/\son\w+\s*=\s*[^\s>]+/gi, '');
+}
+
 /** Render a unified-diff string to diff2html HTML (server-side). Returns null if parse yields nothing. */
 function renderDiff(diffText: string): string | null {
   try {

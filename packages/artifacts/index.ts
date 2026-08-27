@@ -5,11 +5,13 @@ import { Type } from 'typebox';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { artifactUrl, isRunning, notifyReload, runningPort, stopServer } from './server.js';
+import { artifactUrl, isRunning, notifyReload, runningPort, setFeedbackSender, stopServer } from './server.js';
+import type { FeedbackSender } from './server.js';
 import {
   slugify,
   isSafeSlug,
   writeArtifact,
+  writeSourceMirror,
   artifactExists,
   readArtifact,
   listArtifacts,
@@ -63,7 +65,16 @@ function resolveContent(params: { content?: string; path?: string }): { content:
 }
 
 export default function artifacts(pi: ExtensionAPI) {
+  // Deliver composed feedback to the live session as a follow-up message.
+  const sender: FeedbackSender = (markdown) => {
+    pi.sendUserMessage(markdown, { deliverAs: 'followUp' });
+    return true;
+  };
+  setFeedbackSender(sender); // factory time — first session
+  pi.on('session_start', () => setFeedbackSender(sender)); // re-register across session replacement
+
   pi.on('session_shutdown', () => {
+    setFeedbackSender(null);
     stopServer();
   });
 
@@ -273,6 +284,10 @@ export default function artifacts(pi: ExtensionAPI) {
         kind === 'html' ? renderHtmlDocument(title, slug, content) : renderMarkdownDocument(title, slug, content);
 
       writeArtifact(slug, html);
+
+      // Source mirror for annotation source-line refs (markdown artifacts only;
+      // additive — listArtifacts only reads .html).
+      if (kind === 'markdown') writeSourceMirror(slug, content);
 
       // Live-reload already-open tabs (no-op if server not running)
       notifyReload(slug);

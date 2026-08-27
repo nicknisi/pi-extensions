@@ -2,11 +2,22 @@
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFileSync, existsSync, statSync } from 'node:fs';
-import { extname } from 'node:path';
+import { basename, extname } from 'node:path';
 
 import { HOST } from './config.js';
-import { listArtifacts, safeArtifactPath } from './utils.js';
-import { renderIndexPage } from './templates.js';
+import { isSafeSlug, listArtifacts, safeArtifactPath } from './utils.js';
+import { renderCommentMarkdown, renderIndexPage } from './templates.js';
+import { annotateSnippet } from './annotate.js';
+import {
+  artifactText,
+  composeFeedback,
+  deleteAnnotations,
+  isStale,
+  readAnnotations,
+  sourceLine,
+  writeAnnotations,
+  type Annotation,
+} from './feedback.js';
 
 interface ServerState {
   port: number;
@@ -15,6 +26,16 @@ interface ServerState {
 }
 
 let state: ServerState | null = null;
+
+/** Delivers a composed feedback message to the live session. false/throw → 503. */
+export type FeedbackSender = (markdown: string) => boolean;
+
+let feedbackSender: FeedbackSender | null = null;
+
+/** Register (or clear) the feedback sender. Called by the extension per session. */
+export function setFeedbackSender(fn: FeedbackSender | null): void {
+  feedbackSender = fn;
+}
 
 /** URL for a given slug (or index). Starts the server if needed. */
 export async function artifactUrl(slug?: string): Promise<string> {
@@ -91,9 +112,148 @@ const MIME: Record<string, string> = {
   '.gif': 'image/gif',
 };
 
+const BODY_CAP = 1024 * 1024; // 1 MB
+
+/** Accumulate a request body with a hard cap; destroys + 413 past it. Resolves null when capped. */
+function readBody(req: IncomingMessage, res: ServerResponse): Promise<string | null> {
+  return new Promise((resolve) => {
+    let size = 0;
+    const chunks: Buffer[] = [];
+    let capped = false;
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > BODY_CAP) {
+        capped = true;
+        res.writeHead(413, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('413 — body too large');
+        req.destroy();
+        resolve(null);
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (!capped) resolve(Buffer.concat(chunks).toString('utf-8'));
+    });
+    req.on('error', () => {
+      if (!capped) resolve(null);
+    });
+  });
+}
+
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(body));
+}
+
+/** PUT /api/annotations — replace the draft annotation list for a slug. */
+async function handlePutAnnotations(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const raw = await readBody(req, res);
+  if (raw === null) return; // 413 already sent
+  let body: { slug?: unknown; annotations?: unknown };
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    sendJson(res, 400, { error: 'malformed JSON' });
+    return;
+  }
+  if (typeof body.slug !== 'string' || !isSafeSlug(body.slug)) {
+    sendJson(res, 400, { error: 'invalid slug' });
+    return;
+  }
+  if (!Array.isArray(body.annotations)) {
+    sendJson(res, 400, { error: 'annotations must be an array' });
+    return;
+  }
+  try {
+    writeAnnotations(body.slug, body.annotations as Annotation[]);
+  } catch {
+    sendJson(res, 500, { error: 'could not write annotations' });
+    return;
+  }
+  sendJson(res, 200, { ok: true });
+}
+
+/** POST /api/feedback — compose from the sidecar, deliver, delete on success. */
+async function handlePostFeedback(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const raw = await readBody(req, res);
+  if (raw === null) return; // 413 already sent
+  let body: { slug?: unknown };
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    sendJson(res, 400, { error: 'malformed JSON' });
+    return;
+  }
+  if (typeof body.slug !== 'string' || !isSafeSlug(body.slug)) {
+    sendJson(res, 400, { error: 'invalid slug' });
+    return;
+  }
+  const slug = body.slug;
+  const anns = readAnnotations(slug);
+  if (anns.length === 0) {
+    sendJson(res, 400, { error: 'no annotations' });
+    return;
+  }
+
+  const text = artifactText(slug);
+  const staleFlags = anns.map((a) => (text === null ? true : isStale(a, text)));
+  const lines = anns.map((a) => sourceLine(a, slug));
+  const url = state ? `http://${HOST}:${state.port}/${slug}.html` : `/${slug}.html`;
+  const feedback = composeFeedback(slug, url, anns, staleFlags, lines);
+
+  let delivered = false;
+  if (feedbackSender) {
+    try {
+      delivered = feedbackSender(feedback) !== false;
+    } catch {
+      delivered = false;
+    }
+  }
+
+  if (delivered) {
+    deleteAnnotations(slug);
+    sendJson(res, 200, { delivered: true });
+  } else {
+    sendJson(res, 503, { delivered: false, feedback });
+  }
+}
+
+/** POST /api/render — render comment markdown to HTML for the annotation UI. */
+async function handleRender(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const raw = await readBody(req, res);
+  if (raw === null) return; // 413 already sent
+  let body: { markdown?: unknown };
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    sendJson(res, 400, { error: 'malformed JSON' });
+    return;
+  }
+  if (typeof body.markdown !== 'string') {
+    sendJson(res, 400, { error: 'markdown must be a string' });
+    return;
+  }
+  sendJson(res, 200, { html: renderCommentMarkdown(body.markdown) });
+}
+
 function handle(req: IncomingMessage, res: ServerResponse, clients: Set<ServerResponse>): void {
   // split always yields at least one element.
   const url = (req.url ?? '/').split('?')[0]!;
+
+  // Feedback endpoints (before the static-file fallthrough)
+  if (url === '/api/render' && req.method === 'POST') {
+    void handleRender(req, res);
+    return;
+  }
+  if (url === '/api/annotations' && req.method === 'PUT') {
+    void handlePutAnnotations(req, res);
+    return;
+  }
+  if (url === '/api/feedback' && req.method === 'POST') {
+    void handlePostFeedback(req, res);
+    return;
+  }
 
   // SSE endpoint
   if (url === '/events') {
@@ -125,7 +285,24 @@ function handle(req: IncomingMessage, res: ServerResponse, clients: Set<ServerRe
     return;
   }
 
-  const mime = MIME[extname(safe).toLowerCase()] ?? 'application/octet-stream';
+  const ext = extname(safe).toLowerCase();
+  const mime = MIME[ext] ?? 'application/octet-stream';
+
+  // Inject the annotation layer at serve time into .html artifact pages only —
+  // the stored file stays byte-clean. Splice before </body> (append if absent),
+  // mirroring renderHtmlDocument.
+  if (ext === '.html') {
+    const slug = basename(safe).replace(/\.html$/, '');
+    const original = readFileSync(safe, 'utf-8');
+    const snippet = annotateSnippet(slug, JSON.stringify(readAnnotations(slug)));
+    const bodyClose = original.search(/<\/body>/i);
+    const injected =
+      bodyClose !== -1 ? original.slice(0, bodyClose) + snippet + original.slice(bodyClose) : original + snippet;
+    res.writeHead(200, { 'Content-Type': mime });
+    res.end(injected);
+    return;
+  }
+
   res.writeHead(200, { 'Content-Type': mime });
   res.end(readFileSync(safe));
 }

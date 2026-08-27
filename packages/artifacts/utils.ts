@@ -52,6 +52,24 @@ export function writeArtifact(slug: string, html: string): string {
   return path;
 }
 
+/** Absolute path to a slug's annotations sidecar (<slug>.annotations.json). */
+export function annotationsPath(slug: string): string {
+  return join(artifactDir(), `${slug}.annotations.json`);
+}
+
+/** Absolute path to a slug's raw markdown source mirror (<slug>.md). */
+export function sourcePath(slug: string): string {
+  return join(artifactDir(), `${slug}.md`);
+}
+
+/** Write the raw markdown source mirror for a slug, creating the dir lazily. */
+export function writeSourceMirror(slug: string, content: string): string {
+  ensureArtifactDir();
+  const path = sourcePath(slug);
+  writeFileSync(path, content, 'utf-8');
+  return path;
+}
+
 /** Read an artifact file, or null if missing. */
 export function readArtifact(slug: string): string | null {
   const path = artifactPath(slug);

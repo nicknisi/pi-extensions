@@ -17,8 +17,11 @@
   "files": [
     "dist",
     "index.ts",
+    "annotate.ts",
     "config.ts",
+    "feedback.ts",
     "server.ts",
+    "smoke.mjs",
     "styles.ts",
     "templates.ts",
     "utils.ts",
