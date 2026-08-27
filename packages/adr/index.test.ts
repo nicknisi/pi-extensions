@@ -1,11 +1,11 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { findAdrDir, listAdrs } from './index.ts';
+import { findAdrDir, listAdrs } from './index.js';
 
 describe('findAdrDir', () => {
-  test('finds docs/decisions in an ancestor of cwd', () => {
+  it('finds docs/decisions in an ancestor of cwd', () => {
     const root = mkdtempSync(join(tmpdir(), 'adr-'));
     mkdirSync(join(root, 'docs', 'decisions'), { recursive: true });
     const nested = join(root, 'src', 'deep');
@@ -13,14 +13,14 @@ describe('findAdrDir', () => {
     expect(findAdrDir(nested)).toBe(join(root, 'docs', 'decisions'));
   });
 
-  test('returns null when nothing exists', () => {
+  it('returns null when nothing exists', () => {
     const root = mkdtempSync(join(tmpdir(), 'adr-'));
     expect(findAdrDir(root)).toBeNull();
   });
 });
 
 describe('listAdrs', () => {
-  test('returns numbered files sorted, skipping templates and superseded/', () => {
+  it('returns numbered files sorted, skipping templates and superseded/', () => {
     const root = mkdtempSync(join(tmpdir(), 'adr-'));
     const dir = join(root, 'docs', 'decisions');
     mkdirSync(join(dir, 'superseded'), { recursive: true });

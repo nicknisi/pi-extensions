@@ -15,12 +15,14 @@
     "directory": "packages/adr"
   },
   "files": [
+    "dist",
     "index.ts"
   ],
   "type": "module",
   "exports": {
     ".": {
-      "default": "./index.ts"
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     }
   },
   "peerDependencies": {
