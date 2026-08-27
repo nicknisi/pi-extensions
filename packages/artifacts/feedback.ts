@@ -9,11 +9,16 @@ import { join } from 'node:path';
 
 import {
   annotationsPath,
+  artifactDir,
   artifactPath,
+  copyFileToClipboard,
+  copyImageToClipboard,
   copyToClipboard,
   createGist,
   isSafeSlug,
+  pdfToFile,
   readArtifact,
+  screenshotUrl,
   sourcePath,
 } from './utils.js';
 import { injectAnnotations } from './annotate.js';
@@ -176,12 +181,16 @@ export function bakeAnnotations(slug: string): { html: string; count: number } |
 }
 
 export interface ShareResult {
-  /** comments baked in (0 = clean file shared) */
+  /** comments included/visible in the share (0 = none) */
   count: number;
   /** gist only: the created URL (also copied to the system clipboard) */
   url?: string;
   /** copy only: bytes placed on the clipboard */
   bytes?: number;
+  /** image/pdf only: the written file */
+  path?: string;
+  /** image/pdf only: whether the file landed on the clipboard */
+  copied?: boolean;
 }
 
 /**
@@ -193,9 +202,27 @@ export interface ShareResult {
 export async function shareBaked(
   slug: string,
   title: string,
-  method: 'copy' | 'gist',
-  opts?: { public?: boolean; bake?: boolean },
+  method: 'copy' | 'gist' | 'image' | 'pdf',
+  opts?: { public?: boolean; bake?: boolean; baseUrl?: string; width?: number; height?: number },
 ): Promise<ShareResult> {
+  if (method === 'image' || method === 'pdf') {
+    if (!opts?.baseUrl) throw new Error('image/pdf shares need baseUrl (the running server origin)');
+    const count = opts.bake === false ? 0 : readAnnotations(slug).length;
+    // Image: open the comments panel for the shot. PDF: print rules hide the
+    // fixed UI, so comments go in as an end-of-document section instead.
+    const query = count > 0 ? (method === 'pdf' ? '?print=1' : '?panel=open') : '';
+    const url = `${opts.baseUrl}/${slug}.html${query}`;
+    if (method === 'image') {
+      const pngPath = join(artifactDir(), `${slug}.png`);
+      await screenshotUrl(url, pngPath, opts.width ?? 1280, opts.height ?? 800);
+      const copied = await copyImageToClipboard(pngPath);
+      return { count, path: pngPath, copied };
+    }
+    const pdfPath = join(artifactDir(), `${slug}.pdf`);
+    await pdfToFile(url, pdfPath);
+    const copied = await copyFileToClipboard(pdfPath);
+    return { count, path: pdfPath, copied };
+  }
   const baked = opts?.bake === false ? null : bakeAnnotations(slug);
   const count = baked?.count ?? 0;
   if (method === 'copy') {

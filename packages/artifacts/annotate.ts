@@ -94,6 +94,19 @@ export function annotateSnippet(slug: string, annotationsJson: string, opts?: { 
   font: 13px system-ui, sans-serif; color: var(--aa-fg);
 }
 #artifact-share-menu button:hover { background: color-mix(in srgb, var(--aa-fg) 8%, transparent); }
+@media print {
+  #artifact-ui, #artifact-annotate-panel, #artifact-annotate-popover,
+  #artifact-annotate-toast, #artifact-share-menu { display: none !important; }
+  body { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+}
+.aa-print-comments { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border, #ddd); }
+.aa-print-comments h2 { font-size: 1.05rem; margin: 0 0 .6em; }
+.aa-print-comments .item { margin-bottom: .9em; }
+.aa-print-comments blockquote {
+  margin: 0 0 .2em; padding: 2px 10px; font-style: italic;
+  border-left: 3px solid var(--accent, #d67858); color: var(--muted, #888);
+}
+.aa-print-comments p { margin: 0; }
 #artifact-annotate-btn:hover { transform: translateY(-2px); box-shadow: 0 5px 14px rgba(0,0,0,.3); }
 #artifact-annotate-btn.active {
   outline: 2px solid var(--aa-fg);
@@ -114,6 +127,8 @@ export function annotateSnippet(slug: string, annotationsJson: string, opts?: { 
   transition: transform .22s ease, opacity .22s ease, visibility .22s;
 }
 #artifact-annotate-panel.open { visibility: visible; transform: none; opacity: 1; }
+/* ?panel=open share renders show the review, not the tooling */
+#artifact-annotate-panel.sharemode .actions { display: none; }
 #artifact-annotate-panel header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 14px; border-bottom: 1px solid var(--aa-border); font-weight: 650;
@@ -239,6 +254,7 @@ export function annotateSnippet(slug: string, annotationsJson: string, opts?: { 
 (function () {
   var SLUG = ${JSON.stringify(slug)};
   var STATIC = ${staticMode ? 'true' : 'false'};
+  var urlParams = new URLSearchParams(location.search);
   window.__ARTIFACT_ANNOTATIONS__ = ${safeJson};
 
   var state = {
@@ -247,6 +263,8 @@ export function annotateSnippet(slug: string, annotationsJson: string, opts?: { 
     editing: null,
     pending: null,
   };
+  // ?panel=open pins the panel open for share renders; render() must not stomp it.
+  var panelPinned = false;
   var supportsHighlight = typeof CSS !== "undefined" && CSS.highlights && typeof Highlight !== "undefined";
 
   // ── DOM scaffold ──────────────────────────────────────────────────────────
@@ -556,7 +574,7 @@ export function annotateSnippet(slug: string, annotationsJson: string, opts?: { 
     btn.innerHTML = STATIC
       ? count + (count === 1 ? " comment" : " comments")
       : (state.mode === "annotate" ? "Annotating" : "Annotate") + badge(count);
-    if (!STATIC) panel.classList.toggle("open", state.mode === "annotate");
+    if (!STATIC && !panelPinned) panel.classList.toggle("open", state.mode === "annotate");
 
     var hint = !STATIC && state.mode === "annotate"
       ? '<p class="hint">Select text in the page to add a comment. Esc to exit.</p>'
@@ -639,6 +657,7 @@ export function annotateSnippet(slug: string, annotationsJson: string, opts?: { 
   // ── events ─────────────────────────────────────────────────────────────
   btn.addEventListener("click", function () {
     if (STATIC) { panel.classList.toggle("open"); return; }
+    panelPinned = false;
     setMode(state.mode === "annotate" ? "off" : "annotate");
   });
   panel.addEventListener("click", function (e) {
@@ -698,10 +717,12 @@ export function annotateSnippet(slug: string, annotationsJson: string, opts?: { 
       e.stopPropagation();
       if (shareMenu.style.display === "block") { shareMenu.style.display = "none"; return; }
       var n = state.annotations.length;
+      var withN = n ? " — with " + n + (n === 1 ? " comment" : " comments") : "";
       shareMenu.innerHTML =
-        '<button data-share="copy">Copy file' +
-        (n ? " — with " + n + (n === 1 ? " comment" : " comments") : "") +
-        '</button><button data-share="gist">Create gist link</button>';
+        '<button data-share="image">Copy image' + withN + '</button>' +
+        '<button data-share="pdf">Copy PDF' + withN + '</button>' +
+        '<button data-share="copy">Copy file' + withN + '</button>' +
+        '<button data-share="gist">Create gist link</button>';
       shareMenu.style.display = "block";
     });
     shareMenu.addEventListener("click", function (e) {
@@ -716,6 +737,7 @@ export function annotateSnippet(slug: string, annotationsJson: string, opts?: { 
         .then(function (b) {
           if (!b.ok) { showToast(b.error || "Share failed"); return; }
           if (b.url) { showToast("Gist created — link copied"); window.open(b.url, "_blank"); }
+          else if (b.path) { showToast(b.copied ? "On your clipboard — paste it anywhere" : "Written to " + b.path); }
           else showToast("Copied " + Math.max(1, Math.round((b.bytes || 0) / 1024)) + " KB of HTML — paste it anywhere");
         })
         .catch(function () { showToast("Share failed — server unreachable"); });
@@ -736,6 +758,38 @@ export function annotateSnippet(slug: string, annotationsJson: string, opts?: { 
   if (STATIC) panel.querySelector("footer").style.display = "none";
   reHighlightAll();
   render();
+
+  // Share-render modes: ?panel=open shows the comments panel (image shares);
+  // ?print=1 appends a plain comments section for print/PDF (fixed UI is
+  // hidden by the @media print rules above). Panel mode is for screenshots: no
+  // slide-in transition (a headless shot fires mid-animation) and no buttons.
+  if (urlParams.has("panel") && state.annotations.length > 0) {
+    panelPinned = true;
+    panel.style.transition = "none";
+    panel.classList.add("open", "sharemode");
+    panel.querySelector("footer").style.display = "none";
+    ui.style.display = "none";
+  }
+  if (urlParams.has("print") && state.annotations.length > 0) {
+    var printSection = document.createElement("section");
+    printSection.className = "aa-print-comments";
+    var printH = document.createElement("h2");
+    printH.textContent = "Review comments (" + state.annotations.length + ")";
+    printSection.appendChild(printH);
+    state.annotations.forEach(function (a) {
+      var item = document.createElement("div");
+      item.className = "item";
+      var bq = document.createElement("blockquote");
+      bq.textContent = '"' + a.quote.exact + '"';
+      var p = document.createElement("p");
+      p.textContent = a.comment;
+      item.appendChild(bq); item.appendChild(p);
+      printSection.appendChild(item);
+    });
+    var artFooter = document.querySelector(".artifact-footer");
+    if (artFooter && artFooter.parentElement) artFooter.parentElement.insertBefore(printSection, artFooter);
+    else document.body.appendChild(printSection);
+  }
 })();
 </script>`;
 }

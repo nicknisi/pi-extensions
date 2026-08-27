@@ -241,6 +241,32 @@ export async function screenshotUrl(url: string, outPath: string, width: number,
   if (!existsSync(outPath)) throw new Error('the browser exited without writing a screenshot.');
 }
 
+/**
+ * Print a URL to PDF via headless Chrome-family flags.
+ * The artifact server must already be running (the caller ensures it).
+ */
+export async function pdfToFile(url: string, outPath: string): Promise<void> {
+  const browser = findBrowser();
+  if (!browser) {
+    throw new Error(
+      'no Chrome-family browser found (looked in /Applications). Install Chrome or Chromium to render PDFs.',
+    );
+  }
+  await run(browser, ['--headless', '--disable-gpu', '--no-pdf-header-footer', `--print-to-pdf=${outPath}`, url]);
+  if (!existsSync(outPath)) throw new Error('the browser exited without writing a PDF.');
+}
+
+/** Copy any file to the clipboard as a file reference (macOS only). Returns false elsewhere or on failure. */
+export async function copyFileToClipboard(absPath: string): Promise<boolean> {
+  if (process.platform !== 'darwin') return false;
+  try {
+    await run('osascript', ['-e', `set the clipboard to (POSIX file "${absPath}")`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Copy a PNG file to the clipboard as an image (macOS only). Returns false on other platforms or failure. */
 export async function copyImageToClipboard(absPath: string): Promise<boolean> {
   if (process.platform !== 'darwin') return false;

@@ -18,10 +18,7 @@ import {
   listArtifacts,
   openInBrowser,
   artifactPath,
-  artifactDir,
   revealFile,
-  screenshotUrl,
-  copyImageToClipboard,
 } from './utils.js';
 import { renderMarkdownDocument, renderHtmlDocument } from './templates.js';
 
@@ -109,10 +106,19 @@ export default function artifacts(pi: ExtensionAPI) {
         },
       ),
       method: Type.Optional(
-        Type.Union([Type.Literal('clipboard'), Type.Literal('reveal'), Type.Literal('gist'), Type.Literal('image')], {
-          description:
-            "share only. clipboard (default): copy the self-contained HTML. reveal: show the file in the OS file manager. gist: `gh gist create` (requires gh CLI + auth) — uploads under the user's GitHub account, copies the URL, opens it. image: screenshot the rendered artifact to <slug>.png via a headless Chrome-family browser (copies the PNG to the clipboard on macOS).",
-        }),
+        Type.Union(
+          [
+            Type.Literal('clipboard'),
+            Type.Literal('reveal'),
+            Type.Literal('gist'),
+            Type.Literal('image'),
+            Type.Literal('pdf'),
+          ],
+          {
+            description:
+              "share only. clipboard (default): copy the self-contained HTML. reveal: show the file in the OS file manager. gist: `gh gist create` (requires gh CLI + auth) — uploads under the user's GitHub account, copies the URL, opens it. image: screenshot the rendered artifact to <slug>.png via a headless Chrome-family browser (copies the PNG to the clipboard on macOS). pdf: print the rendered artifact to <slug>.pdf (copies the file reference to the clipboard on macOS). image/pdf render with the comments panel/section visible when comments exist.",
+          },
+        ),
       ),
       width: Type.Optional(
         Type.Integer({ description: 'share method=image only. Viewport width in px. Default: 1280.', minimum: 200 }),
@@ -237,19 +243,24 @@ export default function artifacts(pi: ExtensionAPI) {
               details: { action, slug, title, method, absPath } as Record<string, unknown>,
             };
           }
-          if (method === 'image') {
-            const url = await artifactUrl(slug); // starts the lazy server the browser will hit
-            const pngPath = join(artifactDir(), `${slug}.png`);
-            await screenshotUrl(url, pngPath, params.width ?? 1280, params.height ?? 800);
-            const copied = await copyImageToClipboard(pngPath);
+          if (method === 'image' || method === 'pdf') {
+            const baseUrl = new URL(await artifactUrl(slug)).origin; // starts the lazy server Chrome will hit
+            const res = await shareBaked(slug, title, method, {
+              baseUrl,
+              bake,
+              ...(params.width !== undefined ? { width: params.width } : {}),
+              ...(params.height !== undefined ? { height: params.height } : {}),
+            });
+            const noun = method === 'image' ? 'an image' : 'a PDF';
+            const note = res.count ? ` with ${res.count} comment${res.count === 1 ? '' : 's'} visible` : '';
             return {
               content: [
                 {
                   type: 'text' as const,
-                  text: `Rendered ${title} to an image (${params.width ?? 1280}×${params.height ?? 800}):\n${pngPath}${copied ? '\nCopied to the clipboard as an image — paste it anywhere.' : ''}`,
+                  text: `Rendered ${title} to ${noun}${note}:\n${res.path}${res.copied ? '\nCopied to the clipboard — paste it anywhere.' : ''}`,
                 },
               ],
-              details: { action, slug, title, method, absPath: pngPath, imageCopied: copied } as Record<
+              details: { action, slug, title, method, absPath: res.path, copied: res.copied } as Record<
                 string,
                 unknown
               >,

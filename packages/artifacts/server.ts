@@ -253,8 +253,9 @@ async function handleShare(req: IncomingMessage, res: ServerResponse): Promise<v
     sendJson(res, 400, { error: 'invalid slug' });
     return;
   }
-  if (body.method !== 'copy' && body.method !== 'gist') {
-    sendJson(res, 400, { error: 'method must be copy or gist' });
+  const method = body.method;
+  if (method !== 'copy' && method !== 'gist' && method !== 'image' && method !== 'pdf') {
+    sendJson(res, 400, { error: 'method must be copy, gist, image, or pdf' });
     return;
   }
   const html = readArtifact(body.slug);
@@ -264,7 +265,8 @@ async function handleShare(req: IncomingMessage, res: ServerResponse): Promise<v
   }
   const title = html.match(/<title>(.*?)<\/title>/s)?.[1]?.trim() || body.slug;
   try {
-    const result = await shareBaked(body.slug, title, body.method);
+    // handleShare only runs on a live server, so state is set.
+    const result = await shareBaked(body.slug, title, method, { baseUrl: `http://${HOST}:${state!.port}` });
     sendJson(res, 200, { ok: true, ...result });
   } catch (e) {
     sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
