@@ -27,8 +27,9 @@ describe('listAdrs', () => {
     writeFileSync(join(dir, '0002-second.md'), '');
     writeFileSync(join(dir, '0001-first.md'), '');
     writeFileSync(join(dir, '0000-template.md'), '');
+    writeFileSync(join(dir, '0003-template-rendering.md'), '');
     writeFileSync(join(dir, 'README.md'), '');
     writeFileSync(join(dir, 'superseded', '0009-old.md'), '');
-    expect(listAdrs(dir)).toEqual(['0001-first.md', '0002-second.md']);
+    expect(listAdrs(dir)).toEqual(['0001-first.md', '0002-second.md', '0003-template-rendering.md']);
   });
 });

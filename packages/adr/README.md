@@ -14,7 +14,7 @@ Pairs with a user-level prompt template (`~/.pi/agent/prompts/adr.md`, not part 
 
 - ADRs are `NNNN-kebab-title.md` directly in `docs/decisions/`. The filename is the veto — make titles descriptive ("no package service primitive", not "refactor approach").
 - Superseded ADRs move to `docs/decisions/superseded/`, which drops them out of the injected list (the readdir is non-recursive; no status parsing).
-- Template files (`0000-*`, anything matching `template`) are excluded.
+- Template files (`0000-*`) are excluded.
 
 ## Install
 
