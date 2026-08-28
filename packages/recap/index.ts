@@ -172,10 +172,9 @@ export default function (pi: ExtensionAPI) {
     pi.registerEntryRenderer(ENTRY_TYPE, (entry, _opts, theme) => {
       const data = entry.data as { summary: string; ts: number };
       const dim = (s: string) => theme.fg('dim', s);
-      // Hardcoded bg darker than both base bg (#1a1b26) and message bg (#1e1f2b)
-      // so it's clearly distinct from user/assistant messages. theme.bg only
-      // accepts named tokens, so emit a truecolor escape directly.
-      const bg = (s: string) => `\x1b[48;2;19;19;32m${s}\x1b[49m`;
+      // Theme-aware bg: same token pi's own summary cards (compaction, branch)
+      // use, so the card stands out appropriately in every theme.
+      const bg = (s: string) => theme.bg('customMessageBg', s);
       const box = new Box(1, 0, (s) => bg(dim(s)));
       box.addChild(new Text(dim(theme.bold('Recap')) + dim(` · ${new Date(data.ts).toLocaleTimeString()}`), 0, 0));
       box.addChild(new Markdown(capLines(data.summary, MAX_CARD_LINES), 0, 0, getMarkdownTheme()));
