@@ -1,5 +1,11 @@
 # @nicknisi/pi-recap
 
+## 0.1.6
+
+### Patch Changes
+
+- d19e6c8: Use the theme's `customMessageBg` token for the recap card background instead of a hardcoded truecolor, so the card fits every theme while staying distinct from messages.
+
 ## 0.1.5
 
 ### Patch Changes
