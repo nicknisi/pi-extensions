@@ -181,7 +181,7 @@ Peer deps: `@earendil-works/pi-coding-agent` (provides `ExtensionAPI` — only `
 
 ## Caveats
 
-- **Uses only the public extension API** (`registerTool` / `registerCommand` / `on("session_shutdown")`) — no pi internals. Should be stable across pi versions modulo API changes in those three calls.
+- **Uses only the public extension API** (`registerTool` / `registerCommand` / `on("session_shutdown")` / `ctx.ui.setStatus` / `ctx.ui.select`) — no pi internals. Should be stable across pi versions modulo API changes in those calls.
 - **Config is loaded once at extension load** (pi extensions load at session start) — edit `artifacts.json`, then restart pi.
 - **Mermaid artifacts need network** on first view (CDN script). Everything else is rendered at write time and viewable offline.
 - **Server lifetime = process lifetime.** Port is held in module state; the server stops on `session_shutdown`. Artifacts persist on disk and can be re-served by a later session.
