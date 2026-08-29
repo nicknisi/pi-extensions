@@ -1,6 +1,7 @@
 /** Artifacts extension — registers the `artifact` tool (create/update/open/list) and a TUI result card. */
 
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { hyperlink } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -60,6 +61,23 @@ function resolveContent(params: { content?: string; path?: string }): { content:
   return { error: 'provide `content` or `path` for create/update.' };
 }
 
+/** "5m ago" style label for the artifact picker. */
+function ago(mtime: number): string {
+  const s = Math.max(0, Math.floor((Date.now() - mtime) / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+/** Show the latest artifact as a persistent, clickable footer status. */
+function setArtifactStatus(ctx: ExtensionContext, title: string, url: string | undefined) {
+  if (!url) return;
+  ctx.ui.setStatus('artifacts', `📄 ${hyperlink(ctx.ui.theme.fg('accent', title), url)}`);
+}
+
 export default function artifacts(pi: ExtensionAPI) {
   // Deliver composed feedback to the live session as a follow-up message.
   const sender: FeedbackSender = (markdown) => {
@@ -74,10 +92,22 @@ export default function artifacts(pi: ExtensionAPI) {
     stopServer();
   });
 
-  // ─── /artifacts command — open the index page (starts the server lazily) ──
+  // ─── /artifacts command — pick an artifact to open (falls back to the index page) ──
   pi.registerCommand('artifacts', {
-    description: 'Open the artifacts index page in the browser (starts the localhost server if not running)',
+    description: 'Pick a generated artifact to open in the browser (starts the localhost server if not running)',
     handler: async (_args, ctx) => {
+      const entries = listArtifacts();
+      if (ctx.hasUI && entries.length > 0) {
+        const labels = entries.map((e) => `${e.title}  (${e.kind}, ${ago(e.mtime)})`);
+        const picked = await ctx.ui.select('Open artifact', labels);
+        if (picked === undefined) return; // Esc — cancelled
+        const entry = entries[labels.indexOf(picked)]!;
+        const url = await artifactUrl(entry.slug);
+        openInBrowser(url);
+        setArtifactStatus(ctx, entry.title, url);
+        return;
+      }
+      // No UI (print/RPC) or nothing to pick — open the index page.
       const url = await artifactUrl(); // no slug → index; ensureServer starts lazily
       openInBrowser(url);
       if (ctx.hasUI) ctx.ui.notify(`Artifacts: ${url}`, 'info');
@@ -160,7 +190,7 @@ export default function artifacts(pi: ExtensionAPI) {
         }),
       ),
     }),
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const action = params.action;
 
       // ── list ──────────────────────────────────────────────────────────────
@@ -201,6 +231,7 @@ export default function artifacts(pi: ExtensionAPI) {
         }
         const url = await artifactUrl(slug);
         openInBrowser(url);
+        setArtifactStatus(ctx, title, url);
         const details: ArtifactDetails = {
           action,
           slug,
@@ -319,6 +350,7 @@ export default function artifacts(pi: ExtensionAPI) {
         url = await artifactUrl(slug);
       }
 
+      setArtifactStatus(ctx, title, url);
       const details: ArtifactDetails = { action, slug, title, kind, url, absPath };
       const verb = action === 'create' ? 'Created' : 'Updated';
       const text = `${verb} ${title} [${kind}]\n${url ?? '(server not running — use action: open to view)'}\n${absPath}`;
