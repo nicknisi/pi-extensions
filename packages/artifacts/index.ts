@@ -75,7 +75,8 @@ function ago(mtime: number): string {
 /** Show the latest artifact as a persistent, clickable footer status. */
 function setArtifactStatus(ctx: ExtensionContext, title: string, url: string | undefined) {
   if (!url) return;
-  ctx.ui.setStatus('artifacts', `📄 ${hyperlink(ctx.ui.theme.fg('accent', title), url)}`);
+  // \u{F0C5} =  copy — nerd-font glyph matching the statusline's icon convention
+  ctx.ui.setStatus('artifacts', `\u{F0C5} ${hyperlink(ctx.ui.theme.fg('accent', title), url)}`);
 }
 
 export default function artifacts(pi: ExtensionAPI) {
