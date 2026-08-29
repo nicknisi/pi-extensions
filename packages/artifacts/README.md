@@ -186,6 +186,7 @@ Peer deps: `@earendil-works/pi-coding-agent` (provides `ExtensionAPI` — only `
 - **Mermaid artifacts need network** on first view (CDN script). Everything else is rendered at write time and viewable offline.
 - **Server lifetime = process lifetime.** Port is held in module state; the server stops on `session_shutdown`. Artifacts persist on disk and can be re-served by a later session.
 - **Server is per-process and cwd-keyed.** Two pi sessions in different projects each run their own server on different ports; artifact URLs from one session don't resolve in the other.
+- **Footer status uses a nerd-font glyph** (`\u{F0C5}`) — terminals without a nerd font show tofu for the icon; the link itself is unaffected.
 - **Browser open is platform-specific**: `open` (macOS), `rundll32 url.dll,FileProtocolHandler` (Windows — `start` is a cmd.exe builtin and can't be spawned), `xdg-open` (Linux). Failures only warn.
 - **`path` param is capped at 2 MB** — excerpt large files into `content` instead.
 - **Index-page metadata is regex-parsed** from each file's `<title>`/`<meta>` tags. Foreign `.html` files dropped into `.pi/artifacts/` are listed with kind inferred from the presence of the shell's `<style data-base>` marker.
