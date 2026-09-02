@@ -1,5 +1,11 @@
 # @nicknisi/pi-auto-theme
 
+## 0.1.3
+
+### Patch Changes
+
+- c6b22e6: Fix type error against pi's `ExtensionContext` (optional `Theme.name`)
+
 ## 0.1.2
 
 ### Patch Changes
