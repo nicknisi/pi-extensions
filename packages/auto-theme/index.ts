@@ -40,6 +40,10 @@ function isDarkMode(): Promise<boolean> {
 }
 
 export default function (pi: ExtensionAPI) {
+  // macOS-only: appearance polling is osascript, and a failed probe silently
+  // resolves "light mode", which would stomp paired dark themes on Linux.
+  if (process.platform !== 'darwin') return;
+
   let intervalId: ReturnType<typeof setInterval> | null = null;
   let lastDark: boolean | null = null;
 
