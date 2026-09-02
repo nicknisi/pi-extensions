@@ -19,7 +19,7 @@
  *   dark             ↔ light
  */
 
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -73,7 +73,7 @@ export default function (pi: ExtensionAPI) {
   let intervalId: ReturnType<typeof setInterval> | null = null;
   let lastDark: boolean | null = null;
 
-  const sync = (dark: boolean, ctx: { ui: { theme: { name: string }; setTheme: (t: string) => void } }) => {
+  const sync = (dark: boolean, ctx: ExtensionContext) => {
     const current = ctx.ui.theme.name;
     if (current && PAIRS[current] && DARK_THEMES.has(current) !== dark) {
       ctx.ui.setTheme(PAIRS[current]);
