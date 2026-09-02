@@ -53,10 +53,7 @@ async function macosDarkMode(): Promise<boolean> {
 
 async function linuxDarkMode(): Promise<boolean | null> {
   try {
-    const toml = await readFile(
-      join(homedir(), '.local/state/omarchy/current/theme/colors.toml'),
-      'utf-8',
-    );
+    const toml = await readFile(join(homedir(), '.local/state/omarchy/current/theme/colors.toml'), 'utf-8');
     const mode = toml.match(/^mode\s*=\s*"([^"]+)"/m)?.[1];
     if (mode === 'dark') return true;
     if (mode === 'light') return false;
@@ -66,12 +63,7 @@ async function linuxDarkMode(): Promise<boolean | null> {
   }
 }
 
-const isDarkMode =
-  process.platform === 'darwin'
-    ? macosDarkMode
-    : process.platform === 'linux'
-      ? linuxDarkMode
-      : null;
+const isDarkMode = process.platform === 'darwin' ? macosDarkMode : process.platform === 'linux' ? linuxDarkMode : null;
 
 export { linuxDarkMode };
 
