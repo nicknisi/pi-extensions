@@ -2,10 +2,10 @@ packages:
   - packages/*
 
 allowBuilds:
-  '@google/genai': set this to true or false
-  esbuild: set this to true or false
+  '@google/genai': true
+  esbuild: true
   koffi: false
-  protobufjs: set this to true or false
+  protobufjs: true
 
 # Transitive deps of the pi packages (typecheck-only here); their postinstalls aren't needed.
 # esbuild (via vitest) ships its binary as a platform package; no postinstall needed.
