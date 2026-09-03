@@ -202,12 +202,27 @@ describe('applyProfile', () => {
     expect(merged.replaceSystemPrompt).toBeUndefined();
   });
 
+  it('drops inherited bash from otherwise read-only profiles', () => {
+    const explorer = profile({ tools: ['read', 'bash', 'grep', 'find', 'ls'] });
+    const spec: Spec = { task: 'search' };
+    const merged = applyProfile(spec, explorer, []);
+    expect(merged.tools).toEqual(['read', 'grep', 'find', 'ls']);
+  });
+
+  it('keeps inherited bash when mutation is isolated or allowed', () => {
+    const explorer = profile({ tools: ['read', 'bash', 'grep', 'find', 'ls'] });
+    const isolated: Spec = { task: 'search', worktree: true };
+    const allowed: Spec = { task: 'search', allowTreeMutation: true };
+    expect(applyProfile(isolated, explorer, []).tools).toContain('bash');
+    expect(applyProfile(allowed, explorer, []).tools).toContain('bash');
+  });
+
   it('lets explicit spec fields win', () => {
     const spec: Spec = {
       task: 'do it',
       agent: 'label',
       model: 'openai/gpt-5-mini',
-      tools: ['read'],
+      tools: ['read', 'bash'],
       systemPrompt: 'custom',
       worktree: false,
     };
@@ -215,7 +230,7 @@ describe('applyProfile', () => {
     expect(merged).toMatchObject({
       agent: 'label',
       model: 'openai/gpt-5-mini',
-      tools: ['read'],
+      tools: ['read', 'bash'],
       systemPrompt: 'custom',
       worktree: false,
     });

@@ -152,6 +152,8 @@ Review the change against the task. Prefer the smallest correct fix.
 
 Lists accept comma-separated scalars or `- item` block lists. Unknown keys are ignored, so agent files shared with other harnesses load. The parser is deliberately small — flat `key: value` frontmatter, not full YAML.
 
+For compatibility with legacy read-only profiles, inherited `bash` is omitted when the profile has no `edit` or `write` tools and the task does not set `worktree: true` or `allowTreeMutation: true`. An explicit task `tools` list is never changed.
+
 **Discovery** (first-wins by name, highest precedence first):
 
 1. `<cwd>/.pi/agents/*.md` — project profiles

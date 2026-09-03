@@ -58,6 +58,7 @@ export interface ProfileTaskFields {
   model?: string | undefined;
   tools?: string[] | undefined;
   systemPrompt?: string | undefined;
+  allowTreeMutation?: boolean | undefined;
   worktree?: boolean | undefined;
   skillPaths?: string[] | undefined;
   replaceSystemPrompt?: boolean | undefined;
@@ -280,8 +281,19 @@ export function applyProfile<T extends ProfileTaskFields>(spec: T, profile: Agen
   const merged: T = { ...spec };
   if (merged.agent === undefined) merged.agent = profile.name;
   if (merged.model === undefined && profile.model !== undefined) merged.model = profile.model;
-  if (merged.tools === undefined && profile.tools !== undefined) merged.tools = profile.tools;
   if (merged.worktree === undefined && profile.worktree !== undefined) merged.worktree = profile.worktree;
+  if (merged.tools === undefined && profile.tools !== undefined) {
+    // Legacy read-only profiles often include bash for git inspection. Omit
+    // inherited bash rather than refusing the task when no mutation is allowed.
+    const tools =
+      merged.worktree !== true &&
+      merged.allowTreeMutation !== true &&
+      profile.tools.includes('bash') &&
+      !profile.tools.some((tool) => tool === 'edit' || tool === 'write')
+        ? profile.tools.filter((tool) => tool !== 'bash')
+        : profile.tools;
+    if (tools.length > 0) merged.tools = tools;
+  }
   if (skillPaths.length > 0) merged.skillPaths = skillPaths;
   if (merged.systemPrompt === undefined && profile.prompt !== '') {
     merged.systemPrompt = profile.prompt;
