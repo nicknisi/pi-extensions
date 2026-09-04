@@ -60,6 +60,7 @@ import {
 } from '@nicknisi/pi-shared';
 import { Type } from 'typebox';
 import { scopeFleetRuns, type FleetScope } from './fleet.js';
+import { readHostConfigFile, resolveChildExtensionPaths, resolveTaskCwd } from './host-config.js';
 import {
   applyProfile,
   discoverProfiles,
@@ -70,6 +71,7 @@ import {
 } from './profiles.js';
 
 export type { AgentProfile } from './profiles.js';
+export { HOST_CONFIG_FILE, resolveTaskCwd, type SubagentsHostConfig } from './host-config.js';
 
 export interface SubagentsOptions {
   /**
@@ -78,7 +80,18 @@ export interface SubagentsOptions {
    * default personas.
    */
   profileDirs?: string[];
+  /**
+   * Extension files every child loads (absolute, or relative to the agent
+   * dir). Merged ahead of `<agentDir>/subagents.json`. The hook for a host
+   * whose model routing lives in an extension — a provider registered with
+   * `pi.registerProvider` does not exist in a child's fresh model runtime
+   * unless the extension loads there too. Children stay hermetic otherwise.
+   */
+  childExtensionPaths?: string[];
 }
+
+/** Resolved once at load; every spawn copies it into `SpawnOptions.extensionPaths`. */
+let hostChildExtensionPaths: string[] = [];
 
 const ARTIFACTS_ROOT = path.join(getAgentDir(), 'subagent-runs');
 const PATCHES_STATE_DIR = path.join(getAgentDir(), 'subagent-patches');
@@ -114,6 +127,8 @@ interface TaskSpec {
   background?: boolean | undefined;
   allowTreeMutation?: boolean | undefined;
   worktree?: boolean | undefined;
+  /** Relative to the session cwd and jailed inside it; validated before spawn. */
+  cwd?: string | undefined;
   /** Resolved by profile merging — not part of the tool schema. */
   skillPaths?: string[] | undefined;
   replaceSystemPrompt?: boolean | undefined;
@@ -149,8 +164,10 @@ function toSpawnOptions(spec: TaskSpec, cwd: string, parentSession: string | und
   const opts: SpawnOptions = {
     prompt: spec.task,
     tools: spec.tools ?? DEFAULT_TOOLS,
-    cwd,
+    // Callers validate spec.cwd with resolveTaskCwd before reaching here.
+    cwd: spec.cwd ? path.resolve(cwd, spec.cwd) : cwd,
   };
+  if (hostChildExtensionPaths.length > 0) opts.extensionPaths = [...hostChildExtensionPaths];
   if (spec.agent) opts.agent = spec.agent;
   if (spec.model) opts.model = spec.model;
   if (spec.systemPrompt) opts.systemPrompt = spec.systemPrompt;
@@ -1281,6 +1298,13 @@ async function dispatchInline(
   spec: TaskSpec,
 ): Promise<void> {
   const parentSession = ctx.sessionManager?.getSessionFile();
+  if (spec.cwd) {
+    const resolved = resolveTaskCwd(ctx.cwd, spec.cwd);
+    if (!resolved.ok) {
+      if (ctx.hasUI) ctx.ui.notify(`dispatch refused: ${resolved.error}`, 'error');
+      return;
+    }
+  }
   const task: TaskProgress = { label: spec.agent ?? short(spec.task, 40), status: 'pending' };
   if (spec.model) task.model = spec.model;
   const details: DispatchDetails = { tasks: [task], settled: false };
@@ -1365,6 +1389,20 @@ async function dispatchInline(
 export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = {}) {
   const runtime = createSubagentRuntime({ namespace: 'subagents', artifactsDir: ARTIFACTS_ROOT });
   const extraProfileDirs = options.profileDirs ?? [];
+  // Host config: factory option first, then <agentDir>/subagents.json. Missing
+  // files are skipped with a warning; a broken config file never blocks load.
+  const hostConfig = readHostConfigFile(getAgentDir());
+  const childExtensions = resolveChildExtensionPaths(
+    getAgentDir(),
+    options.childExtensionPaths,
+    hostConfig.config.childExtensionPaths,
+  );
+  hostChildExtensionPaths = childExtensions.paths;
+  const hostWarnings = [
+    ...hostConfig.warnings,
+    ...childExtensions.missing.map((file) => `childExtensionPaths: ${file} does not exist — skipped`),
+  ];
+  for (const warning of hostWarnings) console.error(`[subagents] ${warning}`);
   // Registration-time snapshot for the tool description; execution rescans.
   const initialProfiles = loadProfiles(process.cwd(), extraProfileDirs);
 
@@ -1393,6 +1431,7 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
 
   pi.on('session_start', (_event, ctx) => {
     if (!ctx.hasUI) return;
+    for (const warning of hostWarnings) ctx.ui.notify(`[subagents] ${warning}`, 'warning');
     statusUi = ctx.ui;
     statusTheme = (ctx.ui as ExtensionUIContext).theme ?? null;
     statusParentSession = ctx.sessionManager.getSessionFile();
@@ -1444,6 +1483,8 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
       'for builders instead — isolated worktrees stay parallel and hand off a patch for central integration.',
       'A task may name a profile — a persona file bundling a skill basket, tool allowlist, model, and',
       'system prompt — instead of assembling those per task; explicit task fields override profile values.',
+      'A task may set cwd (relative to the session cwd, jailed inside it) to run inside a subdirectory such',
+      'as a repository checkout; worktree isolation uses the repository containing that cwd.',
       profileCatalogLine(initialProfiles.profiles),
     ]
       .filter(Boolean)
@@ -1455,6 +1496,7 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
       'Prefer profile: "<name>" when a defined profile matches the work — it attaches the persona\'s skills, tools, and prompt.',
       'Set background: true for long-running tasks; results surface via the fleet tool.',
       'Tasks with edit/write/bash tools need allowTreeMutation: true and serialize after the parallel batch — or set worktree: true to isolate them and keep them parallel.',
+      'Set cwd: "<relative dir>" when the child should run inside a subdirectory (a repository checkout, for worktree tasks); it must stay inside the session cwd.',
     ],
     parameters: Type.Object({
       tasks: Type.Array(
@@ -1483,6 +1525,12 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
             Type.Boolean({
               description:
                 'Run in an isolated git worktree; writes never touch your tree. The full change set (incl. new files) lands as a .patch next to the run artifact — integrate centrally. Mutating tools stay parallel and need no allowTreeMutation.',
+            }),
+          ),
+          cwd: Type.Optional(
+            Type.String({
+              description:
+                'Working directory for the child, relative to the session cwd and jailed inside it (e.g. "repos/acme__widgets"). Worktree tasks branch from the repository containing this directory. Must exist; escaping paths are refused.',
             }),
           ),
         }),
@@ -1524,6 +1572,16 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
           }
           return merged.spec;
         });
+      }
+
+      // A task cwd must be an existing directory inside the session cwd
+      // (checked on real paths). A bad cwd refuses that task, like an
+      // unknown profile — never the whole dispatch.
+      const cwdFailures = new Map<TaskSpec, string>();
+      for (const spec of specs) {
+        if (!spec.cwd) continue;
+        const resolved = resolveTaskCwd(ctx.cwd, spec.cwd);
+        if (!resolved.ok) cwdFailures.set(spec, resolved.error);
       }
 
       if (ctx.hasUI) widgetUi = ctx.ui;
@@ -1574,13 +1632,13 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
       const runnable: TaskSpec[] = [];
       const mutating: TaskSpec[] = [];
       for (const spec of specs) {
-        const profileFailure = profileFailures.get(spec);
-        if (profileFailure) {
+        const refusal = profileFailures.get(spec) ?? cwdFailures.get(spec);
+        if (refusal) {
           const task = progress.get(spec)!;
           task.status = 'error';
-          task.error = profileFailure;
+          task.error = refusal;
           task.doneAt = Date.now();
-          lines.push(`## ✗ ${task.label} — refused\n\n${profileFailure}`);
+          lines.push(`## ✗ ${task.label} — refused\n\n${refusal}`);
           continue;
         }
         if (wantsTreeMutation(spec)) {
