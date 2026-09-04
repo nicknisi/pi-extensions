@@ -61,8 +61,7 @@ No environment variables are read.
 Peer deps (all `@earendil-works/*`, provided by the pi host):
 
 - `@earendil-works/pi-ai` — `uuidv7` (session id for the completion call)
-- `@earendil-works/pi-ai/compat` — `complete` (one-shot summarization)
-- `@earendil-works/pi-coding-agent` — `ExtensionAPI`, `getMarkdownTheme`; uses `pi.registerCommand`, `pi.registerEntryRenderer`, `pi.appendEntry`, `pi.on`, `ctx.sessionManager.getBranch`, `ctx.modelRegistry.getApiKeyAndHeaders`, `ctx.isIdle`, `ctx.ui.notify`
+- `@earendil-works/pi-coding-agent` — `ExtensionAPI`, `getMarkdownTheme`; uses `pi.registerCommand`, `pi.registerEntryRenderer`, `pi.appendEntry`, `pi.on`, `ctx.sessionManager.getBranch`, `ctx.modelRegistry.complete`, `ctx.isIdle`, `ctx.ui.notify`
 - `@earendil-works/pi-tui` — `Box`, `Text`, `Markdown` for the card renderer
 
 No npm runtime deps, no workspace deps.
@@ -70,8 +69,9 @@ No npm runtime deps, no workspace deps.
 ## Caveats
 
 - TUI only: the timer and renderer are installed in `session_start` only when `ctx.mode === "tui"`. `/recap` technically works in other modes but nothing renders the entry there.
-- Depends on several pi internals that could change across versions: `sessionManager.getBranch()`, `modelRegistry.getApiKeyAndHeaders()`, `ctx.isIdle()`, and the `session_start`/`before_agent_start`/`agent_settled` event names.
-- A configured model is resolved through `ctx.modelRegistry`, so registered custom providers work. An omitted or unresolved override falls back to the current session model.
+- Depends on several pi internals that could change across versions: `sessionManager.getBranch()`, `modelRegistry.complete()`, `ctx.isIdle()`, and the `session_start`/`before_agent_start`/`agent_settled` event names.
+- A configured model is resolved and completed through `ctx.modelRegistry`, so registered custom providers work. An omitted or unresolved override falls back to the current session model.
+- Background recap failures are reported as warnings and never terminate the pi process.
 - The card background is a hardcoded truecolor escape (`#131320`) chosen to sit darker than the tokyonight base/message backgrounds (`theme.bg` only accepts named tokens). With other themes it may clash.
 - Entry content extraction is structural (filters blocks by `type === "text"` / `type === "toolCall"`), so changes to pi's message block shape would silently empty the transcript it summarizes.
 - The timer is cleared on `session_shutdown`; if a session never shuts down cleanly the interval lives until process exit.

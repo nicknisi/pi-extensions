@@ -1,6 +1,10 @@
 import { uuidv7 } from '@earendil-works/pi-ai';
-import { complete } from '@earendil-works/pi-ai/compat';
-import { getAgentDir, getMarkdownTheme, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import {
+  getAgentDir,
+  getMarkdownTheme,
+  type ExtensionAPI,
+  type ExtensionContext,
+} from '@earendil-works/pi-coding-agent';
 import { Box, Markdown, Text } from '@earendil-works/pi-tui';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -26,7 +30,7 @@ let lastActivity = Date.now();
 let firedThisIdle = false;
 let timer: ReturnType<typeof setInterval> | null = null;
 let piRef: ExtensionAPI | null = null;
-let lastModel: import('@earendil-works/pi-coding-agent').ExtensionContext['model'] = undefined;
+let lastModel: ExtensionContext['model'] = undefined;
 
 function readConfig(): Config {
   try {
@@ -100,7 +104,7 @@ function capLines(text: string, max: number): string {
   return lines.slice(0, max).join('\n') + ' …';
 }
 
-async function generateSummary(ctx: import('@earendil-works/pi-coding-agent').ExtensionContext): Promise<string> {
+async function generateSummary(ctx: ExtensionContext): Promise<string> {
   const cfg = readConfig();
   const configuredModel =
     cfg.model && typeof cfg.model.provider === 'string' && typeof cfg.model.id === 'string'
@@ -111,14 +115,9 @@ async function generateSummary(ctx: import('@earendil-works/pi-coding-agent').Ex
     ctx.ui.notify('recap: no model available', 'warning');
     return '';
   }
-  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-  if (!auth?.ok) {
-    ctx.ui.notify(`recap: ${auth.error ?? 'no API key for model'}`, 'warning');
-    return '';
-  }
   const conversation = buildConversation(ctx.sessionManager.getBranch());
   if (!conversation.trim()) return '';
-  const response = await complete(
+  const response = await ctx.modelRegistry.complete(
     model,
     {
       messages: [
@@ -130,11 +129,6 @@ async function generateSummary(ctx: import('@earendil-works/pi-coding-agent').Ex
       ],
     },
     {
-      // Spread conditionally: optional in ProviderStreamOptions, and
-      // exactOptionalPropertyTypes rejects an explicit undefined.
-      ...(auth.apiKey !== undefined && { apiKey: auth.apiKey }),
-      ...(auth.headers !== undefined && { headers: auth.headers }),
-      ...(auth.env !== undefined && { env: auth.env }),
       reasoningEffort: 'low',
       cacheRetention: 'none',
       sessionId: uuidv7(),
@@ -146,13 +140,13 @@ async function generateSummary(ctx: import('@earendil-works/pi-coding-agent').Ex
     .join('\n');
 }
 
-async function injectRecap(ctx: import('@earendil-works/pi-coding-agent').ExtensionContext) {
+async function injectRecap(ctx: ExtensionContext) {
   const summary = await generateSummary(ctx);
   if (!summary) return;
   piRef?.appendEntry(ENTRY_TYPE, { summary, ts: Date.now() });
 }
 
-async function maybeFire(ctx: import('@earendil-works/pi-coding-agent').ExtensionContext) {
+async function maybeFire(ctx: ExtensionContext) {
   if (!ctx.isIdle() || firedThisIdle) return;
   const cfg = readConfig();
   if (Date.now() - lastActivity < cfg.idleMinutes * 60_000) return;
@@ -182,7 +176,10 @@ export default function (pi: ExtensionAPI) {
     });
 
     timer = setInterval(() => {
-      void maybeFire(ctx);
+      void maybeFire(ctx).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(`recap: ${message}`, 'warning');
+      });
     }, TICK_MS);
   });
 
