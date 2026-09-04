@@ -1,5 +1,11 @@
 # @nicknisi/pi-subagents
 
+## 0.4.1
+
+### Patch Changes
+
+- 40a162e: Keep otherwise read-only profiles runnable by dropping inherited `bash` access unless the task opts into mutation or worktree isolation.
+
 ## 0.4.0
 
 ### Minor Changes

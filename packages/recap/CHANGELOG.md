@@ -1,5 +1,11 @@
 # @nicknisi/pi-recap
 
+## 0.1.7
+
+### Patch Changes
+
+- 8f195b1: Route recap completion through Pi's model registry so extension-registered providers work, and report background generation failures without terminating Pi.
+
 ## 0.1.6
 
 ### Patch Changes
