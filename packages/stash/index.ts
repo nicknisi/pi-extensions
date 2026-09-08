@@ -1,12 +1,12 @@
 /**
  * Message Stash Extension
  *
- * Replicates Claude Code's ctrl+s message stash: press ctrl+s to stash
+ * Replicates Claude Code's message stash: press ctrl+shift+s to stash
  * whatever you've typed in the input box, do something else, then press
- * ctrl+s again (with an empty input) to restore it.
+ * ctrl+shift+s again (with an empty input) to restore it.
  *
- * - ctrl+s with text in the editor → pushes it onto a stack and clears
- * - ctrl+s with an empty editor    → pops the most recent stash back
+ * - ctrl+shift+s with text in the editor → pushes it onto a stack and clears
+ * - ctrl+shift+s with an empty editor    → pops the most recent stash back
  * - sending another message        → auto-restores the most recent stash
  *
  * A widget above the editor shows how many messages are stashed with a
@@ -32,11 +32,11 @@ export default function stash(pi: ExtensionAPI) {
     const preview = firstLine.length > 60 ? `${firstLine.slice(0, 60)}…` : firstLine;
     const count = stack.length > 1 ? theme.fg('dim', ` (+${stack.length - 1} more)`) : '';
     ctx.ui.setWidget(WIDGET_KEY, [
-      `${theme.fg('accent', '⧉ stashed:')} ${theme.fg('muted', preview)}${count} ${theme.fg('dim', '· ctrl+s to restore')}`,
+      `${theme.fg('accent', '⧉ stashed:')} ${theme.fg('muted', preview)}${count} ${theme.fg('dim', '· ctrl+shift+s to restore')}`,
     ]);
   };
 
-  pi.registerShortcut('ctrl+s', {
+  pi.registerShortcut('ctrl+shift+s', {
     description: 'Stash / restore the typed message',
     handler: async (ctx) => {
       if (!ctx.hasUI) return;

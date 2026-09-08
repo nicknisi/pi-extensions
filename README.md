@@ -57,7 +57,7 @@ Local paths are added to pi's settings without copying — edits in the repo are
 | [fast](packages/fast/)                   | Toggle premium faster inference for supported Anthropic Claude and OpenAI Codex models                                       | `/fast`, footer status                                    |
 | [model-switch](packages/model-switch/)   | Cycle or fuzzy-pick from a machine-local, sectioned model list, skipping missing or unauthenticated entries                  | `/model-cycle`, configurable shortcuts                    |
 | [session-name](packages/session-name/)   | Auto-name sessions (heuristic or LLM), mirror to terminal title, name-focused session picker                                 | `/sn`, `/sessions`                                        |
-| [stash](packages/stash/)                 | `ctrl+s` parks the prompt draft on a LIFO stack; pop or auto-restore                                                         | `ctrl+s`, stash widget                                    |
+| [stash](packages/stash/)                 | `ctrl+shift+s` parks the prompt draft on a LIFO stack; pop or auto-restore                                                   | `ctrl+shift+s`, stash widget                              |
 
 ### Library
 
