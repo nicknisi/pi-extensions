@@ -1,5 +1,11 @@
 # @nicknisi/pi-stash
 
+## 0.1.3
+
+### Patch Changes
+
+- 720e3dc: Move the stash/restore shortcut from Ctrl+S to Ctrl+Shift+S to avoid Pi's built-in shortcut conflict warning. Update the widget hint to match.
+
 ## 0.1.2
 
 ### Patch Changes
