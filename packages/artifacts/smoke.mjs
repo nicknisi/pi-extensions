@@ -230,7 +230,7 @@ async function stale() {
   assert('stale', typeof noSenderBody.feedback === 'string', '503 body missing composed feedback');
   assert('stale', existsSync(utils.annotationsPath(slug)), 'sidecar deleted on a failed delivery');
 
-  // Now a capturing sender: delivery succeeds, sidecar deleted.
+  // Now a capturing sender: delivery succeeds, sent feedback remains on disk.
   let captured = null;
   server.setFeedbackSender((md) => {
     captured = md;
@@ -256,7 +256,7 @@ async function stale() {
   assert('stale', eLine && !eLine.includes('[stale]'), 'unique quote with noisy context was wrongly marked [stale]');
   const dLine = captured.split('\n').find((l) => l.includes(PASSAGE_D));
   assert('stale', dLine && dLine.includes('[stale]'), 'duplicated quote with mismatched context must be [stale]');
-  assert('stale', !existsSync(utils.annotationsPath(slug)), 'sidecar not deleted after successful delivery');
+  assert('stale', existsSync(utils.annotationsPath(slug)), 'sent feedback was deleted after delivery');
 
   server.stopServer();
   console.log('PASS stale');

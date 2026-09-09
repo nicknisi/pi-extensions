@@ -35,18 +35,20 @@ const DEFAULTS: ArtifactsConfig = {
 
 const CONFIG_PATH = join(getAgentDir(), 'configs', 'artifacts.json');
 
-function loadConfig(): ArtifactsConfig {
+function loadConfig(defaults = DEFAULTS): ArtifactsConfig {
   try {
     const raw = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8')) as Partial<ArtifactsConfig>;
     return {
-      theme: raw.theme === 'light' || raw.theme === 'dark' ? raw.theme : DEFAULTS.theme,
-      accent: typeof raw.accent === 'string' ? raw.accent : DEFAULTS.accent,
-      accentLight: typeof raw.accentLight === 'string' ? raw.accentLight : DEFAULTS.accentLight,
-      maxWidth: typeof raw.maxWidth === 'number' && raw.maxWidth > 300 ? raw.maxWidth : DEFAULTS.maxWidth,
+      theme: raw.theme === 'light' || raw.theme === 'dark' ? raw.theme : defaults.theme,
+      accent: typeof raw.accent === 'string' ? raw.accent : defaults.accent,
+      accentLight: typeof raw.accentLight === 'string' ? raw.accentLight : defaults.accentLight,
+      maxWidth: typeof raw.maxWidth === 'number' && raw.maxWidth > 300 ? raw.maxWidth : defaults.maxWidth,
     };
   } catch {
-    return DEFAULTS;
+    return defaults;
   }
 }
 
 export const CONFIG: ArtifactsConfig = loadConfig();
+/** Markdown has its own defaults; explicit user accents still take precedence. */
+export const READER_CONFIG: ArtifactsConfig = loadConfig({ ...DEFAULTS, accent: '#ffa293', accentLight: '#b74445' });

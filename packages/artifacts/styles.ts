@@ -119,6 +119,11 @@ function tokens(s: Scheme): string {
   --hl-attr: ${s.hlAttr};`;
 }
 
+/** Shared syntax/diff tokens for viewers that can switch scheme without reloading. */
+export function schemeTokens(mode: 'light' | 'dark'): string {
+  return tokens(mode === 'dark' ? DARK : LIGHT);
+}
+
 /** Scheme block honoring the configured theme mode (auto = follow the OS). */
 function schemeCss(): string {
   if (CONFIG.theme === 'light') {

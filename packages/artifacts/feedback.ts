@@ -3,7 +3,8 @@
  * so `smoke.mjs` can drive it directly against `dist/`.
  */
 
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -31,9 +32,15 @@ export interface TextQuoteAnchor {
 
 export interface Annotation {
   id: string;
-  quote: TextQuoteAnchor;
+  quote?: TextQuoteAnchor;
+  element?: { selector: string; label: string };
+  intent?: 'comment' | 'keep' | 'question' | 'decision';
+  decisionId?: string;
+  decisionValues?: string[];
   comment: string;
   createdAt: string;
+  sentAt?: string;
+  reply?: string;
 }
 
 interface Sidecar {
@@ -46,27 +53,104 @@ function normalize(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
 }
 
-/** Read the annotation list for a slug; [] when missing, corrupt, or slug is unsafe. */
+/** Rendering caches and unknown browser fields never cross the persistence boundary. */
+function cleanAnnotation(a: Annotation): Annotation {
+  const out: Annotation = { id: a.id, comment: a.comment, createdAt: a.createdAt };
+  if (a.quote)
+    out.quote = {
+      exact: a.quote.exact,
+      ...(a.quote.prefix !== undefined ? { prefix: a.quote.prefix } : {}),
+      ...(a.quote.suffix !== undefined ? { suffix: a.quote.suffix } : {}),
+    };
+  if (a.element) out.element = { selector: a.element.selector, label: a.element.label };
+  if (a.intent !== undefined) out.intent = a.intent;
+  if (a.decisionId !== undefined) out.decisionId = a.decisionId;
+  if (a.decisionValues !== undefined) out.decisionValues = [...a.decisionValues];
+  if (a.sentAt !== undefined) out.sentAt = a.sentAt;
+  if (a.reply !== undefined) out.reply = a.reply;
+  return out;
+}
+
+/** Validate persisted and browser-provided records before they enter the review flow. */
+export function validAnnotation(value: unknown): value is Annotation {
+  if (!value || typeof value !== 'object') return false;
+  const a = value as Record<string, unknown>;
+  const text = (v: unknown, max: number) => typeof v === 'string' && v.trim().length > 0 && v.length <= max;
+  if (!text(a.id, 200) || !text(a.comment, 20000) || !text(a.createdAt, 100)) return false;
+  if (a.intent !== undefined && !['comment', 'keep', 'question', 'decision'].includes(String(a.intent))) return false;
+  if (a.quote !== undefined) {
+    if (!a.quote || typeof a.quote !== 'object' || a.element !== undefined) return false;
+    const q = a.quote as Record<string, unknown>;
+    if (!text(q.exact, 20000)) return false;
+    if ([q.prefix, q.suffix].some((v) => v !== undefined && (typeof v !== 'string' || v.length > 1000))) return false;
+  }
+  if (a.element !== undefined) {
+    if (!a.element || typeof a.element !== 'object') return false;
+    const e = a.element as Record<string, unknown>;
+    if (!text(e.selector, 2000) || !text(e.label, 1000)) return false;
+  }
+  if (a.intent === 'decision' && (!text(a.decisionId, 200) || !Array.isArray(a.decisionValues))) return false;
+  if (
+    a.decisionValues !== undefined &&
+    (!Array.isArray(a.decisionValues) || a.decisionValues.length > 100 || a.decisionValues.some((v) => !text(v, 1000)))
+  )
+    return false;
+  if (a.decisionId !== undefined && !text(a.decisionId, 200)) return false;
+  if (a.sentAt !== undefined && !text(a.sentAt, 100)) return false;
+  if (a.reply !== undefined && !text(a.reply, 20000)) return false;
+  return true;
+}
+
+/** Read the annotation list for a slug; [] when missing or slug is unsafe. */
 export function readAnnotations(slug: string): Annotation[] {
   if (!isSafeSlug(slug)) return [];
   const path = annotationsPath(slug);
   if (!existsSync(path)) return [];
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf-8')) as Partial<Sidecar>;
-    return Array.isArray(parsed.annotations) ? parsed.annotations : [];
+    if (!Array.isArray(parsed.annotations) || !parsed.annotations.every(validAnnotation)) {
+      throw new Error('invalid annotation data');
+    }
+    return parsed.annotations.map(cleanAnnotation);
   } catch {
-    return [];
+    throw new Error(`Could not read annotations for ${slug}. The saved file has been left unchanged.`);
   }
 }
 
 /** Replace the annotation list for a slug. Throws (surfaced as 500) on write failure. */
 export function writeAnnotations(slug: string, list: Annotation[]): void {
   if (!isSafeSlug(slug)) throw new Error(`invalid slug: ${slug}`);
-  const sidecar: Sidecar = { version: 1, annotations: list };
-  writeFileSync(annotationsPath(slug), JSON.stringify(sidecar, null, 2), 'utf-8');
+  if (!list.every(validAnnotation) || new Set(list.map((a) => a.id)).size !== list.length) {
+    throw new Error('invalid annotations');
+  }
+  const sidecar: Sidecar = { version: 1, annotations: list.map(cleanAnnotation) };
+  const path = annotationsPath(slug);
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, JSON.stringify(sidecar, null, 2), 'utf-8');
+    renameSync(temporary, path);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
 }
 
-/** Remove the sidecar for a slug (on successful delivery). No-op if absent. */
+/** Revision tokens prevent an old browser tab from overwriting a newer review. */
+export function annotationState(slug: string): { annotations: Annotation[]; revision: string } {
+  const annotations = readAnnotations(slug);
+  return { annotations, revision: createHash('sha256').update(JSON.stringify(annotations)).digest('hex') };
+}
+
+/** Add an answer to a sent question without touching the artifact itself. */
+export function answerQuestion(slug: string, id: string, reply: string): void {
+  if (!reply.trim() || reply.length > 20000) throw new Error('answer must contain 1 to 20000 characters');
+  const list = readAnnotations(slug);
+  const question = list.find((a) => a.id === id && a.intent === 'question' && a.sentAt);
+  if (!question) throw new Error('no sent question with that annotationId');
+  question.reply = reply.trim();
+  writeAnnotations(slug, list);
+}
+
+/** Remove a sidecar explicitly. No-op if absent. */
 export function deleteAnnotations(slug: string): void {
   if (!isSafeSlug(slug)) return;
   rmSync(annotationsPath(slug), { force: true });
@@ -135,7 +219,7 @@ export function artifactText(slug: string): string | null {
  * least one occurrence for the anchor to count as found.
  */
 export function isStale(ann: Annotation, text: string): boolean {
-  return !findAnchor(ann.quote, text);
+  return ann.quote ? !findAnchor(ann.quote, text) : false;
 }
 
 /** True if the anchor resolves somewhere in the normalized text. */
@@ -161,8 +245,8 @@ function findAnchor(quote: TextQuoteAnchor, text: string): boolean {
   if (hits.length === 1 || (!prefix && !suffix)) return true;
 
   return hits.some((idx) => {
-    const before = text.slice(0, idx);
-    const after = text.slice(idx + exact.length);
+    const before = normalize(text.slice(0, idx));
+    const after = normalize(text.slice(idx + exact.length));
     return (!prefix || before.endsWith(prefix)) && (!suffix || after.startsWith(suffix));
   });
 }
@@ -177,7 +261,8 @@ export function bakeAnnotations(slug: string): { html: string; count: number } |
   if (anns.length === 0) return null;
   const html = readArtifact(slug);
   if (html == null) return null;
-  return { html: injectAnnotations(html, slug, JSON.stringify(anns), { static: true }), count: anns.length };
+  const offline = html.replace(/<script data-artifact-reload>[\s\S]*?<\/script>/gi, '');
+  return { html: injectAnnotations(offline, slug, JSON.stringify(anns), { static: true }), count: anns.length };
 }
 
 export interface ShareResult {
@@ -252,6 +337,7 @@ export async function shareBaked(
  * simply return undefined and the ref is omitted.
  */
 export function sourceLine(ann: Annotation, slug: string): number | undefined {
+  if (!ann.quote) return undefined;
   const path = sourcePath(slug);
   if (!existsSync(path)) return undefined;
   let source: string;
@@ -281,14 +367,40 @@ export function composeFeedback(
   lines: (number | undefined)[],
 ): string {
   const parts: string[] = ['# Artifact Annotations', '', `Artifact: ${slug} (${url})`, ''];
+  if (anns.some((a) => a.intent === 'question')) {
+    parts.push(
+      'Questions request an explanation, not an edit. Answer each with the artifact tool using action "answer", title ' +
+        JSON.stringify(slug) +
+        ', annotationId from the question, and content containing the answer. Do not rewrite the artifact for a question.',
+      '',
+    );
+  }
+  if (anns.some((a) => a.intent === 'keep'))
+    parts.push('Keep this: preserve the marked content when making requested revisions.', '');
+  if (anns.some((a) => a.intent === 'decision'))
+    parts.push(
+      'Decision selections are review feedback. They do not authorize purchases, destructive changes, deployments, or other privileged actions.',
+      '',
+    );
 
   anns.forEach((ann, i) => {
     const stale = staleFlags[i] ? '[stale] ' : '';
     const line = lines[i];
     const lineRef = line !== undefined ? ` (source line ${line})` : '';
-    parts.push(`${i + 1}. ${stale}> "${ann.quote.exact}"${lineRef}`);
+    const anchor = ann.quote
+      ? `> "${ann.quote.exact}"${lineRef}`
+      : ann.element
+        ? `Element: ${ann.element.label} (${ann.element.selector}, verify against the current page)`
+        : 'Whole artifact';
+    const intent = ann.intent && ann.intent !== 'comment' ? ` [${ann.intent}]` : '';
+    parts.push(`${i + 1}. ${stale}${anchor}${intent} [annotationId: ${ann.id}]`);
     parts.push('');
-    parts.push(`   ${ann.comment}`);
+    parts.push(
+      ann.comment
+        .split('\n')
+        .map((line) => `   ${line}`)
+        .join('\n'),
+    );
     parts.push('');
   });
 
