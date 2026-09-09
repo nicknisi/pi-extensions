@@ -1,5 +1,16 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, join } from 'node:path';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 
 export interface ModelSwitchSection {
@@ -91,14 +102,21 @@ export function loadModelSwitchConfig(path = modelCycleConfigPath()): ConfigLoad
     return { ok: false, error: `Invalid model-switch config at ${path}: ${message}` };
   }
 
-  if (!value || typeof value !== 'object') {
+  return parseModelSwitchConfig(value, path);
+}
+
+function parseModelSwitchConfig(value: unknown, path: string): ConfigLoadResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return { ok: false, error: `Invalid model-switch config at ${path}: expected an object` };
   }
 
   const obj = value as Record<string, unknown>;
 
   // Prefer "sections" if present; fall back to legacy "models" as a single section.
-  if ('sections' in obj && obj.sections && typeof obj.sections === 'object') {
+  if ('sections' in obj) {
+    if (!obj.sections || typeof obj.sections !== 'object' || Array.isArray(obj.sections)) {
+      return { ok: false, error: `Invalid model-switch config at ${path}: expected "sections" to be an object` };
+    }
     const sectionsRaw = obj.sections as Record<string, unknown>;
     const sections: ModelSwitchSection[] = [];
 
@@ -128,4 +146,45 @@ export function loadModelSwitchConfig(path = modelCycleConfigPath()): ConfigLoad
     ok: false,
     error: `Invalid model-switch config at ${path}: expected { "sections": { ... } } or { "models": [...] }`,
   };
+}
+
+export function addModelToSection(
+  reference: string,
+  sectionName: string,
+  path = modelCycleConfigPath(),
+): { ok: true; added: boolean } | { ok: false; error: string } {
+  try {
+    // Read again after the dialogs so edits made while they were open are retained.
+    const existing = lstatSync(path, { throwIfNoEntry: false });
+    const target = existing ? realpathSync(path) : path;
+    const value = existing ? JSON.parse(readFileSync(target, 'utf8')) : { sections: { [sectionName]: [] } };
+    const loaded = parseModelSwitchConfig(value, path);
+    if (!loaded.ok) return loaded;
+
+    const section = loaded.config.sections.find((item) => item.name === sectionName);
+    if (!section) {
+      return { ok: false, error: `Section "${sectionName}" no longer exists in ${path}` };
+    }
+    if (section.models.includes(reference)) return { ok: true, added: false };
+
+    const models: string[] = 'sections' in value ? value.sections[sectionName] : value.models;
+    models.push(reference);
+
+    // Replace the file atomically, following config symlinks rather than replacing them.
+    mkdirSync(dirname(target), { recursive: true });
+    const temporaryPath = `${target}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, {
+        flag: 'wx',
+        mode: existing ? statSync(target).mode & 0o777 : 0o600,
+      });
+      renameSync(temporaryPath, target);
+    } finally {
+      rmSync(temporaryPath, { force: true });
+    }
+    return { ok: true, added: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, error: `Could not update model-switch config at ${path}: ${message}` };
+  }
 }

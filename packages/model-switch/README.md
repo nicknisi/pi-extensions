@@ -34,6 +34,18 @@ These extension-owned action IDs are ignored by Pi's built-in keybinding manager
 
 ## Configure models
 
+### Add models from Pi
+
+Run `/model-switch add` to search Pi's available model catalog, pick a model, then choose an existing section to save it in. Run `/model-switch add-current` to save the model you're already using without opening the catalog picker. Both subcommands have argument completion.
+
+If the config file is missing, either command asks you to name the first section and creates the file. With an existing config, the section picker includes empty sections too. Add more sections by editing the config below.
+
+Adding a model does not switch the active model. Duplicate references in the chosen section are skipped, but the same model can belong to multiple sections. Escape cancels without writing. Saves preserve the legacy flat format, other sections, and extra config fields. Invalid configs produce a warning and are not overwritten.
+
+The catalog picker requires Pi's terminal UI. `add-current` also works with RPC clients that support Pi's selection and input dialogs. Neither command registers new providers or model definitions. The model must already be known to Pi.
+
+### Edit the config file
+
 Copy the example config:
 
 ```bash
@@ -125,7 +137,7 @@ The config may be missing, empty, malformed, or contain only missing/unauthentic
 - The picker uses a custom search + list component with `ctx.ui.custom()`; native `/model` and Ctrl+L remain available for the full catalog.
 - Terminal support for multi-modifier keys varies; configure simpler non-conflicting keys or use a terminal with the Kitty keyboard protocol when modified keys are not distinguishable.
 - Availability is checked on each interaction, which may resolve provider credentials before switching.
-- Duplicate references within a section are preserved as written; avoid them unless repeated cycle positions are intentional.
+- Duplicate references within a section are preserved as written; avoid them unless repeated cycle positions are intentional. The add commands never insert another copy of an existing reference.
 
 ## Development
 
