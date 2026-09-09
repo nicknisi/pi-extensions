@@ -6,6 +6,7 @@ import hljs from 'highlight.js';
 
 import { CONFIG, MERMAID_CDN } from './config.js';
 import { BASE_CSS, D2H_CSS, HLJS_CSS } from './styles.js';
+import { readerBody, READER_ATTRIBUTES, READER_SCRIPT, READER_STYLES } from './reader.js';
 
 export interface RenderFlags {
   hasMermaid: boolean;
@@ -76,16 +77,32 @@ export function renderMarkdown(content: string, flags: RenderFlags): string {
  * inline event handlers: the author is the local user, but a pasted snippet
  * should not execute in the artifact page.
  */
-const commentMarked = new Marked({ gfm: true, breaks: true });
+const commentMarked = new Marked({
+  gfm: true,
+  breaks: true,
+  renderer: {
+    html({ text }) {
+      return escapeHtml(text);
+    },
+    link({ href, tokens }) {
+      const label = this.parser.parseInline(tokens);
+      try {
+        const url = new URL(href, 'http://artifact.invalid');
+        if (!['http:', 'https:', 'mailto:'].includes(url.protocol)) return label;
+      } catch {
+        return label;
+      }
+      return `<a href="${escapeAttr(href)}" rel="noopener noreferrer">${label}</a>`;
+    },
+    image({ text }) {
+      return escapeHtml(text);
+    },
+  },
+});
 
 export function renderCommentMarkdown(md: string): string {
   const html = commentMarked.parse(md) as string;
-  return html
-    .replace(/<script\b[\s\S]*?(<\/script\s*>|$)/gi, '')
-    .replace(/<iframe\b[\s\S]*?(<\/iframe\s*>|$)/gi, '')
-    .replace(/\son\w+\s*=\s*"[^"]*"/gi, '')
-    .replace(/\son\w+\s*=\s*'[^']*'/gi, '')
-    .replace(/\son\w+\s*=\s*[^\s>]+/gi, '');
+  return html;
 }
 
 /** Render a unified-diff string to diff2html HTML (server-side). Returns null if parse yields nothing. */
@@ -107,12 +124,12 @@ function renderDiff(diffText: string): string | null {
 /** SSE snippet: subscribe to /events, reload only on events for this slug. */
 function sseSnippet(slug: string): string {
   return `
-<script>
+<script data-artifact-reload>
 (function () {
   var slug = ${JSON.stringify(slug)};
   var es = new EventSource("/events");
   es.addEventListener("reload", function (e) {
-    try { if (e.data === slug || e.data === "*") location.reload(); } catch (_) {}
+    try { if ((e.data === slug || e.data === "*") && window.dispatchEvent(new Event("artifact:before-reload", { cancelable: true }))) location.reload(); } catch (_) {}
   });
 })();
 </script>`;
@@ -130,7 +147,8 @@ function mermaidSnippet(): string {
   var mode = ${JSON.stringify(CONFIG.theme)};
   function init() {
     try {
-      var dark = mode === "dark" || (mode === "auto" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+      var activeMode = document.documentElement.getAttribute("data-reader-theme") || mode;
+      var dark = activeMode === "dark" || (activeMode === "auto" && window.matchMedia("(prefers-color-scheme: dark)").matches);
       var css = getComputedStyle(document.documentElement);
       var t = function (name) { return css.getPropertyValue(name).trim(); };
       mermaid.initialize({
@@ -181,17 +199,30 @@ export function buildShell(opts: {
   const generated = Date.now();
 
   const styles: string[] = [`<style data-base>${BASE_CSS}</style>`];
+  if (kind === 'markdown') styles.push(READER_STYLES);
   if (flags.hasDiff) styles.push(`<style data-d2h>${D2H_CSS}</style>`);
   if (flags.hasCode) styles.push(`<style data-hljs>${HLJS_CSS}</style>`);
 
-  const scripts: string[] = [];
+  const scripts: string[] = kind === 'markdown' ? [READER_SCRIPT] : [];
   if (flags.hasMermaid) scripts.push(mermaidSnippet());
   scripts.push(sseSnippet(slug));
 
   const generatedIso = new Date(generated).toISOString();
+  const body =
+    kind === 'markdown'
+      ? readerBody(title, bodyHtml, generatedIso, projectPath)
+      : `<article>
+<header class="artifact-header">
+<h1>${escapeHtml(title)}</h1>
+<span class="artifact-badge">${kind}</span>
+<span class="artifact-meta">${escapeHtml(generatedIso.replace('T', ' ').slice(0, 19))}</span>
+</header>
+${bodyHtml}
+<footer class="artifact-footer">source: ${escapeHtml(projectPath)}</footer>
+</article>`;
 
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en"${kind === 'markdown' ? ' ' + READER_ATTRIBUTES : ''}>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -202,15 +233,7 @@ export function buildShell(opts: {
 ${styles.join('\n')}
 </head>
 <body>
-<article>
-<header class="artifact-header">
-<h1>${escapeHtml(title)}</h1>
-<span class="artifact-badge">${kind}</span>
-<span class="artifact-meta">${escapeHtml(generatedIso.replace('T', ' ').slice(0, 19))}</span>
-</header>
-${bodyHtml}
-<footer class="artifact-footer">source: ${escapeHtml(projectPath)}</footer>
-</article>
+${body}
 ${scripts.join('\n')}
 </body>
 </html>`;

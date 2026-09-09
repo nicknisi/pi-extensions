@@ -8,12 +8,13 @@ import { HOST } from './config.js';
 import { isSafeSlug, listArtifacts, readArtifact, safeArtifactPath } from './utils.js';
 import { renderCommentMarkdown, renderIndexPage } from './templates.js';
 import { injectAnnotations } from './annotate.js';
+import { renderRevisionComparison } from './review.js';
 import {
   artifactText,
   composeFeedback,
-  deleteAnnotations,
+  annotationState,
+  validAnnotation,
   isStale,
-  readAnnotations,
   shareBaked,
   sourceLine,
   writeAnnotations,
@@ -57,6 +58,12 @@ export function notifyReload(slug: string): void {
   }
 }
 
+/** Refresh review records without reloading the document or losing a draft. */
+export function notifyAnnotations(slug: string): void {
+  if (!state) return;
+  for (const res of state.clients) res.write(`event: annotations\ndata: ${slug}\n\n`);
+}
+
 /** Whether the server is currently running (used by `list` to decide whether to include URLs). */
 export function isRunning(): boolean {
   return state !== null;
@@ -72,7 +79,13 @@ export async function ensureServer(): Promise<number> {
   if (state) return state.port;
 
   const clients = new Set<ServerResponse>();
-  const server = createServer((req, res) => handle(req, res, clients));
+  const server = createServer((req, res) => {
+    void handle(req, res, clients).catch((error: unknown) => {
+      if (!res.headersSent)
+        sendJson(res, 500, { error: error instanceof Error ? error.message : 'artifact request failed' });
+      else res.end();
+    });
+  });
 
   const port = await new Promise<number>((resolve, reject) => {
     server.once('error', reject);
@@ -147,13 +160,13 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-/** PUT /api/annotations — replace the draft annotation list for a slug. */
+/** PUT /api/annotations replaces drafts but cannot change or erase sent feedback. */
 async function handlePutAnnotations(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const raw = await readBody(req, res);
   if (raw === null) return; // 413 already sent
-  let body: { slug?: unknown; annotations?: unknown };
+  let body: { slug?: unknown; annotations?: unknown; revision?: unknown };
   try {
-    body = JSON.parse(raw);
+    body = JSON.parse(raw) ?? {};
   } catch {
     sendJson(res, 400, { error: 'malformed JSON' });
     return;
@@ -162,26 +175,43 @@ async function handlePutAnnotations(req: IncomingMessage, res: ServerResponse): 
     sendJson(res, 400, { error: 'invalid slug' });
     return;
   }
-  if (!Array.isArray(body.annotations)) {
-    sendJson(res, 400, { error: 'annotations must be an array' });
+  if (!readArtifact(body.slug)) {
+    sendJson(res, 404, { error: 'no such artifact' });
     return;
   }
-  try {
-    writeAnnotations(body.slug, body.annotations as Annotation[]);
-  } catch {
-    sendJson(res, 500, { error: 'could not write annotations' });
+  if (
+    !Array.isArray(body.annotations) ||
+    body.annotations.length > 1000 ||
+    !body.annotations.every(validAnnotation) ||
+    new Set(body.annotations.map((a: Annotation) => a.id)).size !== body.annotations.length
+  ) {
+    sendJson(res, 400, { error: 'invalid annotations' });
     return;
   }
-  sendJson(res, 200, { ok: true });
+  const current = annotationState(body.slug);
+  if (body.revision !== undefined && body.revision !== current.revision) {
+    sendJson(res, 409, { error: 'Review changed in another tab. Copy your unsaved feedback before reloading.' });
+    return;
+  }
+  const sent = current.annotations.filter((a) => a.sentAt);
+  const sentIds = new Set(sent.map((a) => a.id));
+  const drafts = (body.annotations as Annotation[])
+    .filter((a) => !sentIds.has(a.id))
+    .map((a) => {
+      const { sentAt: _sentAt, reply: _reply, ...draft } = a;
+      return draft;
+    });
+  writeAnnotations(body.slug, [...sent, ...drafts]);
+  sendJson(res, 200, { ok: true, ...annotationState(body.slug) });
 }
 
-/** POST /api/feedback — compose from the sidecar, deliver, delete on success. */
+/** POST /api/feedback delivers only drafts and retains a durable sent batch. */
 async function handlePostFeedback(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const raw = await readBody(req, res);
   if (raw === null) return; // 413 already sent
-  let body: { slug?: unknown };
+  let body: { slug?: unknown; revision?: unknown };
   try {
-    body = JSON.parse(raw);
+    body = JSON.parse(raw) ?? {};
   } catch {
     sendJson(res, 400, { error: 'malformed JSON' });
     return;
@@ -191,7 +221,12 @@ async function handlePostFeedback(req: IncomingMessage, res: ServerResponse): Pr
     return;
   }
   const slug = body.slug;
-  const anns = readAnnotations(slug);
+  const current = annotationState(slug);
+  if (body.revision !== undefined && body.revision !== current.revision) {
+    sendJson(res, 409, { error: 'Review changed. Copy unsaved feedback before reloading.' });
+    return;
+  }
+  const anns = current.annotations.filter((a) => !a.sentAt);
   if (anns.length === 0) {
     sendJson(res, 400, { error: 'no annotations' });
     return;
@@ -203,19 +238,26 @@ async function handlePostFeedback(req: IncomingMessage, res: ServerResponse): Pr
   const url = state ? `http://${HOST}:${state.port}/${slug}.html` : `/${slug}.html`;
   const feedback = composeFeedback(slug, url, anns, staleFlags, lines);
 
-  let delivered = false;
-  if (feedbackSender) {
-    try {
-      delivered = feedbackSender(feedback) !== false;
-    } catch {
-      delivered = false;
-    }
+  if (!feedbackSender) {
+    sendJson(res, 503, { delivered: false, feedback });
+    return;
   }
-
+  // Persist first so a successful delivery cannot be followed by a failed archive write.
+  const sentAt = new Date().toISOString();
+  writeAnnotations(
+    slug,
+    current.annotations.map((a) => (a.sentAt ? a : { ...a, sentAt })),
+  );
+  let delivered = false;
+  try {
+    delivered = feedbackSender(feedback) !== false;
+  } catch {
+    delivered = false;
+  }
   if (delivered) {
-    deleteAnnotations(slug);
-    sendJson(res, 200, { delivered: true });
+    sendJson(res, 200, { delivered: true, ...annotationState(slug) });
   } else {
+    writeAnnotations(slug, current.annotations);
     sendJson(res, 503, { delivered: false, feedback });
   }
 }
@@ -226,7 +268,7 @@ async function handleRender(req: IncomingMessage, res: ServerResponse): Promise<
   if (raw === null) return; // 413 already sent
   let body: { markdown?: unknown };
   try {
-    body = JSON.parse(raw);
+    body = JSON.parse(raw) ?? {};
   } catch {
     sendJson(res, 400, { error: 'malformed JSON' });
     return;
@@ -244,7 +286,7 @@ async function handleShare(req: IncomingMessage, res: ServerResponse): Promise<v
   if (raw === null) return; // 413 already sent
   let body: { slug?: unknown; method?: unknown };
   try {
-    body = JSON.parse(raw);
+    body = JSON.parse(raw) ?? {};
   } catch {
     sendJson(res, 400, { error: 'malformed JSON' });
     return;
@@ -273,25 +315,54 @@ async function handleShare(req: IncomingMessage, res: ServerResponse): Promise<v
   }
 }
 
-function handle(req: IncomingMessage, res: ServerResponse, clients: Set<ServerResponse>): void {
-  // split always yields at least one element.
-  const url = (req.url ?? '/').split('?')[0]!;
+async function handle(req: IncomingMessage, res: ServerResponse, clients: Set<ServerResponse>): Promise<void> {
+  const parsedUrl = new URL(req.url ?? '/', `http://${HOST}`);
+  const url = parsedUrl.pathname;
+  if (url.startsWith('/api/') && req.method !== 'GET') {
+    const origin = req.headers.origin;
+    if (
+      (origin && origin !== `http://${HOST}:${state?.port}`) ||
+      !req.headers['content-type']?.startsWith('application/json')
+    ) {
+      sendJson(res, 403, { error: 'same-origin JSON requests required' });
+      return;
+    }
+  }
+  if (req.method === 'GET' && (url === '/api/annotations' || url === '/api/revision')) {
+    const slug = parsedUrl.searchParams.get('slug');
+    if (!slug || !isSafeSlug(slug)) {
+      sendJson(res, 400, { error: 'invalid slug' });
+      return;
+    }
+    if (!readArtifact(slug)) {
+      sendJson(res, 404, { error: 'no such artifact' });
+      return;
+    }
+    if (url === '/api/annotations') {
+      sendJson(res, 200, annotationState(slug));
+      return;
+    }
+    const comparison = renderRevisionComparison(slug);
+    res.writeHead(comparison ? 200 : 404, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(comparison ?? '<p>No previous revision yet. Update this artifact to compare revisions.</p>');
+    return;
+  }
 
   // Feedback endpoints (before the static-file fallthrough)
   if (url === '/api/share' && req.method === 'POST') {
-    void handleShare(req, res);
+    await handleShare(req, res);
     return;
   }
   if (url === '/api/render' && req.method === 'POST') {
-    void handleRender(req, res);
+    await handleRender(req, res);
     return;
   }
   if (url === '/api/annotations' && req.method === 'PUT') {
-    void handlePutAnnotations(req, res);
+    await handlePutAnnotations(req, res);
     return;
   }
   if (url === '/api/feedback' && req.method === 'POST') {
-    void handlePostFeedback(req, res);
+    await handlePostFeedback(req, res);
     return;
   }
 
@@ -318,7 +389,14 @@ function handle(req: IncomingMessage, res: ServerResponse, clients: Set<ServerRe
   }
 
   // Static artifact file — normalize + prefix-check to prevent traversal outside artifacts dir
-  const safe = safeArtifactPath(decodeURIComponent(url));
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(url);
+  } catch {
+    sendJson(res, 400, { error: 'invalid URL encoding' });
+    return;
+  }
+  const safe = safeArtifactPath(decoded);
   if (!safe || !existsSync(safe) || !statSync(safe).isFile()) {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('404 — artifact not found');
@@ -332,7 +410,10 @@ function handle(req: IncomingMessage, res: ServerResponse, clients: Set<ServerRe
   // the stored file stays byte-clean.
   if (ext === '.html') {
     const slug = basename(safe).replace(/\.html$/, '');
-    const injected = injectAnnotations(readFileSync(safe, 'utf-8'), slug, JSON.stringify(readAnnotations(slug)));
+    const review = annotationState(slug);
+    const injected = injectAnnotations(readFileSync(safe, 'utf-8'), slug, JSON.stringify(review.annotations), {
+      revision: review.revision,
+    });
     res.writeHead(200, { 'Content-Type': mime });
     res.end(injected);
     return;

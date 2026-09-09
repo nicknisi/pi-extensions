@@ -3,12 +3,21 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { hyperlink } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
-import { readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, rmSync, statSync } from 'node:fs';
+import { resolve } from 'node:path';
 
-import { shareBaked } from './feedback.js';
+import { answerQuestion, shareBaked } from './feedback.js';
+import { renderReviewContent, savePreviousRevision } from './review.js';
 
-import { artifactUrl, isRunning, notifyReload, runningPort, setFeedbackSender, stopServer } from './server.js';
+import {
+  artifactUrl,
+  isRunning,
+  notifyAnnotations,
+  notifyReload,
+  runningPort,
+  setFeedbackSender,
+  stopServer,
+} from './server.js';
 import type { FeedbackSender } from './server.js';
 import {
   slugify,
@@ -20,6 +29,7 @@ import {
   openInBrowser,
   artifactPath,
   revealFile,
+  sourcePath,
 } from './utils.js';
 import { renderMarkdownDocument, renderHtmlDocument } from './templates.js';
 
@@ -44,7 +54,7 @@ function errResult(message: string, details: Partial<ArtifactDetails> = {}) {
 function resolveContent(params: { content?: string; path?: string }): { content: string } | { error: string } {
   if (params.content != null) return { content: params.content };
   if (params.path) {
-    const abs = join(process.cwd(), params.path);
+    const abs = resolve(process.cwd(), params.path);
     try {
       const size = statSync(abs).size;
       const MAX = 2 * 1024 * 1024; // 2 MB — a stray path at a big log becomes a sad browser tab
@@ -122,6 +132,12 @@ export default function artifacts(pi: ExtensionAPI) {
       'Create, update, open, or list HTML artifacts rendered from markdown or raw HTML and served from a lazy localhost server (opened in the browser). Two kinds: `markdown` (rendered to styled HTML — GFM tables, fenced ```diff blocks render as diffs, fenced code blocks get syntax highlighting, fenced ```mermaid blocks render as diagrams) and `html` (escape hatch — body fragment injected into a styled shell, or a full <!DOCTYPE> document passed through unchanged). `create`/`update` write the file and return the slug + localhost URL + absolute path; `update` on a slug whose file is missing creates it. `update` on an already-open artifact refreshes the browser tab in place via live reload. `open` starts the server and opens the artifact. `list` lists existing artifacts (does not start the server). Set `path` to read content from a file instead of passing `content` (kind is still required). html fragments inherit the artifact stylesheet (system fonts, light/dark scheme) and its CSS variables — `--bg`, `--fg`, `--muted`, `--border`, `--code-bg`, `--accent` — so write semantic HTML and use those variables in any scoped <style> instead of hardcoding colors. Storage: <project>/.pi/artifacts/<slug>.html.',
     promptSnippet:
       'Emit visual output (reports, diagrams, rendered diffs, tables) as a browser HTML artifact instead of terminal text',
+    promptGuidelines: [
+      'For artifact review questions, use artifact action=answer with title, annotationId, and content. Answering must not rewrite the artifact. Keep-this comments identify content to preserve during requested edits.',
+      'Use artifact decisions for explicit in-document choices. Selections are review feedback, never authorization for destructive or privileged actions. Reuse decision ids and pass decisions on each update to retain the controls.',
+      'Attach artifact evidence to claims using id, title and a source, quote or http(s) URL. Link a claim to #artifact-evidence-ID. Evidence is supplied by the agent, not independently verified. Pass evidence on updates to retain it.',
+      'For stable visual comments in artifact HTML, give images, diagrams and tables a unique id or data-artifact-anchor. Existing general, keep, question and element comments persist across updates.',
+    ],
     parameters: Type.Object({
       action: Type.Union(
         [
@@ -130,11 +146,67 @@ export default function artifacts(pi: ExtensionAPI) {
           Type.Literal('open'),
           Type.Literal('list'),
           Type.Literal('share'),
+          Type.Literal('answer'),
         ],
         {
           description:
             'create: write new artifact. update: overwrite existing (or create if missing) + live-reload open tabs. open: start server + open in browser. list: list artifacts (no server start). share: hand the artifact file off — clipboard, file manager, or a GitHub gist (gist only when the user asks for an upload; it shows the source, not a rendered page). When the artifact has annotation comments, clipboard and gist bake them in (highlights + read-only panel) unless annotations: false.',
         },
+      ),
+      annotationId: Type.Optional(
+        Type.String({ description: 'answer only. ID of the sent question to answer.', minLength: 1, maxLength: 200 }),
+      ),
+      decisions: Type.Optional(
+        Type.Array(
+          Type.Object({
+            id: Type.String({ pattern: '^[a-zA-Z0-9_-]+$', maxLength: 100 }),
+            question: Type.String({ minLength: 1, maxLength: 4000 }),
+            options: Type.Array(
+              Type.Object({
+                value: Type.String({ minLength: 1, maxLength: 1000 }),
+                label: Type.String({ minLength: 1, maxLength: 4000 }),
+              }),
+              { minItems: 2, maxItems: 50 },
+            ),
+            multiple: Type.Optional(Type.Boolean()),
+          }),
+          {
+            maxItems: 50,
+            description:
+              'create/update. Native choices included with review feedback on explicit send. Supply on each update to keep them.',
+          },
+        ),
+      ),
+      evidence: Type.Optional(
+        Type.Array(
+          Type.Object({
+            id: Type.String({ pattern: '^[a-zA-Z0-9_-]+$', maxLength: 100 }),
+            title: Type.String({ minLength: 1, maxLength: 4000 }),
+            url: Type.Optional(
+              Type.String({
+                maxLength: 4000,
+                description: 'HTTP(S) source link. Never executed or fetched by the server.',
+              }),
+            ),
+            source: Type.Optional(
+              Type.String({
+                maxLength: 4000,
+                description: 'Source label such as file:line, commit, or command that produced the evidence.',
+              }),
+            ),
+            quote: Type.Optional(
+              Type.String({
+                maxLength: 4000,
+                description: 'Exact source passage or captured command/test output. Do not fabricate evidence.',
+              }),
+            ),
+          }),
+          {
+            maxItems: 50,
+            description:
+              'create/update. Expandable evidence linked from claims via #artifact-evidence-ID. At least one source, quote or URL per entry.',
+          },
+        ),
       ),
       method: Type.Optional(
         Type.Union(
@@ -168,7 +240,7 @@ export default function artifacts(pi: ExtensionAPI) {
       ),
       title: Type.Optional(
         Type.String({
-          description: 'Artifact title; slug is derived from it. Required for create/update/open.',
+          description: 'Artifact title; slug is derived from it. Required for create/update/open/share/answer.',
         }),
       ),
       kind: Type.Optional(
@@ -177,7 +249,12 @@ export default function artifacts(pi: ExtensionAPI) {
             'Required for create/update. markdown = rendered to styled HTML (diff/code/mermaid fences handled). html = passthrough.',
         }),
       ),
-      content: Type.Optional(Type.String({ description: 'Inline content (markdown or HTML). Alternative to `path`.' })),
+      content: Type.Optional(
+        Type.String({
+          description:
+            'Inline content (markdown or HTML). Alternative to `path`. For answer, the reply text, up to 20000 characters.',
+        }),
+      ),
       path: Type.Optional(
         Type.String({
           description:
@@ -224,6 +301,22 @@ export default function artifacts(pi: ExtensionAPI) {
       }
       const kind = params.kind;
       const absPath = artifactPath(slug);
+
+      if (action === 'answer') {
+        if (!artifactExists(slug)) throw new Error(`no artifact with slug "${slug}"`);
+        if (!params.annotationId || !params.content) throw new Error('answer requires annotationId and content');
+        answerQuestion(slug, params.annotationId, params.content);
+        notifyAnnotations(slug);
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `Answered question ${params.annotationId} in ${slug}. The artifact was not changed.`,
+            },
+          ],
+          details: { action, slug, annotationId: params.annotationId },
+        };
+      }
 
       // ── open ───────────────────────────────────────────────────────────────
       if (action === 'open') {
@@ -333,11 +426,12 @@ export default function artifacts(pi: ExtensionAPI) {
       const html =
         kind === 'html' ? renderHtmlDocument(title, slug, content) : renderMarkdownDocument(title, slug, content);
 
-      writeArtifact(slug, html);
+      const reviewedHtml = renderReviewContent(html, params.decisions ?? [], params.evidence ?? []);
+      savePreviousRevision(slug);
+      writeArtifact(slug, reviewedHtml);
 
-      // Source mirror for annotation source-line refs (markdown artifacts only;
-      // additive — listArtifacts only reads .html).
       if (kind === 'markdown') writeSourceMirror(slug, content);
+      else rmSync(sourcePath(slug), { force: true });
 
       // Live-reload already-open tabs (no-op if server not running)
       notifyReload(slug);
