@@ -90,6 +90,12 @@ importers:
         specifier: ^1.1.0
         version: 1.3.7
 
+  packages/compact-tools:
+    dependencies:
+      '@nicknisi/pi-shared':
+        specifier: workspace:*
+        version: link:../shared
+
   packages/composer: {}
 
   packages/fast: {}
