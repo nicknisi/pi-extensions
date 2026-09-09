@@ -35,6 +35,7 @@ Local paths are added to pi's settings without copying — edits in the repo are
 
 | Package                                      | What it does                                                                                                 | Adds                                        |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------- |
+| [compact-tools](packages/compact-tools/)     | Two-line tool displays with original rendering on Ctrl+O or fullscreen click                                 | compact tool display                        |
 | [composer](packages/composer/)               | Config-driven boxed input editor; paste-again-to-expand for collapsed paste markers; tmux focus-aware border | custom editor component                     |
 | [header](packages/header/)                   | Animated dashboard header (GIF-compiled truecolor frames or ASCII art) with session info, on fresh sessions  | `/nicknisi-header`, custom header           |
 | [mg](packages/mg/)                           | Severance-style "100% File Completion" animation starring a pixelated Michael Grinich, with macOS audio      | `/mg [name]`                                |
