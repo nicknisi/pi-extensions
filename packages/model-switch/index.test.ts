@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Api, Model } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { loadModelSwitchConfig, modelCycleConfigPath } from './config.js';
+import { SectionPicker } from './section-picker.js';
 import modelCycle from './index.js';
 
 const tempDirs: string[] = [];
@@ -44,6 +46,9 @@ function harness(
     unauthenticated?: string[];
     switchResult?: boolean;
     customResult?: string | null;
+    selectResult?: string;
+    inputResult?: string | undefined;
+    mode?: ExtensionContext['mode'];
     hasUI?: boolean;
   } = {},
 ) {
@@ -54,6 +59,8 @@ function harness(
   const setModel = vi.fn(async () => options.switchResult ?? true);
   const notify = vi.fn();
   const custom = vi.fn(async () => options.customResult ?? null);
+  const select = vi.fn(async () => options.selectResult);
+  const input = vi.fn(async () => options.inputResult);
   const models = options.models ?? [];
   const byReference = new Map(models.map((item) => [`${item.provider}/${item.id}`, item]));
   const unauthenticated = new Set(options.unauthenticated ?? []);
@@ -71,7 +78,9 @@ function harness(
   const ctx = {
     model: options.current,
     hasUI: options.hasUI ?? true,
+    mode: options.mode ?? 'tui',
     modelRegistry: {
+      getAvailable: () => models.filter((item) => !unauthenticated.has(`${item.provider}/${item.id}`)),
       find(provider: string, modelId: string) {
         return byReference.get(`${provider}/${modelId}`);
       },
@@ -82,11 +91,11 @@ function harness(
           : { ok: true as const, apiKey: 'test' };
       },
     },
-    ui: { notify, custom },
+    ui: { notify, custom, select, input },
   } as unknown as ExtensionContext;
 
   modelCycle(pi);
-  return { shortcuts, commands, setModel, notify, custom, ctx };
+  return { shortcuts, commands, setModel, notify, custom, select, input, ctx };
 }
 
 beforeEach(() => {
@@ -256,5 +265,202 @@ describe('model-switch extension', () => {
     await commands.get('model-switch')!('', ctx);
 
     expect(notify).toHaveBeenCalledWith('Could not switch to provider/target', 'warning');
+  });
+
+  it('picks from available models and appends to the chosen section without switching', async () => {
+    const target = model('provider', 'new');
+    writeConfig({ work: ['provider/old'], personal: [] });
+    const { commands, ctx, custom, select, notify, setModel } = harness({
+      models: [target, model('locked', 'hidden')],
+      unauthenticated: ['locked/hidden'],
+      customResult: 'provider/new',
+      selectResult: 'personal',
+    });
+
+    await commands.get('model-switch')!('add', ctx);
+
+    expect(select).toHaveBeenCalledWith('Add provider/new to section', ['work', 'personal']);
+    expect(loadModelSwitchConfig()).toEqual({
+      ok: true,
+      config: {
+        sections: [
+          { name: 'work', models: ['provider/old'] },
+          { name: 'personal', models: ['provider/new'] },
+        ],
+      },
+    });
+    expect(setModel).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledWith('Added provider/new to "personal"', 'info');
+
+    // Exercise the actual picker factory, not just the mocked dialog result.
+    const factory = (custom.mock.calls as unknown[][])[0]![0] as Parameters<ExtensionContext['ui']['custom']>[0];
+    const done = vi.fn();
+    const picker = (await factory(
+      {} as never,
+      { fg: (_color: string, text: string) => text, bold: (text: string) => text } as never,
+      {} as never,
+      done,
+    )) as SectionPicker;
+    expect(picker.render(160).join('\n')).not.toContain('locked/hidden');
+    for (const key of 'new') picker.handleInput(key);
+    picker.handleInput('\r');
+    expect(done).toHaveBeenCalledWith('provider/new');
+  });
+
+  it('saves the current model and skips a duplicate on the next invocation', async () => {
+    writeConfig({ work: [] });
+    const { commands, ctx, custom, notify, setModel } = harness({
+      current: model('provider', 'current'),
+      selectResult: 'work',
+    });
+
+    await commands.get('model-switch')!('add-current', ctx);
+    await commands.get('model-switch')!('add-current', ctx);
+
+    expect(custom).not.toHaveBeenCalled();
+    expect(setModel).not.toHaveBeenCalled();
+    expect(loadModelSwitchConfig()).toEqual({
+      ok: true,
+      config: { sections: [{ name: 'work', models: ['provider/current'] }] },
+    });
+    expect(notify).toHaveBeenLastCalledWith('provider/current is already in "work"', 'info');
+  });
+
+  it('creates a first section when no config exists', async () => {
+    const { commands, ctx, input } = harness({ current: model('provider', 'current'), inputResult: ' personal ' });
+
+    await commands.get('model-switch')!('add-current', ctx);
+
+    expect(input).toHaveBeenCalled();
+    expect(loadModelSwitchConfig()).toEqual({
+      ok: true,
+      config: { sections: [{ name: 'personal', models: ['provider/current'] }] },
+    });
+  });
+
+  it.each(['add', 'add-current'])('does not write when the section selection is cancelled for %s', async (command) => {
+    writeConfig({ work: [] });
+    const content = readFileSync(modelCycleConfigPath(), 'utf8');
+    const target = model('provider', 'new');
+    const { commands, ctx, notify } = harness({ current: target, models: [target], customResult: 'provider/new' });
+
+    await commands.get('model-switch')!(command, ctx);
+
+    expect(readFileSync(modelCycleConfigPath(), 'utf8')).toBe(content);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('does not ask for a section or write when the catalog picker is cancelled', async () => {
+    const { commands, ctx, select, input } = harness({ models: [model('provider', 'new')] });
+
+    await commands.get('model-switch')!('add', ctx);
+
+    expect(select).not.toHaveBeenCalled();
+    expect(input).not.toHaveBeenCalled();
+    expect(existsSync(modelCycleConfigPath())).toBe(false);
+  });
+
+  it.each([undefined, '', '   '])('does not create a config without a section name: %s', async (inputResult) => {
+    const { commands, ctx } = harness({ current: model('provider', 'new'), inputResult });
+
+    await commands.get('model-switch')!('add-current', ctx);
+
+    expect(existsSync(modelCycleConfigPath())).toBe(false);
+  });
+
+  it.each(['add', 'add-current'])('does not prompt or write without UI for %s', async (command) => {
+    const target = model('provider', 'new');
+    const { commands, ctx, custom, select, input } = harness({
+      hasUI: false,
+      current: target,
+      models: [target],
+      customResult: 'provider/new',
+      inputResult: 'work',
+    });
+
+    await commands.get('model-switch')!(command, ctx);
+
+    expect(custom).not.toHaveBeenCalled();
+    expect(select).not.toHaveBeenCalled();
+    expect(input).not.toHaveBeenCalled();
+    expect(existsSync(modelCycleConfigPath())).toBe(false);
+  });
+
+  it('warns when no current model or available catalog model exists', async () => {
+    const { commands, ctx, notify, custom, select } = harness();
+
+    await commands.get('model-switch')!('add-current', ctx);
+    expect(notify).toHaveBeenLastCalledWith('No model selected to add', 'warning');
+    await commands.get('model-switch')!('add', ctx);
+    expect(notify).toHaveBeenLastCalledWith(expect.stringContaining('No available models to add'), 'warning');
+    expect(custom).not.toHaveBeenCalled();
+    expect(select).not.toHaveBeenCalled();
+    expect(existsSync(modelCycleConfigPath())).toBe(false);
+  });
+
+  it('refuses custom catalog UI in RPC mode', async () => {
+    const { commands, ctx, notify, custom } = harness({ mode: 'rpc' });
+
+    await commands.get('model-switch')!('add', ctx);
+
+    expect(custom).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledWith('/model-switch add requires the terminal UI', 'warning');
+  });
+
+  it.each(['add', 'add-current'])('refuses malformed config before prompting for %s', async (command) => {
+    writeConfig({ work: [] });
+    writeFileSync(modelCycleConfigPath(), '{ nope');
+    const { commands, ctx, notify, custom, select } = harness({ current: model('provider', 'new') });
+
+    await commands.get('model-switch')!(command, ctx);
+
+    expect(custom).not.toHaveBeenCalled();
+    expect(select).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining(modelCycleConfigPath()), 'warning');
+    expect(readFileSync(modelCycleConfigPath(), 'utf8')).toBe('{ nope');
+  });
+
+  it('retains edits made while the section prompt was open', async () => {
+    writeConfig({ work: [] });
+    const { commands, ctx, select } = harness({ current: model('provider', 'new') });
+    select.mockImplementation(async () => {
+      writeFileSync(modelCycleConfigPath(), JSON.stringify({ sections: { work: ['provider/edited'], personal: [] } }));
+      return 'work';
+    });
+
+    await commands.get('model-switch')!('add-current', ctx);
+
+    expect(loadModelSwitchConfig()).toEqual({
+      ok: true,
+      config: {
+        sections: [
+          { name: 'work', models: ['provider/edited', 'provider/new'] },
+          { name: 'personal', models: [] },
+        ],
+      },
+    });
+  });
+
+  it('reports save errors instead of claiming the model was added', async () => {
+    writeConfig({ work: [] });
+    const { commands, ctx, select, notify } = harness({ current: model('provider', 'new') });
+    select.mockImplementation(async () => {
+      writeFileSync(modelCycleConfigPath(), '{ broken during selection');
+      return 'work';
+    });
+
+    await commands.get('model-switch')!('add-current', ctx);
+
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining('Could not update model-switch config'), 'warning');
+  });
+
+  it('shows usage for unknown arguments without opening a picker', async () => {
+    const { commands, ctx, notify, custom } = harness();
+
+    await commands.get('model-switch')!('typo', ctx);
+
+    expect(custom).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledWith('Usage: /model-switch [add | add-current]', 'warning');
   });
 });

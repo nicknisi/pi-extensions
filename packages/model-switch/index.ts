@@ -1,7 +1,12 @@
 import type { Api, Model } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { SelectItem } from '@earendil-works/pi-tui';
-import { loadModelSwitchConfig, loadModelSwitchKeybindings, modelCycleConfigPath } from './config.js';
+import {
+  addModelToSection,
+  loadModelSwitchConfig,
+  loadModelSwitchKeybindings,
+  modelCycleConfigPath,
+} from './config.js';
 import { findActiveSection, resolveAvailableModels, selectCycleTarget, type CycleDirection } from './cycle.js';
 import { SectionPicker, type PickerSection } from './section-picker.js';
 
@@ -88,6 +93,60 @@ async function showModelPicker(pi: ExtensionAPI, ctx: ExtensionContext): Promise
   if (target) await switchModel(pi, ctx, target);
 }
 
+async function addConfiguredModel(ctx: ExtensionContext, useCurrent: boolean): Promise<void> {
+  if (!ctx.hasUI) return;
+  if (!useCurrent && ctx.mode !== 'tui') {
+    ctx.ui.notify('/model-switch add requires the terminal UI', 'warning');
+    return;
+  }
+
+  const loaded = loadModelSwitchConfig();
+  if (!loaded.ok) {
+    ctx.ui.notify(loaded.error, 'warning');
+    return;
+  }
+
+  let target = ctx.model;
+  if (!useCurrent) {
+    const available = ctx.modelRegistry.getAvailable();
+    if (available.length === 0) {
+      ctx.ui.notify('No available models to add. Configure a provider with /login first.', 'warning');
+      return;
+    }
+    const selected = await ctx.ui.custom<string | null>((_tui, theme, _keybindings, done) => {
+      return new SectionPicker([{ name: 'Add a model', items: buildSectionItems(available, ctx.model) }], theme, done);
+    });
+    if (!selected) return;
+    target = available.find((model) => `${model.provider}/${model.id}` === selected);
+  }
+  if (!target) {
+    ctx.ui.notify('No model selected to add', 'warning');
+    return;
+  }
+
+  const reference = `${target.provider}/${target.id}`;
+  const sections = loaded.config.sections.map((section) => section.name);
+  const sectionName =
+    sections.length > 0
+      ? await ctx.ui.select(`Add ${reference} to section`, sections)
+      : (await ctx.ui.input('Name your first model-switch section', 'models'))?.trim();
+  if (sectionName === undefined) return;
+  if (sections.length === 0 && !sectionName) {
+    ctx.ui.notify('Section name must not be empty', 'warning');
+    return;
+  }
+
+  const result = addModelToSection(reference, sectionName);
+  if (!result.ok) {
+    ctx.ui.notify(result.error, 'warning');
+    return;
+  }
+  ctx.ui.notify(
+    result.added ? `Added ${reference} to "${sectionName}"` : `${reference} is already in "${sectionName}"`,
+    'info',
+  );
+}
+
 export default function modelCycle(pi: ExtensionAPI) {
   const keybindings = loadModelSwitchKeybindings();
   type ShortcutKey = Parameters<ExtensionAPI['registerShortcut']>[0];
@@ -108,7 +167,25 @@ export default function modelCycle(pi: ExtensionAPI) {
   });
 
   pi.registerCommand('model-switch', {
-    description: 'Select from configured models',
-    handler: async (_args, ctx) => showModelPicker(pi, ctx),
+    description: 'Select configured models, add a model, or add-current',
+    getArgumentCompletions: (prefix) => {
+      const items = [
+        { value: 'add', label: 'add', description: 'Pick an available model to save' },
+        { value: 'add-current', label: 'add-current', description: 'Save the current model' },
+      ].filter((item) => item.value.startsWith(prefix));
+      return items.length > 0 ? items : null;
+    },
+    handler: async (args, ctx) => {
+      switch (args.trim()) {
+        case '':
+          return showModelPicker(pi, ctx);
+        case 'add':
+          return addConfiguredModel(ctx, false);
+        case 'add-current':
+          return addConfiguredModel(ctx, true);
+        default:
+          ctx.ui.notify('Usage: /model-switch [add | add-current]', 'warning');
+      }
+    },
   });
 }
