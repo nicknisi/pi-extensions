@@ -426,11 +426,20 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // Gather branch messages and convert to LLM format
-      const branch = ctx.sessionManager.getBranch();
-      const agentMessages = branch
-        .filter((e): e is SessionEntry & { type: 'message' } => e.type === 'message')
-        .map((e) => e.message);
+      // Gather the context the main agent actually sees (compaction applied) and convert
+      // to LLM format. `getBranch()` is the raw history and can exceed the model's window
+      // on long sessions; a compaction entry becomes a leading user message carrying its summary.
+      const contextEntries = ctx.sessionManager.buildContextEntries();
+      const agentMessages: Extract<SessionEntry, { type: 'message' }>['message'][] = [];
+      for (const e of contextEntries) {
+        if (e.type === 'message') agentMessages.push(e.message);
+        else if (e.type === 'compaction')
+          agentMessages.push({
+            role: 'user',
+            content: [{ type: 'text', text: `Summary of the conversation so far:\n\n${e.summary}` }],
+            timestamp: Date.now(),
+          });
+      }
       const llmMessages: Message[] = convertToLlm(agentMessages);
 
       // If /btw runs mid-turn, trailing tool calls have no results yet and
