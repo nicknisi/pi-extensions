@@ -43,6 +43,11 @@ export interface AgentProfile {
   model?: string | undefined;
   /** Default the task to worktree isolation (the natural home for builder personas). */
   worktree?: boolean | undefined;
+  /**
+   * Default working directory for the task, relative to the session cwd and
+   * jailed inside it — e.g. a repository checkout under a workspace root.
+   */
+  cwd?: string | undefined;
   /** Replace pi's system prompt with the persona prompt instead of appending. */
   replace?: boolean | undefined;
   /** Persona system prompt (frontmatter body). Empty string when absent. */
@@ -60,6 +65,7 @@ export interface ProfileTaskFields {
   systemPrompt?: string | undefined;
   allowTreeMutation?: boolean | undefined;
   worktree?: boolean | undefined;
+  cwd?: string | undefined;
   skillPaths?: string[] | undefined;
   replaceSystemPrompt?: boolean | undefined;
 }
@@ -177,6 +183,8 @@ export function parseAgentProfile(content: string, filePath: string, scope: Agen
   if (model) profile.model = model;
   const worktree = boolField('worktree');
   if (worktree !== undefined) profile.worktree = worktree;
+  const cwd = scalars.get('cwd');
+  if (cwd) profile.cwd = cwd;
   const replace = boolField('replace');
   if (replace !== undefined) profile.replace = replace;
   return { ok: true, profile };
@@ -294,6 +302,7 @@ export function applyProfile<T extends ProfileTaskFields>(spec: T, profile: Agen
         : profile.tools;
     if (tools.length > 0) merged.tools = tools;
   }
+  if (merged.cwd === undefined && profile.cwd !== undefined) merged.cwd = profile.cwd;
   if (skillPaths.length > 0) merged.skillPaths = skillPaths;
   if (merged.systemPrompt === undefined && profile.prompt !== '') {
     merged.systemPrompt = profile.prompt;
