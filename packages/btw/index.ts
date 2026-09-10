@@ -462,7 +462,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`No API key for ${model.provider}/${model.id}: ${auth.error}`, 'error');
         return;
       }
-      const { apiKey, headers } = auth;
+      const { apiKey, headers, env } = auth;
 
       const modelId = model.id;
       const modelName = `${model.provider}/${modelId}`;
@@ -508,6 +508,7 @@ export default function (pi: ExtensionAPI) {
               {
                 ...(apiKey !== undefined && { apiKey }),
                 ...(headers !== undefined && { headers }),
+                ...(env !== undefined && { env }),
                 ...(reasoning !== undefined && { reasoning }),
                 ...(signal !== undefined && { signal }),
               },

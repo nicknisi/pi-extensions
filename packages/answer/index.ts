@@ -176,7 +176,10 @@ async function selectExtractionModel(
     find: (provider: string, modelId: string) => Model<Api> | undefined;
     getApiKeyAndHeaders: (
       model: Model<Api>,
-    ) => Promise<{ ok: true; apiKey?: string; headers?: Record<string, string | null> } | { ok: false; error: string }>;
+    ) => Promise<
+      | { ok: true; apiKey?: string; headers?: Record<string, string | null>; env?: Record<string, string> }
+      | { ok: false; error: string }
+    >;
   },
   preferences: readonly ModelPreference[],
 ): Promise<Model<Api> | undefined> {
@@ -526,6 +529,7 @@ export default function (pi: ExtensionAPI) {
             {
               ...(auth.apiKey !== undefined && { apiKey: auth.apiKey }),
               ...(auth.headers !== undefined && { headers: auth.headers }),
+              ...(auth.env !== undefined && { env: auth.env }),
               signal: loader.signal,
             },
           )

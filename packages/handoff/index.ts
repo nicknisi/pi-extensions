@@ -105,7 +105,7 @@ export default function (pi: ExtensionAPI) {
               error: `No API key for ${ctx.model!.provider}/${ctx.model!.id}: ${auth.error}`,
             };
           }
-          const { apiKey, headers } = auth;
+          const { apiKey, headers, env } = auth;
 
           const userMessage: Message = {
             role: 'user',
@@ -122,7 +122,7 @@ export default function (pi: ExtensionAPI) {
             .stream(
               ctx.model!,
               { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-              { apiKey, headers, signal: loader.signal },
+              { apiKey, headers, env, signal: loader.signal },
             )
             .result();
 
