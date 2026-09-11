@@ -10,14 +10,21 @@ pi install /Users/nicknisi/Developer/pi-extensions/packages/llm-council
 
 ## What it adds
 
-- **Tool:** `llm_council` (label "LLM Council"). No slash commands, no keybindings, no overlays/widgets, no events, no custom entry types.
+- **Tool:** `llm_council` (label "LLM Council"), with optional per-call `models` and `chairman` overrides.
+- **Command:** `/council <question>` runs immediately with the current conversation as context. Bare `/council` asks for a question and runs on Enter. `/council settings` edits the lineup without running. `/council reset` returns this session to configured defaults.
+- **Command results:** `llm-council-result` messages display the synthesis in chat and keep it available to subsequent turns. Expand the result for individual responses and errors.
+- **Session state:** `llm-council-selection` custom entries remember the lineup and thinking levels across reloads, resumes, forks, and branch navigation. These entries are not sent to the LLM. A footer status shows the session's selected lineup.
 - Custom `renderCall` / `renderResult` for the tool: live member/chairman tree with spinner, status icons, elapsed times, and an expanded view rendering full member + chairman markdown. Expand/collapse uses the standard `app.tools.expand` keybinding (default `ctrl+o`).
 
 ### Tool parameters
 
-| Parameter  | Type     | Description                         |
-| ---------- | -------- | ----------------------------------- |
-| `question` | `string` | The question to pose to the council |
+| Parameter  | Type                 | Description                                                                      |
+| ---------- | -------------------- | -------------------------------------------------------------------------------- |
+| `question` | `string`             | The question to pose to the council                                              |
+| `models`   | `string[]`, optional | Replace the members for this call only. At least one distinct model is required. |
+| `chairman` | `string`, optional   | Replace the chairman for this call only.                                         |
+
+Use exact `provider/model` IDs or unambiguous names. Qualified IDs must match exactly, so a missing model is never silently replaced by a newer variant. Ambiguous references open a provider/model selection dialog in interactive or RPC mode. Headless calls return an error listing the matches. Unknown models, duplicate members, and cancelled selections fail before any member starts. Per-call overrides never change session or global defaults.
 
 Prompt guidance registered with the tool tells the agent to use it for complex questions that benefit from multiple perspectives, and not for simple factual questions.
 
@@ -25,7 +32,7 @@ Prompt guidance registered with the tool tells the agent to use it for complex q
 
 1. **Members** — each council member receives the same question and answers independently, in parallel (`Promise.all`). Each runs as a hermetic in-process child session spawned through pi's SDK (`createAgentSession`), shared via `@nicknisi/pi-shared`'s `createSubagentRuntime`; the answer is the child's final assistant message.
 2. **Chairman** — receives the question plus all successful member answers (labeled Member A/B/C) and synthesizes a unified answer. If `chairman.exposePersonas` is `true`, each member's system prompt is included as `(persona: "...")`. The chairman's text is the tool's final content.
-3. If every member fails, the tool returns an error result; the chairman never runs. If the chairman fails, its error text is returned.
+3. If every member fails, the tool returns an error result; the chairman never runs. If the chairman fails, its error is returned and any partial synthesis is labeled incomplete.
 
 ### Exec config → spawn options
 
@@ -63,19 +70,47 @@ Members run with read-only built-in tools (`read`, `grep`, `find`, `ls`), no ext
 
 ## Usage
 
-No command to run yourself — ask in a pi session and the agent decides when to convene the council, e.g.:
+Run `/council <question>` to start immediately with the current lineup. Bare `/council` opens one question field with the members and synthesizer shown underneath. Enter runs the council without another confirmation. Progress appears while the members work, followed by the synthesized answer in chat. Escape cancels the question prompt or aborts a running council.
+
+The command sends the current branch's conversation context to every member and the synthesizer. Compaction summaries are included, rather than discarded history or other branches. Pi's text serializer shortens tool outputs and omits image data. No extra summarization call is made. Very long context can still exceed a selected model's context window.
+
+Runs reuse the selected or configured lineup without changing it or switching the main chat model. Missing or ambiguous models must be resolved before any member starts. Use `/council settings` to edit the lineup without running models.
+
+Open **Members** to edit a searchable checklist. Every model available through your configured providers is searchable immediately, regardless of the session's model scope. Selected models appear first with `[x]`, followed by scoped models and the rest of the catalog. Type a model name, provider, or exact ID to filter. Space toggles the highlighted member, even while searching. Enter keeps your choices and returns to settings. Escape returns without changing the checklist's original selection.
+
+Open **Synthesizer** to choose the model that combines the member answers, called `chairman` in tool arguments and config. It can also be a member. Type to search and press Enter to choose it. Both lists show readable names and providers, with the highlighted model's full ID below the list. Missing or ambiguous configured selections stay visible so you can replace or remove them.
+
+Member and synthesizer thinking levels can be changed separately. `default` uses Pi's default. Pi adjusts thinking to each model's capabilities when it runs.
+
+In `/council settings`, **Save lineup** saves the draft for this session without running models. **Save as global default** asks for confirmation, updates the global config while preserving unrelated settings and existing member personas, then applies the lineup to this session. Escape from settings discards the draft. A council must have at least one member. These commands require TUI mode while the agent is idle.
+
+You can still ask a question normally in chat, for example:
 
 ```
 Which approach is better for X: A or B? Convene the council.
 ```
 
+Or target models for one question: "Ask Fable 5.1 and Astra to compare these two designs, with Fable as chairman." The agent supplies the tool overrides. Exact IDs avoid ambiguity:
+
+```json
+{
+  "question": "Compare these two designs.",
+  "models": ["anthropic/claude-fable-5-1", "openai-codex/gpt-6-astra"],
+  "chairman": "anthropic/claude-fable-5-1"
+}
+```
+
+Model availability depends on your Pi catalog and provider credentials. Catalog presence does not verify that a token is still valid. Use `/login` to reconnect a provider if a call fails authentication.
+
 Or steer it directly: "use llm_council to compare these two designs". The tool result shows the chairman's synthesis; press the tools-expand key (`ctrl+o`) on the tool block to see every member's full response.
 
 ## Configuration
 
-Two layers:
+Lineup precedence is **per-call overrides > session selection > project config > global config > built-in defaults**. `/council reset` removes the session selection. A global save does not overwrite project overrides or other sessions' saved selections.
 
-1. **Global:** `~/.pi/agent/configs/llm-council.json` — copy [`llm-council.example.json`](llm-council.example.json). Loaded once at module load; this is the only source for `shared` (display) settings. The path follows pi's agent dir, so it moves with `PI_CODING_AGENT_DIR` if you set it.
+Two config files:
+
+1. **Global:** `~/.pi/agent/configs/llm-council.json` — copy [`llm-council.example.json`](llm-council.example.json). Execution settings reload per call. Display settings load once at module load, and this is the only source for `shared` settings. The path follows pi's agent dir, so it moves with `PI_CODING_AGENT_DIR` if you set it.
 2. **Project-local:** `<cwd>/.pi/configs/llm-council.json` — copy [`llm-council.project.example.json`](llm-council.project.example.json). Deep-merged over the global file per tool call, so only differing keys are needed — typically `member.council` and `chairman.model` to give a work project a different lineup. Display (`shared`) settings do **not** apply from the project file.
 
 No environment variables are read for configuration. (`PI_SUBAGENT_DEPTH` is set internally to block recursion.)
@@ -102,7 +137,7 @@ No environment variables are read for configuration. (`PI_SUBAGENT_DEPTH` is set
 | `displayName`        | `string`           | `"Claude Opus 5"`             | Human-readable name shown in the UI                                |
 | `systemPrompt`       | `string`           | _(built-in; see `config.ts`)_ | Chairman system prompt (treats member answers as anonymous)        |
 | `exposePersonas`     | `boolean`          | `true`                        | Include each member's system prompt as a persona in chairman input |
-| `display.icon`       | `string`           | `""`                          | Icon prefix before the "Chairman" label                            |
+| `display.icon`       | `string`           | `""`                          | Icon prefix before the "Synthesizer" label                         |
 | `display.labelColor` | `string`           | `"accent"`                    | Chairman label color                                               |
 | `display.modelColor` | `string`           | `"dim"`                       | Chairman model name color                                          |
 | `tools`              | `string[] \| null` | `[]`                          | Chairman tool allowlist (none by default)                          |
@@ -150,5 +185,5 @@ Any color field accepts a pi theme token (`"text"`, `"accent"`, `"success"`, `"e
 - **Depends on pi's SDK surface:** `createAgentSession`, `DefaultResourceLoader` (its `noExtensions`/`additionalExtensionPaths` semantics), `SessionManager.inMemory`, `SettingsManager.inMemory`, `ModelRuntime`/`resolveCliModel`. These are pi internals that could change across versions; the runtime is version-matched at runtime because pi aliases `@earendil-works/*` imports to the host, but type-level drift would surface at extension load.
 - **Pi internals:** the spinner relies on the `renderCall`/`renderResult` `ctx.state` bag and `ctx.invalidate()`. A module-level `liveDetails` bridges `onUpdate` → `renderCall` as a workaround for an `isPartial` bug (per code comment); only one council can render live at a time.
 - **Recursion guard:** the shared runtime refuses to spawn when `PI_SUBAGENT_DEPTH`/`PI_SUBAGENT_CHILD` are set — this tool won't work if invoked from inside a pi-subagents child session.
-- Global config is read **once at module load** — edits to `~/.pi/agent/configs/llm-council.json` require a pi restart; project-local config is re-read on every tool call.
+- Global and project execution settings are re-read on every tool call. Display changes still require `/reload` or a restart. Session selections override model and thinking settings until `/council reset`.
 - Members and chairman run with the current working directory as `cwd`; `contextFiles: false` keeps CLAUDE.md/AGENTS.md out of member context by default.

@@ -20,6 +20,8 @@
     "config.ts",
     "utils.ts",
     "types.ts",
+    "selection.ts",
+    "picker.ts",
     "README.md",
     "llm-council.example.json",
     "llm-council.project.example.json"
