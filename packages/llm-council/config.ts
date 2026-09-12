@@ -1,6 +1,8 @@
-import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { getAgentDir } from '@earendil-works/pi-coding-agent';
+import { randomUUID } from 'node:crypto';
+import { readFileSync, lstatSync, mkdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { getAgentDir, withFileMutationQueue } from '@earendil-works/pi-coding-agent';
+import { sameModelReference, type CouncilSelection } from './selection.js';
 import type { CouncilMemberUserConfig, LlmCouncilUserConfig } from './types.js';
 
 // ── Defaults ───────────────────────────────────────────────────────────────
@@ -88,7 +90,9 @@ export const DEFAULT_CONFIG = {
 //           only the keys that differ need to be present — e.g. just
 //           member.council and chairman.model for a per-project lineup)
 
-const GLOBAL_CONFIG_PATH = join(getAgentDir(), 'configs', 'llm-council.json');
+export function councilConfigPath(): string {
+  return join(getAgentDir(), 'configs', 'llm-council.json');
+}
 
 function projectConfigPath(cwd: string): string {
   return join(cwd, '.pi', 'configs', 'llm-council.json');
@@ -110,7 +114,7 @@ function readJson(path: string): Partial<LlmCouncilUserConfig> {
 const userConfig = loadUserConfig();
 
 function loadUserConfig(): LlmCouncilUserConfig {
-  return readJson(GLOBAL_CONFIG_PATH);
+  return readJson(councilConfigPath());
 }
 
 const memberCouncil = userConfig.member?.council ?? DEFAULT_CONFIG.MEMBER.COUNCIL;
@@ -203,6 +207,7 @@ export const CONFIG = {
 export interface ResolvedCouncil {
   member: {
     council: { model: string; displayName?: string | undefined; label: string; systemPrompt: string }[];
+    defaultSystemPrompt: string;
     tools: string[] | null;
     thinking: string | null;
     extensions: string[] | null;
@@ -222,53 +227,103 @@ export interface ResolvedCouncil {
   };
 }
 
-/** Deep-merge a project-local override over the global CONFIG's member/chairman. */
+/** Execution settings reload per call. Display settings remain module-scoped. */
 export function loadCouncil(cwd: string): ResolvedCouncil {
-  const projPath = projectConfigPath(cwd);
-  if (!existsSync(projPath)) {
-    return {
-      member: {
-        council: CONFIG.member.council,
-        tools: CONFIG.member.tools,
-        thinking: CONFIG.member.thinking,
-        extensions: CONFIG.member.extensions,
-        skills: CONFIG.member.skills,
-        contextFiles: CONFIG.member.contextFiles,
-      },
-      chairman: { ...CONFIG.chairman },
-    };
-  }
-
-  const proj = readJson(projPath);
+  const global = loadUserConfig();
+  const proj = readJson(projectConfigPath(cwd));
+  const gm = global.member;
+  const gc = global.chairman;
   const pm = proj.member;
   const pc = proj.chairman;
-
-  const council = (pm?.council ?? CONFIG.member.council).map((m, i) => ({
-    model: m.model,
-    displayName: m.displayName,
-    label: m.label ?? String(i + 1),
-    systemPrompt: m.systemPrompt ?? pm?.defaultSystemPrompt ?? CONFIG.member.defaultSystemPrompt,
-  }));
+  const defaultSystemPrompt =
+    pm?.defaultSystemPrompt ?? gm?.defaultSystemPrompt ?? DEFAULT_CONFIG.MEMBER.DEFAULT_SYSTEM_PROMPT;
+  const council = (pm?.council ?? gm?.council ?? DEFAULT_CONFIG.MEMBER.COUNCIL).map(
+    (m: CouncilMemberUserConfig, i) => ({
+      model: m.model,
+      displayName: m.displayName,
+      label: m.label ?? String(i + 1),
+      systemPrompt: m.systemPrompt ?? defaultSystemPrompt,
+    }),
+  );
+  const chairmanModel = pc?.model ?? gc?.model ?? DEFAULT_CONFIG.CHAIRMAN.MODEL;
 
   return {
     member: {
       council,
-      tools: pm?.tools ?? CONFIG.member.tools,
-      thinking: pm?.thinking ?? CONFIG.member.thinking,
-      extensions: pm?.extensions ?? CONFIG.member.extensions,
-      skills: pm?.skills ?? CONFIG.member.skills,
-      contextFiles: pm?.contextFiles ?? CONFIG.member.contextFiles,
+      defaultSystemPrompt,
+      tools: pm?.tools ?? gm?.tools ?? DEFAULT_CONFIG.MEMBER.TOOLS,
+      thinking:
+        pm?.thinking !== undefined
+          ? pm.thinking
+          : gm?.thinking !== undefined
+            ? gm.thinking
+            : DEFAULT_CONFIG.MEMBER.THINKING,
+      extensions: pm?.extensions ?? gm?.extensions ?? DEFAULT_CONFIG.MEMBER.EXTENSIONS,
+      skills: pm?.skills ?? gm?.skills ?? DEFAULT_CONFIG.MEMBER.SKILLS,
+      contextFiles: pm?.contextFiles ?? gm?.contextFiles ?? DEFAULT_CONFIG.MEMBER.CONTEXT_FILES,
     },
     chairman: {
-      model: pc?.model ?? CONFIG.chairman.model,
-      displayName: pc?.displayName ?? CONFIG.chairman.displayName,
-      systemPrompt: pc?.systemPrompt ?? CONFIG.chairman.systemPrompt,
-      exposePersonas: pc?.exposePersonas ?? CONFIG.chairman.exposePersonas,
-      tools: pc?.tools ?? CONFIG.chairman.tools,
-      thinking: pc?.thinking ?? CONFIG.chairman.thinking,
-      extensions: pc?.extensions ?? CONFIG.chairman.extensions,
-      skills: pc?.skills ?? CONFIG.chairman.skills,
-      contextFiles: pc?.contextFiles ?? CONFIG.chairman.contextFiles,
+      model: chairmanModel,
+      displayName:
+        pc?.displayName ??
+        (pc?.model ? undefined : gc?.displayName) ??
+        (chairmanModel === DEFAULT_CONFIG.CHAIRMAN.MODEL ? DEFAULT_CONFIG.CHAIRMAN.DISPLAY_NAME : undefined),
+      systemPrompt: pc?.systemPrompt ?? gc?.systemPrompt ?? DEFAULT_CONFIG.CHAIRMAN.SYSTEM_PROMPT,
+      exposePersonas: pc?.exposePersonas ?? gc?.exposePersonas ?? DEFAULT_CONFIG.CHAIRMAN.EXPOSE_PERSONAS,
+      tools: pc?.tools ?? gc?.tools ?? DEFAULT_CONFIG.CHAIRMAN.TOOLS,
+      thinking:
+        pc?.thinking !== undefined
+          ? pc.thinking
+          : gc?.thinking !== undefined
+            ? gc.thinking
+            : DEFAULT_CONFIG.CHAIRMAN.THINKING,
+      extensions: pc?.extensions ?? gc?.extensions ?? DEFAULT_CONFIG.CHAIRMAN.EXTENSIONS,
+      skills: pc?.skills ?? gc?.skills ?? DEFAULT_CONFIG.CHAIRMAN.SKILLS,
+      contextFiles: pc?.contextFiles ?? gc?.contextFiles ?? DEFAULT_CONFIG.CHAIRMAN.CONTEXT_FILES,
     },
   };
+}
+
+/** Preserve unrelated settings and config symlinks. Never overwrite invalid JSON. */
+export async function saveCouncilDefaults(selection: CouncilSelection): Promise<void> {
+  const path = councilConfigPath();
+  await withFileMutationQueue(path, async () => {
+    const existing = lstatSync(path, { throwIfNoEntry: false });
+    const target = existing ? realpathSync(path) : path;
+    const value = existing ? JSON.parse(readFileSync(target, 'utf8')) : {};
+    for (const object of [value, value?.member ?? {}, value?.chairman ?? {}]) {
+      if (!object || typeof object !== 'object' || Array.isArray(object)) {
+        throw new Error(`Invalid council config at ${path}. Expected objects. File left unchanged.`);
+      }
+    }
+    const previous = value.member?.council as CouncilMemberUserConfig[] | undefined;
+    value.member = {
+      ...value.member,
+      council: selection.models.map((model) => ({
+        ...previous?.find((member) => sameModelReference(member.model, model)),
+        model,
+      })),
+      thinking: selection.memberThinking,
+    };
+    value.chairman = {
+      ...value.chairman,
+      model: selection.chairman,
+      displayName:
+        value.chairman?.model && sameModelReference(value.chairman.model, selection.chairman)
+          ? value.chairman.displayName
+          : undefined,
+      thinking: selection.chairmanThinking,
+    };
+    mkdirSync(dirname(target), { recursive: true });
+    const temporaryPath = `${target}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, {
+        flag: 'wx',
+        mode: existing ? statSync(target).mode & 0o777 : 0o600,
+      });
+      renameSync(temporaryPath, target);
+    } finally {
+      rmSync(temporaryPath, { force: true });
+    }
+  });
 }
