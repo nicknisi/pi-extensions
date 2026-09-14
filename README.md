@@ -16,15 +16,20 @@ Local paths are added to pi's settings without copying — edits in the repo are
 
 ## Packages
 
+### Code tools
+
+| Package                            | What it does                                                                            | Adds                        |
+| ---------------------------------- | --------------------------------------------------------------------------------------- | --------------------------- |
+| [ast-grep](packages/ast-grep/)     | Structural code search and preview-first rewrites using the installed ast-grep CLI      | `ast_search`, `ast_rewrite` |
+| [codesearch](packages/codesearch/) | Search public GitHub code through grep.app and fetch source files by ref and line range | `codesearch`, `codefetch`   |
+
 ### Productivity
 
 | Package                              | What it does                                                                                                                                                                                                                                                                  | Adds                                         |
 | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
 | [answer](packages/answer/)           | Extracts questions from the last assistant message via a side LLM call, answers them in a tab-through overlay, sends one formatted reply                                                                                                                                      | `/answer`, `ctrl+.`, Q&A overlay             |
-| [ast-grep](packages/ast-grep/)       | Structural code search and preview-first rewrites using the installed ast-grep CLI                                                                                                                                                                                            | `ast_search`, `ast_rewrite`                  |
 | [btw](packages/btw/)                 | Side-channel LLM chat in a floating window — sees branch context, never touches the main agent's context; promote or fork the thread                                                                                                                                          | `/btw`, overlay, `btw-answer` entry type     |
 | [codemode](packages/codemode/)       | Model-written TypeScript orchestrates subagents compositionally (Promise.all fan-out, pipelines) — executed in-process, returns the module result; `=` console prefix and `/cx` named snippets run the same runtime inline                                                    | `codemode` tool, `=` prefix, `/cx` command   |
-| [codesearch](packages/codesearch/)   | Search public GitHub code through grep.app and fetch source files by ref and line range                                                                                                                                                                                       | `codesearch`, `codefetch`                    |
 | [handoff](packages/handoff/)         | Transfers context to a new linked session with a model-generated, editable prompt instead of compacting                                                                                                                                                                       | `/handoff <goal>`                            |
 | [llm-council](packages/llm-council/) | Multiple models answer in parallel as in-process child sessions; a chairman synthesizes                                                                                                                                                                                       | `llm_council` tool with live inline progress |
 | [relay](packages/relay/)             | Brokerless session-to-session messaging — file mailbox that outlives the process; drop-in pi-intercom replacement                                                                                                                                                             | `relay` tool, `/relay`                       |
