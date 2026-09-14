@@ -1,0 +1,40 @@
+{
+  "name": "@nicknisi/pi-ast-grep",
+  "version": "0.1.0",
+  "description": "AST syntax search and preview-first rewrites using the ast-grep CLI",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-package"
+  ],
+  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/ast-grep#readme",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicknisi/pi-extensions.git",
+    "directory": "packages/ast-grep"
+  },
+  "files": [
+    "dist",
+    "index.ts",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "typebox": "^1.1.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

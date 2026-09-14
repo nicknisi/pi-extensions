@@ -61,6 +61,12 @@ importers:
         specifier: ^1.1.0
         version: 1.3.7
 
+  packages/ast-grep:
+    dependencies:
+      typebox:
+        specifier: ^1.1.0
+        version: 1.3.7
+
   packages/auto-theme: {}
 
   packages/btw:
