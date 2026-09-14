@@ -1,0 +1,508 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Standalone Drop-compatible artifact host",
+    "version": "0.1.0",
+    "description": "Independent reference behavior targeting Drop e924002df3e0cd88c6a18c03e45ecc4c2c88c14a after URL and bearer-auth transport configuration. No WorkOS implementation or branding is included. Phase 2 comment/review routes are not implemented. Uploads start private. Legacy clients may omit guards and use serialized last-accepted writes. Pi uses quoted-integer If-Match and durable Idempotency-Key for upload/replacement. Matching retries replay the original result even after newer changes. Keys are retained as bounded tombstones, including after deletion. Reuse with different content is 409. A stale If-Match is 412. Visibility and rename do not advance the content version. Limits: 25 MiB file bytes, 26 MiB multipart envelope, 256 files, 1024 UTF-8 bytes/path, 16 path segments, 1000 title characters, 1000 artifacts, 100 versions/artifact, 1 GiB aggregate assets/history, 10000 retained operations, 4 concurrent upload bodies, 600 owner requests/minute, 3000 viewing auth records. Limits reject before mutation without eviction. All executable file responses carry a CSP sandbox, including direct HTML and SVG navigation."
+  },
+  "security": [{ "ownerBearer": [] }],
+  "paths": {
+    "/api/upload": {
+      "post": {
+        "operationId": "upload",
+        "parameters": [
+          { "$ref": "#/components/parameters/Idempotency" },
+          { "$ref": "#/components/parameters/IfMatch" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/Multipart" },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Published" },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/recent": {
+      "get": {
+        "operationId": "recent",
+        "parameters": [
+          { "name": "scope", "in": "query", "schema": { "enum": ["all", "mine"], "default": "all" } },
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } },
+          { "name": "pageSize", "in": "query", "schema": { "type": "integer", "enum": [10, 25, 100], "default": 25 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Newest-first, clamped pagination",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["current_user_email", "uploads", "total", "page", "pageSize", "scope"],
+                  "properties": {
+                    "current_user_email": { "type": "string" },
+                    "uploads": { "type": "array", "items": { "$ref": "#/components/schemas/Artifact" } },
+                    "total": { "type": "integer" },
+                    "page": { "type": "integer" },
+                    "pageSize": { "type": "integer" },
+                    "scope": { "enum": ["all", "mine"] }
+                  }
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/links": {
+      "get": {
+        "operationId": "links",
+        "responses": {
+          "200": {
+            "description": "Owner catalog, never anonymous",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["current_user_email", "uploads"],
+                  "properties": {
+                    "current_user_email": { "type": "string" },
+                    "uploads": { "type": "array", "items": { "$ref": "#/components/schemas/Artifact" } }
+                  }
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/links/{slug}": {
+      "parameters": [{ "$ref": "#/components/parameters/Slug" }],
+      "get": {
+        "operationId": "metadata",
+        "description": "Additive Pi metadata read",
+        "responses": {
+          "200": {
+            "description": "Current metadata",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Artifact" } } }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "patch": {
+        "operationId": "updateMetadata",
+        "parameters": [{ "$ref": "#/components/parameters/IfMatch" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "minProperties": 1,
+                "additionalProperties": false,
+                "properties": { "title": { "type": "string", "maxLength": 1000 }, "is_public": { "type": "boolean" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Renamed or visibility changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["ok"],
+                  "properties": {
+                    "ok": { "const": true },
+                    "title": { "type": "string" },
+                    "is_public": { "type": "boolean" },
+                    "current_version": { "type": "integer" }
+                  }
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "delete": {
+        "operationId": "deleteArtifact",
+        "parameters": [{ "$ref": "#/components/parameters/IfMatch" }],
+        "responses": {
+          "200": { "$ref": "#/components/responses/Ok" },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/links/{slug}/file": {
+      "parameters": [{ "$ref": "#/components/parameters/Slug" }],
+      "post": {
+        "operationId": "replace",
+        "parameters": [
+          { "$ref": "#/components/parameters/Idempotency" },
+          { "$ref": "#/components/parameters/IfMatch" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/Multipart" },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Published" },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/links/{slug}/bookmark": {
+      "parameters": [{ "$ref": "#/components/parameters/Slug" }],
+      "post": {
+        "operationId": "bookmark",
+        "responses": {
+          "200": { "$ref": "#/components/responses/Bookmark" },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "delete": {
+        "operationId": "unbookmark",
+        "responses": {
+          "200": { "$ref": "#/components/responses/Bookmark" },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/links/{slug}/versions": {
+      "parameters": [{ "$ref": "#/components/parameters/Slug" }],
+      "get": {
+        "operationId": "versions",
+        "responses": {
+          "200": {
+            "description": "Descending archives, excluding current content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["current_version", "versions"],
+                  "properties": {
+                    "current_version": { "type": "integer" },
+                    "versions": { "type": "array", "items": { "$ref": "#/components/schemas/Version" } }
+                  }
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/links/{slug}/versions/{version}/restore": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Slug" },
+        { "name": "version", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 1 } }
+      ],
+      "post": {
+        "operationId": "restore",
+        "parameters": [{ "$ref": "#/components/parameters/IfMatch" }],
+        "responses": {
+          "200": { "$ref": "#/components/responses/Published" },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/owner/viewing-tickets": {
+      "post": {
+        "operationId": "viewingTicket",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["return_path"],
+                "properties": { "return_path": { "type": "string", "pattern": "^/[a-z0-9]{8,16}/$" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One-time canonical sign-in URL, expires in 60 seconds, never persist or log it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["url", "expires_in"],
+                  "properties": { "url": { "type": "string", "format": "uri" }, "expires_in": { "const": 60 } }
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/owner/sign-in": {
+      "parameters": [
+        {
+          "name": "ticket",
+          "in": "query",
+          "required": true,
+          "schema": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        }
+      ],
+      "get": {
+        "security": [],
+        "responses": {
+          "200": { "description": "Top-level read-only sign-in confirmation form. Does not consume ticket." }
+        }
+      },
+      "post": {
+        "security": [],
+        "description": "Requires exact canonical Origin. Atomically consumes ticket, sets HttpOnly SameSite=Strict cookie, Secure under HTTPS. Session expires after 30 minutes.",
+        "responses": {
+          "303": { "description": "Redirect to fixed local return path, ticket removed" },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/owner/logout": {
+      "post": {
+        "security": [{ "viewerCookie": [] }],
+        "description": "Exact canonical Origin required. Revokes this session and all its capabilities.",
+        "responses": { "303": { "description": "Signed out" }, "default": { "$ref": "#/components/responses/Error" } }
+      }
+    },
+    "/{slug}/": {
+      "parameters": [{ "$ref": "#/components/parameters/Slug" }],
+      "get": {
+        "security": [{}, { "ownerBearer": [] }, { "viewerCookie": [] }],
+        "responses": {
+          "200": {
+            "description": "Trusted viewer shell, opaque-origin iframe. Private views use a five-minute slug/current-version capability that cannot outlive its viewing session."
+          },
+          "401": { "description": "Generic private sign-in explanation without private title" },
+          "404": { "description": "Not found" }
+        }
+      },
+      "head": {
+        "security": [{}, { "ownerBearer": [] }, { "viewerCookie": [] }],
+        "responses": {
+          "200": { "description": "Viewer headers only" },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/{slug}/{path}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Slug" },
+        {
+          "name": "path",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string" },
+          "description": "Nested safe virtual path. No dot segments, archives or database access."
+        }
+      ],
+      "get": {
+        "security": [{}, { "ownerBearer": [] }],
+        "responses": {
+          "200": {
+            "description": "Current file with extension MIME, nosniff and response-level sandbox. Anonymous only if public."
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "head": {
+        "security": [{}, { "ownerBearer": [] }],
+        "responses": {
+          "200": { "description": "File headers only" },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/_view/{capability}/{slug}/{path}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/Slug" },
+        {
+          "name": "capability",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        },
+        { "name": "path", "in": "path", "required": true, "schema": { "type": "string" } }
+      ],
+      "get": {
+        "security": [],
+        "description": "Capability is required and checked against exact slug, current version, session and expiry. Cookie is not needed. Grants no owner authority. No credentialed CORS.",
+        "responses": {
+          "200": { "description": "Sandboxed current asset" },
+          "404": { "description": "Invalid, expired or revoked capability, unsafe path, or missing asset" }
+        }
+      },
+      "head": {
+        "security": [],
+        "responses": {
+          "200": { "description": "Capability-authorized asset headers" },
+          "404": { "description": "Not found or unauthorized" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ownerBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Single configured owner. Viewer cookies, capabilities and email headers never establish this authority."
+      },
+      "viewerCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "artifact_viewer",
+        "description": "Read-only private viewer session. Never accepted by owner APIs."
+      }
+    },
+    "parameters": {
+      "Slug": {
+        "name": "slug",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "pattern": "^[a-z0-9]{8,16}$" }
+      },
+      "IfMatch": {
+        "name": "If-Match",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string", "pattern": "^\"[0-9]+\"$" },
+        "description": "Quoted integer content version. Upload accepts 0. Pi always uses guards."
+      },
+      "Idempotency": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" }
+      }
+    },
+    "requestBodies": {
+      "Multipart": {
+        "required": true,
+        "content": {
+          "multipart/form-data": {
+            "schema": {
+              "type": "object",
+              "required": ["files", "paths"],
+              "properties": {
+                "files": { "type": "array", "maxItems": 256, "items": { "type": "string", "format": "binary" } },
+                "paths": {
+                  "type": "string",
+                  "description": "JSON array of safe relative paths in the same order as repeated files. A lone root HTML is normalized to index.html, companion asset paths are preserved."
+                },
+                "title": { "type": "string", "maxLength": 1000 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Artifact": {
+        "type": "object",
+        "required": [
+          "slug",
+          "created_at",
+          "updated_at",
+          "uploader_email",
+          "original_filename",
+          "title",
+          "is_public",
+          "is_bookmarked",
+          "current_version",
+          "comment_count"
+        ],
+        "properties": {
+          "slug": { "type": "string" },
+          "created_at": { "type": "string" },
+          "updated_at": { "type": "string" },
+          "uploader_email": { "type": "string" },
+          "original_filename": { "type": "string" },
+          "title": { "type": "string" },
+          "is_public": { "type": "boolean" },
+          "is_bookmarked": { "type": "boolean" },
+          "current_version": { "type": "integer", "minimum": 1 },
+          "comment_count": { "const": 0 }
+        }
+      },
+      "Version": {
+        "type": "object",
+        "required": [
+          "slug",
+          "version",
+          "archived_at",
+          "archived_by",
+          "original_filename",
+          "file_count",
+          "title",
+          "prefix"
+        ],
+        "properties": {
+          "slug": { "type": "string" },
+          "version": { "type": "integer" },
+          "archived_at": { "type": "string" },
+          "archived_by": { "type": "string" },
+          "original_filename": { "type": "string" },
+          "file_count": { "type": "integer" },
+          "title": { "type": "string" },
+          "prefix": {
+            "type": "string",
+            "description": "Logical archive identifier, never a downloadable filesystem path"
+          }
+        }
+      }
+    },
+    "responses": {
+      "Published": {
+        "description": "Upload or stable-slug replacement/restore. ok is present on replace/restore. Version and visibility are additive.",
+        "headers": { "ETag": { "schema": { "type": "string" }, "description": "Quoted integer current_version" } },
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": ["slug", "url", "current_version", "is_public"],
+              "properties": {
+                "ok": { "const": true },
+                "slug": { "type": "string" },
+                "url": { "type": "string", "format": "uri" },
+                "current_version": { "type": "integer" },
+                "is_public": { "type": "boolean" }
+              }
+            }
+          }
+        }
+      },
+      "Ok": {
+        "description": "Mutation completed",
+        "content": {
+          "application/json": {
+            "schema": { "type": "object", "required": ["ok"], "properties": { "ok": { "const": true } } }
+          }
+        }
+      },
+      "Bookmark": {
+        "description": "Idempotent bookmark state",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": ["ok", "is_bookmarked"],
+              "properties": { "ok": { "const": true }, "is_bookmarked": { "type": "boolean" } }
+            }
+          }
+        }
+      },
+      "Error": {
+        "description": "400 invalid input, 401 missing/invalid authority, 403 origin denied, 404 absent, 409 key mismatch, 412 version conflict, 413 body/file limit, 415 content type, 429 rate/concurrency/auth limit, 500 transaction failure, 507 storage/history/operation limit. No secrets in errors.",
+        "content": {
+          "application/json": {
+            "schema": { "type": "object", "required": ["error"], "properties": { "error": { "type": "string" } } }
+          }
+        }
+      }
+    }
+  }
+}

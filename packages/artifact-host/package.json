@@ -1,0 +1,32 @@
+{
+  "name": "@nicknisi/pi-artifact-host",
+  "version": "0.1.0",
+  "description": "Standalone authenticated HTML artifact publishing host",
+  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/artifact-host#readme",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicknisi/pi-extensions.git",
+    "directory": "packages/artifact-host"
+  },
+  "bin": {
+    "pi-artifact-host": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "!dist/*.test.*",
+    "README.md",
+    "openapi.json",
+    "Dockerfile"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

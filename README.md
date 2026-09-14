@@ -60,6 +60,14 @@ Local paths are added to pi's settings without copying — edits in the repo are
 | [session-name](packages/session-name/)   | Auto-name sessions (heuristic or LLM), mirror to terminal title, name-focused session picker                                 | `/sn`, `/sessions`                                        |
 | [stash](packages/stash/)                 | `ctrl+shift+s` parks the prompt draft on a LIFO stack; pop or auto-restore                                                   | `ctrl+shift+s`, stash widget                              |
 
+### Standalone services
+
+| Package                                  | What it does                                                                                                      |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| [artifact-host](packages/artifact-host/) | Node 24 SQLite host for authenticated artifact publishing and sandboxed public viewing. No Pi runtime dependency. |
+
+The [artifacts extension](packages/artifacts/) optionally publishes rendered links through its existing Share menu and synchronizes explicitly published artifacts. Local review and file sharing remain available without a host.
+
 ### Library
 
 | Package                    | What it does                                                                                                                                                                                                                                                                                                                                                                                           |

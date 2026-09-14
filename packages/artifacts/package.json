@@ -21,6 +21,7 @@
     "config.ts",
     "feedback.ts",
     "review.ts",
+    "remote.ts",
     "reader.ts",
     "reader-styles.ts",
     "assets",

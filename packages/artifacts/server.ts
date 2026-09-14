@@ -4,8 +4,9 @@ import { createServer, type Server, type IncomingMessage, type ServerResponse } 
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { basename, extname } from 'node:path';
 
-import { HOST } from './config.js';
-import { isSafeSlug, listArtifacts, readArtifact, safeArtifactPath } from './utils.js';
+import { CONFIG, HOST } from './config.js';
+import { publishArtifact, publicationStatus, viewingSignIn } from './remote.js';
+import { artifactPath, isSafeSlug, listArtifacts, readArtifact, safeArtifactPath } from './utils.js';
 import { renderCommentMarkdown, renderIndexPage } from './templates.js';
 import { injectAnnotations } from './annotate.js';
 import { renderRevisionComparison } from './review.js';
@@ -296,8 +297,15 @@ async function handleShare(req: IncomingMessage, res: ServerResponse): Promise<v
     return;
   }
   const method = body.method;
-  if (method !== 'copy' && method !== 'gist' && method !== 'image' && method !== 'pdf') {
-    sendJson(res, 400, { error: 'method must be copy, gist, image, or pdf' });
+  if (
+    method !== 'view' &&
+    method !== 'publish' &&
+    method !== 'copy' &&
+    method !== 'gist' &&
+    method !== 'image' &&
+    method !== 'pdf'
+  ) {
+    sendJson(res, 400, { error: 'method must be view, publish, copy, gist, image, or pdf' });
     return;
   }
   const html = readArtifact(body.slug);
@@ -307,6 +315,15 @@ async function handleShare(req: IncomingMessage, res: ServerResponse): Promise<v
   }
   const title = html.match(/<title>(.*?)<\/title>/s)?.[1]?.trim() || body.slug;
   try {
+    if (method === 'view') {
+      sendJson(res, 200, { ok: true, ...(await viewingSignIn(artifactPath(body.slug), CONFIG)) });
+      return;
+    }
+    if (method === 'publish') {
+      const remote = await publishArtifact(artifactPath(body.slug), CONFIG);
+      sendJson(res, 200, { ok: remote.state === 'synced', remote });
+      return;
+    }
     // handleShare only runs on a live server, so state is set.
     const result = await shareBaked(body.slug, title, method, { baseUrl: `http://${HOST}:${state!.port}` });
     sendJson(res, 200, { ok: true, ...result });
@@ -316,6 +333,7 @@ async function handleShare(req: IncomingMessage, res: ServerResponse): Promise<v
 }
 
 async function handle(req: IncomingMessage, res: ServerResponse, clients: Set<ServerResponse>): Promise<void> {
+  if (req.headers.host !== `${HOST}:${state?.port}`) return sendJson(res, 403, { error: 'loopback host required' });
   const parsedUrl = new URL(req.url ?? '/', `http://${HOST}`);
   const url = parsedUrl.pathname;
   if (url.startsWith('/api/') && req.method !== 'GET') {
@@ -327,6 +345,13 @@ async function handle(req: IncomingMessage, res: ServerResponse, clients: Set<Se
       sendJson(res, 403, { error: 'same-origin JSON requests required' });
       return;
     }
+  }
+  if (req.method === 'GET' && url === '/api/publication') {
+    const slug = parsedUrl.searchParams.get('slug');
+    if (!slug || !isSafeSlug(slug)) return sendJson(res, 400, { error: 'invalid slug' });
+    if (!readArtifact(slug)) return sendJson(res, 404, { error: 'no such artifact' });
+    sendJson(res, 200, publicationStatus(artifactPath(slug), CONFIG));
+    return;
   }
   if (req.method === 'GET' && (url === '/api/annotations' || url === '/api/revision')) {
     const slug = parsedUrl.searchParams.get('slug');
@@ -396,6 +421,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, clients: Set<Se
     sendJson(res, 400, { error: 'invalid URL encoding' });
     return;
   }
+  // Publication bookkeeping is local-only, not a downloadable artifact asset.
+  if (/\.remote\.json(?:\.|$)/i.test(decoded)) return sendJson(res, 404, { error: 'not found' });
   const safe = safeArtifactPath(decoded);
   if (!safe || !existsSync(safe) || !statSync(safe).isFile()) {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });

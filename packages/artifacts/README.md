@@ -23,20 +23,20 @@ pi install /Users/nicknisi/Developer/pi-extensions/packages/artifacts
 
 Parameters (TypeBox schema):
 
-| Param              | Type / values                                                   | Default                             | Notes                                                                                                        |
-| ------------------ | --------------------------------------------------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `action`           | `create` \| `update` \| `open` \| `list` \| `share` \| `answer` | required                            | `answer` adds a reply without editing the artifact                                                           |
-| `title`            | string                                                          | required except for list            | slug derived from it, kebab-case with an 80-character cap                                                    |
-| `annotationId`     | string                                                          | required for answer                 | ID of a sent question                                                                                        |
-| `decisions`        | array                                                           | `[]`                                | Native choices. See Questions, decisions, and evidence below.                                                |
-| `evidence`         | array                                                           | `[]`                                | Expandable source material. See Questions, decisions, and evidence below.                                    |
-| `method`           | `clipboard` \| `reveal` \| `gist` \| `image` \| `pdf`           | `clipboard` (share only)            | how to hand off the artifact: clipboard copy, file-manager reveal, GitHub gist, PNG screenshot, or PDF print |
-| `public`           | boolean                                                         | `false` (share method=gist only)    | make the gist public; default is a secret gist                                                               |
-| `width` / `height` | integer                                                         | `1280` / `800` (method=image only)  | viewport size for the screenshot; it becomes the image size                                                  |
-| `kind`             | `markdown` \| `html`                                            | required for create/update          | never auto-detected from content                                                                             |
-| `content`          | string                                                          | —                                   | inline markdown or HTML                                                                                      |
-| `path`             | string                                                          | —                                   | alternative to `content`: read file relative to cwd (2 MB cap; `kind` still required)                        |
-| `open`             | boolean                                                         | `true` on create, `false` on update | auto-open in browser after write                                                                             |
+| Param              | Type / values                                                      | Default                             | Notes                                                                                                        |
+| ------------------ | ------------------------------------------------------------------ | ----------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `action`           | `create` \| `update` \| `open` \| `list` \| `share` \| `answer`    | required                            | `answer` adds a reply without editing the artifact                                                           |
+| `title`            | string                                                             | required except for list            | slug derived from it, kebab-case with an 80-character cap                                                    |
+| `annotationId`     | string                                                             | required for answer                 | ID of a sent question                                                                                        |
+| `decisions`        | array                                                              | `[]`                                | Native choices. See Questions, decisions, and evidence below.                                                |
+| `evidence`         | array                                                              | `[]`                                | Expandable source material. See Questions, decisions, and evidence below.                                    |
+| `method`           | `clipboard` \| `reveal` \| `gist` \| `image` \| `pdf` \| `publish` | `clipboard` (share only)            | how to hand off the artifact: clipboard copy, file-manager reveal, GitHub gist, PNG screenshot, or PDF print |
+| `public`           | boolean                                                            | `false` (share method=gist only)    | make the gist public; default is a secret gist                                                               |
+| `width` / `height` | integer                                                            | `1280` / `800` (method=image only)  | viewport size for the screenshot; it becomes the image size                                                  |
+| `kind`             | `markdown` \| `html`                                               | required for create/update          | never auto-detected from content                                                                             |
+| `content`          | string                                                             | —                                   | inline markdown or HTML                                                                                      |
+| `path`             | string                                                             | —                                   | alternative to `content`: read file relative to cwd (2 MB cap; `kind` still required)                        |
+| `open`             | boolean                                                            | `true` on create, `false` on update | auto-open in browser after write                                                                             |
 
 Behavior per action:
 
@@ -216,6 +216,38 @@ Copy [`artifacts.example.json`](artifacts.example.json) there. All keys optional
 | `maxWidth`    | number (px, > 300)          | `860`     | Content column width                                                            |
 
 Markdown defaults to coral accents (`#ffa293` dark, `#b74445` light). Explicit `accent` and `accentLight` settings override those defaults too. `theme` sets the initial reader scheme unless a browser preference has been saved. No new config keys are required.
+
+## Hosted publishing (optional)
+
+Add `remote` to `artifacts.json`, then restart Pi:
+
+```json
+{
+  "remote": {
+    "url": "https://artifacts.example.com",
+    "tokenEnv": "PI_ARTIFACTS_TOKEN",
+    "autoSync": true
+  }
+}
+```
+
+Absent configuration disables networking. Invalid remote settings disable publishing without disabling local rendering. The URL must be an HTTPS origin with no credentials, path, query or fragment. HTTP is allowed only for literal `127.0.0.1` or `[::1]` development hosts. `tokenEnv` names a local environment variable, never the token itself. The token is resolved only for privileged requests and never sent to the browser. Restart to reload configuration.
+
+Config alone never publishes. Click **Share > Publish link**, or explicitly ask for `artifact action=share method=publish`. Only rendered HTML is uploaded, with the known live-reload script removed. Local comments, source mirrors and sidecar files are not uploaded. Existing copy image/PDF/file/gist behavior is unchanged.
+
+Once published, Share offers **Copy link** and **Sync now / retry**. Clipboard denial exposes a selectable URL. A local status read (`GET /api/publication?slug=...`) never uploads. `create` and `update` write local files first, then best-effort sync already published artifacts when `autoSync` is true. Tool details include `remote` status and keep the local editing URL separate. Set `autoSync: false` for manual-only sync.
+
+Publishing uses Drop multipart upload, persists the returned server slug, then explicitly PATCHes public visibility. A failed visibility change is unsynced, not a successful publication. Retries retain the same slug. Replacement always uses quoted-integer `If-Match` and a durable `Idempotency-Key`. A remotely revoked artifact stays private on ordinary auto-sync. Only an explicit Publish link makes it public again. Copy link is offered only for the last confirmed public state, which may change independently on the host.
+
+Failures keep local files intact. Conflicts are never forced automatically. An explicit retry reads current metadata before guarded replacement. Requests refuse redirects, time out after ten seconds, bound response JSON to 16 KiB, and redact remote errors.
+
+Version-2 `<slug>.remote.json` tracks host, slug, accepted version, digest, first-publication completion, visibility, and pending operation. Before sending, rendered bytes are saved in a private `.remote.json.pending-KEY` sidecar. A lost response replays those exact bytes and key before applying newer local edits, avoiding duplicate uploads. These files are never served or uploaded as assets. Preserve mappings and pending snapshots for recovery. A cross-process `.remote.json.lock` prevents concurrent bookkeeping writes. After a confirmed process crash, remove only the empty lock directory before retrying, not the mapping or pending bytes.
+
+Incompatible old mappings are preserved and require an explicit recovery decision: back up and move aside the old mapping, then explicitly publish. This creates a new link and may leave an old hosted copy. Host changes never auto-publish, and an explicit publication preserves a backup mapping and warns about the old copy. Pi exposes publication and private sign-in, not the host's broader management/history APIs. Hosted feedback is deferred to phase 2.
+
+**View private (sign in)** explicitly requests a 60-second ticket. Open the resulting URL and confirm read-only sign-in. A selectable URL and ordinary link remain if browser opening fails. The ticket is never saved in publication metadata. The host's HttpOnly viewer cookie grants no upload, listing, replacement, deletion, bookmark, or restore authority.
+
+Public links can be forwarded. Publish only public-safe rendered content. Hosted HTML and direct SVG/HTML responses are sandboxed without same-origin privileges, forms, popups or browser storage. The host supports multipart companion assets from configured Drop clients, but Pi publishes only its rendered self-contained document, not arbitrary local asset files. See [the standalone Node 24 host](../artifact-host/README.md) for the full API, limits, TLS, backups and security model.
 
 ## Styling
 
