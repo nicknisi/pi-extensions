@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-codesearch",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Public GitHub code search and focused file fetching for Pi",
   "keywords": [
     "pi",
