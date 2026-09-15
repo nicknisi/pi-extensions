@@ -2,6 +2,7 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { parseRemoteConfig, type RemoteSettings } from './remote.js';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 
 /** Directory for artifact files, relative to project root (mirrors plan-mode's .pi/plans). */
@@ -15,7 +16,7 @@ export const MERMAID_CDN = 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid
 
 // ─── User config (optional): ~/.pi/agent/configs/artifacts.json ───────────────
 
-export interface ArtifactsConfig {
+export interface ArtifactsConfig extends RemoteSettings {
   /** "auto" follows the OS via prefers-color-scheme; "light"/"dark" pin one scheme. */
   theme: 'auto' | 'light' | 'dark';
   /** Accent color used on the dark scheme (links, badge, blockquote). */
@@ -39,13 +40,16 @@ function loadConfig(defaults = DEFAULTS): ArtifactsConfig {
   try {
     const raw = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8')) as Partial<ArtifactsConfig>;
     return {
+      ...parseRemoteConfig(raw.remote),
       theme: raw.theme === 'light' || raw.theme === 'dark' ? raw.theme : defaults.theme,
       accent: typeof raw.accent === 'string' ? raw.accent : defaults.accent,
       accentLight: typeof raw.accentLight === 'string' ? raw.accentLight : defaults.accentLight,
       maxWidth: typeof raw.maxWidth === 'number' && raw.maxWidth > 300 ? raw.maxWidth : defaults.maxWidth,
     };
-  } catch {
-    return defaults;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? defaults
+      : { ...defaults, remoteError: 'Could not read artifacts.json. Remote publishing is disabled.' };
   }
 }
 

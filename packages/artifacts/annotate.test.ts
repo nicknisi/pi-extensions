@@ -32,6 +32,28 @@ describe('emitted browser review logic', () => {
       expect(() => new Script(script!)).not.toThrow();
     }
   });
+  it('adds hosted publishing without removing existing share methods or persisting drafts on publish', () => {
+    for (const label of [
+      'Publish link',
+      'Copy link',
+      'Sync now / retry',
+      'Copy image',
+      'Copy PDF',
+      'Copy file',
+      'Create gist link',
+      'artifacts.json',
+    ])
+      expect(source).toContain(label);
+    const refresh = source.slice(
+      source.indexOf('  function refreshPublication()'),
+      source.indexOf('  if (shareBtn && shareMenu)'),
+    );
+    expect(refresh).toContain('/api/publication?slug=');
+    expect(refresh).not.toContain('/api/share');
+    expect(source).toContain('input.focus(); input.select()');
+    expect(source).not.toContain('Authorization');
+    expect(source).not.toContain('tokenEnv');
+  });
   it('keeps the composer in the panel and does not clear it when the panel closes', () => {
     expect(source).toContain('panel.querySelector(".composer-slot").appendChild(popover)');
     const state = { mode: 'annotate', pending: { exact: 'original passage' } };
