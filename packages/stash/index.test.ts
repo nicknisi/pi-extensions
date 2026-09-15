@@ -2,13 +2,13 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { expect, it, vi } from 'vitest';
 import stash from './index.js';
 
-it('stashes and restores drafts with Ctrl+Shift+S and shows the matching hint', async () => {
+it('stashes and restores drafts with Ctrl+S and shows the matching hint', async () => {
   const registerShortcut = vi.fn<ExtensionAPI['registerShortcut']>();
   stash({ registerShortcut, on: vi.fn() } as unknown as ExtensionAPI);
 
   expect(registerShortcut).toHaveBeenCalledOnce();
   const [key, { handler }] = registerShortcut.mock.calls[0]!;
-  expect(key).toBe('ctrl+shift+s');
+  expect(key).toBe('ctrl+s');
 
   let text = 'first draft';
   const setWidget = vi.fn();
@@ -26,7 +26,7 @@ it('stashes and restores drafts with Ctrl+Shift+S and shows the matching hint', 
 
   await handler(ctx);
   expect(text).toBe('');
-  expect(setWidget).toHaveBeenLastCalledWith('message-stash', [expect.stringContaining('ctrl+shift+s to restore')]);
+  expect(setWidget).toHaveBeenLastCalledWith('message-stash', [expect.stringContaining('ctrl+s to restore')]);
 
   text = 'second draft';
   await handler(ctx);
