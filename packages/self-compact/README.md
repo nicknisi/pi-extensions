@@ -173,29 +173,22 @@ Works in interactive TUI, print mode (`pi -p`), and JSON mode
 until the compaction and continuation turn finish, so `result` side effects land
 before exit.
 
-## Verification
+## Development
 
 All checks run from the repository root.
 
 ```bash
-pnpm --filter @nicknisi/pi-self-compact build       # package-local build
-pnpm exec vitest run packages/self-compact          # full suite (unit + real-Pi fixture + CLI survival)
-pnpm --filter @nicknisi/pi-self-compact typecheck   # package typecheck
-pnpm exec oxlint packages/self-compact              # lint
-pnpm exec oxfmt --check packages/self-compact       # format check
-node packages/self-compact/verify/live.mjs          # deterministic self-test + bounded real-model acceptance
-node packages/self-compact/verify/live.mjs --self-test  # self-test only (no model spend)
-node packages/self-compact/verify/boundary.mjs check    # approved-path write boundary
+pnpm --filter @nicknisi/pi-self-compact build
+pnpm exec vitest run packages/self-compact packages/statusline
+pnpm --filter @nicknisi/pi-self-compact typecheck
+pnpm exec oxlint packages/self-compact packages/statusline
+pnpm exec oxfmt --check packages/self-compact packages/statusline
 ```
 
-The live driver launches a real Pi process with only this extension, drives one
-autonomous checkpoint-and-continue cycle, and asserts the exact `done` output,
-no duplicate write, and no replay on reload. It checks all three CLI launch
-configurations and then a second handoff whose note says the task is complete;
-that continuation must not rewrite the result. It fails closed
-on missing credentials, an unsupported runtime/model, a timeout, or a skipped
-required scenario. Fresh evidence is written to `verify/results/live.json`; see
-`verify/RESULTS.md` for the recorded outcomes.
+The suite covers lifecycle recovery, thresholds, prompts, packaging, and statusline
+integration. Pi session and CLI tests use an offline scripted provider, so no
+model credentials or paid API calls are required. The helpers under `verify/`
+are fixtures used by those tests.
 
 ## Dependencies
 

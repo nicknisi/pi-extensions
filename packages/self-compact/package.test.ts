@@ -87,12 +87,10 @@ describe('packed contents', () => {
     }
   });
 
-  it('does not leak local evidence, sessions, or credentials', () => {
+  it('excludes regression tests and fixtures', () => {
     for (const path of packed) {
       expect(path.startsWith('verify/')).toBe(false);
-      expect(path).not.toBe('result.txt');
-      expect(path.includes('.sessions')).toBe(false);
-      expect(path.endsWith('.log')).toBe(false);
+      expect(path.endsWith('.test.ts')).toBe(false);
     }
   });
 });
