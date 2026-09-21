@@ -1,0 +1,53 @@
+{
+  "name": "@nicknisi/pi-checkpoint",
+  "version": "0.1.0",
+  "description": "Durable self-compaction: a note-bearing self_compact tool that checkpoints a long-running agent and resumes its exact next action",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-package"
+  ],
+  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/checkpoint#readme",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicknisi/pi-extensions.git",
+    "directory": "packages/checkpoint"
+  },
+  "files": [
+    "dist",
+    "index.ts",
+    "extensions",
+    ".pi/self-compact"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit -p tsconfig.json",
+    "build": "tsgo -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "typebox": "^1.1.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.87.0",
+    "@earendil-works/pi-coding-agent": "0.87.0",
+    "@earendil-works/pi-tui": "0.87.0",
+    "@types/node": "^24.0.0",
+    "vitest": "^3.2.4"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.87.0",
+    "@earendil-works/pi-coding-agent": ">=0.87.0"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/self-compact/self-compact.ts"
+    ]
+  }
+}
