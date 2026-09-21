@@ -4,7 +4,14 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { uuidv7 } from '@earendil-works/pi-ai';
-import type { ExtensionAPI, ExtensionContext, SessionEntry, ToolDefinition } from '@earendil-works/pi-coding-agent';
+import {
+  createEventBus,
+  type EventBus,
+  type ExtensionAPI,
+  type ExtensionContext,
+  type SessionEntry,
+  type ToolDefinition,
+} from '@earendil-works/pi-coding-agent';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import extension, {
   INFO_COMMAND,
@@ -30,6 +37,7 @@ interface SentMessage {
 }
 
 interface Harness {
+  events: EventBus;
   call(note: unknown): Promise<unknown>;
   entries: SessionEntry[];
   appended: Array<{ type: string; data: unknown }>;
@@ -70,7 +78,9 @@ function makeHarness(options: HarnessOptions | string[] = {}): Harness {
   let widgetContent: string[] | undefined;
   let usageTokens: number | null = null;
 
+  const events = createEventBus();
   const pi = {
+    events,
     registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool),
     on: (event: string, handler: EventHandler) => {
       const list = handlers.get(event) ?? [];
@@ -137,6 +147,7 @@ function makeHarness(options: HarnessOptions | string[] = {}): Harness {
   if (!tool) throw new Error('self_compact tool was not registered');
 
   return {
+    events,
     call: (note: unknown) => tool.execute('call-1', { note_to_self: note }, undefined, undefined, ctx),
     entries,
     appended,
@@ -474,6 +485,53 @@ describe('recovery after interrupted compaction', () => {
     expect(String(h.sent()[0]?.content)).toContain('saved unfinished action');
     await h.call('saved unfinished action');
     expect(h.state()?.phase).toBe('pending');
+  });
+});
+
+describe('statusline color integration', () => {
+  it('publishes zone colors while keeping the standalone widget as a fallback', async () => {
+    const h = makeHarness();
+    const colors: unknown[] = [];
+    h.events.on('self-compact:context-color', (color) => colors.push(color));
+    await h.fire('session_start');
+    expect(colors.at(-1)).toBe('dim');
+    for (const [tokens, expected] of [
+      [139000, 'success'],
+      [230000, 'accent'],
+      [255000, 'warning'],
+      [270000, 'error'],
+    ] as const) {
+      h.setUsage(tokens);
+      await h.fire('turn_end');
+      expect(colors.at(-1)).toBe(expected);
+      expect(h.widget()).toBeDefined();
+    }
+  });
+
+  it('hides the duplicate widget when statusline claims the bar, and restores it on release', async () => {
+    const h = makeHarness();
+    await h.fire('session_start');
+    expect(h.widget()).toBeDefined();
+    h.events.emit('statusline:context-bar', true);
+    expect(h.widget()).toBeUndefined();
+    h.setUsage(255000);
+    await h.fire('turn_end');
+    expect(h.widget()).toBeUndefined();
+    h.events.emit('statusline:context-bar', false);
+    expect(h.widget()).toBeDefined();
+  });
+
+  it('discovers an already loaded statusline and clears its color on shutdown', async () => {
+    const h = makeHarness();
+    const colors: unknown[] = [];
+    h.events.on('statusline:request-context-bar', () => h.events.emit('statusline:context-bar', true));
+    h.events.on('self-compact:context-color', (color) => colors.push(color));
+    await h.fire('session_start');
+    expect(h.widget()).toBeUndefined();
+    await h.fire('session_shutdown');
+    expect(colors.at(-1)).toBeUndefined();
+    h.events.emit('statusline:context-bar', false);
+    expect(h.widget()).toBeUndefined();
   });
 });
 

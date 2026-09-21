@@ -216,10 +216,12 @@ const CONTEXT_BAR_MAX = 20;
 
 // ── Helper: build a progress bar ─────────────────────────────────────────────
 
-function buildBar(percent: number, width: number, theme: Pick<Theme, 'fg'>): string {
+type ContextColor = 'success' | 'accent' | 'warning' | 'error' | 'dim';
+
+function buildBar(percent: number, width: number, theme: Pick<Theme, 'fg'>, contextColor?: ContextColor): string {
   const filled = Math.round((percent * width) / 100);
   const empty = width - filled;
-  const color = percent > 50 ? 'success' : percent > 20 ? 'warning' : 'error';
+  const color = contextColor ?? (percent > 50 ? 'success' : percent > 20 ? 'warning' : 'error');
   let bar = '';
   for (let i = 0; i < filled; i++) bar += '━';
   for (let i = 0; i < empty; i++) bar += '╌';
@@ -300,6 +302,22 @@ let onThinkingUpdated: (() => void) | undefined;
 // ── Extension ────────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+  // Optional self-compact integration: policy owns the color; this footer keeps
+  // its existing meter, sizing and remaining-context semantics.
+  let contextColor: ContextColor | undefined;
+  let footerActive = false;
+  let onContextUpdated: (() => void) | undefined;
+  const unsubscribeColor = pi.events.on('self-compact:context-color', (color) => {
+    contextColor =
+      color === 'success' || color === 'accent' || color === 'warning' || color === 'error' || color === 'dim'
+        ? color
+        : undefined;
+    onContextUpdated?.();
+  });
+  const unsubscribeDiscovery = pi.events.on('statusline:request-context-bar', () => {
+    if (footerActive) pi.events.emit('statusline:context-bar', true);
+  });
+
   pi.on('thinking_level_select', async () => {
     onThinkingUpdated?.();
   });
@@ -338,6 +356,11 @@ export default function (pi: ExtensionAPI) {
 
   pi.on('session_shutdown', async () => {
     removeStatus();
+    footerActive = false;
+    pi.events.emit('statusline:context-bar', false);
+    unsubscribeColor();
+    unsubscribeDiscovery();
+    onContextUpdated = undefined;
   });
 
   pi.on('session_start', async (event) => {
@@ -366,6 +389,9 @@ export default function (pi: ExtensionAPI) {
       onPrUpdated = () => tui.requestRender();
       onUsageUpdated = () => tui.requestRender();
       onThinkingUpdated = () => tui.requestRender();
+      onContextUpdated = () => tui.requestRender();
+      footerActive = true;
+      pi.events.emit('statusline:context-bar', true);
 
       // Cost/lines totals need an O(session) walk of every entry — cache them
       // and recompute only when the branch grows or every 5s, not per render.
@@ -379,6 +405,9 @@ export default function (pi: ExtensionAPI) {
           onPrUpdated = undefined;
           onUsageUpdated = undefined;
           onThinkingUpdated = undefined;
+          onContextUpdated = undefined;
+          footerActive = false;
+          pi.events.emit('statusline:context-bar', false);
         },
         invalidate() {},
         render(width: number): string[] {
@@ -518,7 +547,7 @@ export default function (pi: ExtensionAPI) {
             visibleWidth(right) +
             1; // min 1 gap between left and right
           const barWidth = Math.max(5, Math.min(CONTEXT_BAR_MAX, innerWidth - otherWidth));
-          const contextBar = buildBar(remaining, barWidth, theme);
+          const contextBar = buildBar(remaining, barWidth, theme, contextColor);
           segments.push(`${ctxLabel}${contextBar}${ctxTail}`);
 
           const left = segments.join(SEP);

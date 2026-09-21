@@ -219,6 +219,12 @@ export default function (pi: ExtensionAPI) {
   let hardActive = false;
   let hardOriginalTools: string[] | undefined;
   let toolsBeforeTree: string[] | undefined;
+  let statuslinePresent = false;
+  let lastUiContext: ExtensionContext | undefined;
+  const unsubscribeStatusline = pi.events.on('statusline:context-bar', (available) => {
+    statuslinePresent = available === true;
+    if (!disposed && lastUiContext) updateWidget(lastUiContext);
+  });
   // Timers scheduling a post-reconciliation delivery, cleared on shutdown so a
   // late callback cannot touch a replaced session.
   const reconcileTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -535,6 +541,7 @@ export default function (pi: ExtensionAPI) {
       // Keep the in-memory lock; the durable note from the pending phase remains.
     }
     lockTools();
+    updateWidget(ctx);
     ctx.ui.notify(`self-compact: compaction failed and the handoff remains locked: ${message}`, 'error');
   }
 
@@ -606,10 +613,29 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  /** Refresh the above-editor context widget. Clears/no-ops without UI. */
+  /** Publish the policy color and show the standalone widget only without a statusline. */
   function updateWidget(ctx: ExtensionContext): void {
-    if (!ctx.hasUI) return;
+    lastUiContext = ctx;
     ensureConfig(ctx);
+    const tokens = measuredTokens(ctx);
+    const level = tokens === null ? undefined : currentLevel(tokens);
+    const failed = currentState(ctx)?.phase === 'failed';
+    const color =
+      !config?.ok || failed || hardActive || level === 'hard'
+        ? 'error'
+        : level === 'warning'
+          ? 'warning'
+          : level === 'soft'
+            ? 'accent'
+            : tokens === null
+              ? 'dim'
+              : 'success';
+    pi.events.emit('self-compact:context-color', color);
+    if (!ctx.hasUI) return;
+    if (statuslinePresent) {
+      ctx.ui.setWidget(WIDGET_KEY, undefined);
+      return;
+    }
     if (!config || !config.ok) {
       ctx.ui.setWidget(WIDGET_KEY, ['self-compact: thresholds not configured (see notice)'], {
         placement: 'aboveEditor',
@@ -617,7 +643,6 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     const t = config.thresholds;
-    const tokens = measuredTokens(ctx);
     // Cached tokens describe the current prompt only, bounded by measured usage.
     let cachedTokens: number | null = null;
     if (tokens !== null) {
@@ -931,7 +956,10 @@ export default function (pi: ExtensionAPI) {
     // ready-to-deliver / pending resume once the agent is idle (agent_settled).
   }
 
-  pi.on('session_start', async (_event, ctx) => restoreBranchState(ctx));
+  pi.on('session_start', async (_event, ctx) => {
+    restoreBranchState(ctx);
+    pi.events.emit('statusline:request-context-bar', undefined);
+  });
   pi.on('session_before_tree', async (_event, ctx) => {
     const state = currentState(ctx);
     toolsBeforeTree = state && isLockedPhase(state.phase) ? [...state.originalActiveTools] : activeToolsSnapshot();
@@ -1050,5 +1078,8 @@ export default function (pi: ExtensionAPI) {
     for (const timer of reconcileTimers) clearTimeout(timer);
     reconcileTimers.clear();
     if (ctx.hasUI) ctx.ui.setWidget(WIDGET_KEY, undefined);
+    lastUiContext = undefined;
+    unsubscribeStatusline();
+    pi.events.emit('self-compact:context-color', undefined);
   });
 }
