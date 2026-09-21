@@ -1,4 +1,4 @@
-import { uuidv7 } from '@earendil-works/pi-ai';
+import { fauxAssistantMessage, uuidv7 } from '@earendil-works/pi-ai';
 import {
   createEventBus,
   type EventBus,
@@ -7,9 +7,12 @@ import {
   type SessionEntry,
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import extension, {
   INFO_COMMAND,
+  CONTINUATION_MESSAGE_TYPE,
+  DELIVERY_ENTRY,
+  GUIDANCE_MESSAGE_TYPE,
   MAX_NOTE_LENGTH,
   NOW_COMMAND,
   STATE_ENTRY,
@@ -37,6 +40,7 @@ interface Harness {
   active(): string[];
   state(): HandoffState | undefined;
   setAppendThrow(value: boolean): void;
+  setSendThrow(value: boolean): void;
   ctx: ExtensionContext;
   fire(event: string, payload?: unknown): Promise<EventResult[]>;
   runCommand(name: string, args?: string): Promise<void>;
@@ -58,10 +62,26 @@ function makeHarness(options: HarnessOptions | string[] = {}): Harness {
   const initialActive = opts.initialActive ?? ['read', 'bash', 'edit', 'write', TOOL_NAME];
   const contextWindow = opts.contextWindow ?? 1_000_000;
 
-  const entries: SessionEntry[] = [];
+  const entries: SessionEntry[] = [
+    {
+      type: 'message',
+      id: 'seed-user',
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      message: { role: 'user', content: 'Earlier task context', timestamp: Date.now() },
+    },
+    {
+      type: 'message',
+      id: 'seed-assistant',
+      parentId: 'seed-user',
+      timestamp: new Date().toISOString(),
+      message: fauxAssistantMessage('Recent response'),
+    },
+  ];
   const appended: Array<{ type: string; data: unknown }> = [];
   let active = [...initialActive];
   let appendThrows = false;
+  let sendThrows = false;
   const tools = new Map<string, ToolDefinition>();
   const handlers = new Map<string, EventHandler[]>();
   const commands = new Map<string, CommandHandler>();
@@ -94,7 +114,7 @@ function makeHarness(options: HarnessOptions | string[] = {}): Harness {
         customType: type,
         data,
         id: uuidv7(),
-        parentId: null,
+        parentId: entries.at(-1)?.id ?? null,
         timestamp: new Date().toISOString(),
       } as unknown as SessionEntry);
     },
@@ -104,6 +124,7 @@ function makeHarness(options: HarnessOptions | string[] = {}): Harness {
       active = [...names];
     },
     sendMessage: (message: { customType?: string; content: unknown }, options?: SentMessage['options']) => {
+      if (sendThrows) throw new Error('continuation submission failed');
       sentMessages.push({ customType: message.customType, content: message.content, options });
     },
   } as unknown as ExtensionAPI;
@@ -111,7 +132,7 @@ function makeHarness(options: HarnessOptions | string[] = {}): Harness {
   // Seed explicit flag overrides (applied after registerFlag defaults below).
   const overrides = opts.flags ?? {};
 
-  extension(pi);
+  extension(pi, () => 1);
   for (const [name, value] of Object.entries(overrides)) flags.set(name, value);
 
   const ctx = {
@@ -148,6 +169,9 @@ function makeHarness(options: HarnessOptions | string[] = {}): Harness {
     state: () => readHandoffState(entries),
     setAppendThrow: (value: boolean) => {
       appendThrows = value;
+    },
+    setSendThrow: (value: boolean) => {
+      sendThrows = value;
     },
     ctx,
     fire: async (event: string, payload: unknown = { type: event }) => {
@@ -275,9 +299,10 @@ describe('threshold enforcement', () => {
     expect(h.sent()).toHaveLength(0);
     h.setUsage(230000); // >= soft 225k
     await h.fire('agent_settled');
-    expect(h.sent().filter((m) => m.customType === 'self-compact:guidance-soft')).toHaveLength(1);
+    expect(h.notes()).toHaveLength(1);
     await h.fire('agent_settled');
-    expect(h.sent().filter((m) => m.customType === 'self-compact:guidance-soft')).toHaveLength(1);
+    expect(h.notes()).toHaveLength(1);
+    expect(h.sent()).toHaveLength(0);
   });
 
   it('escalates to a stronger warning when usage crosses the warning threshold', async () => {
@@ -287,7 +312,7 @@ describe('threshold enforcement', () => {
     await h.fire('turn_end');
     h.setUsage(255000); // >= warning 250k
     await h.fire('turn_end');
-    expect(h.sent().some((m) => m.customType === 'self-compact:guidance-warning')).toBe(true);
+    expect(h.notes().at(-1)?.type).toBe('warning');
   });
 
   it('keeps ordinary tools executable below the hard cutoff', async () => {
@@ -370,17 +395,25 @@ describe('threshold enforcement', () => {
     await h.fire('session_start');
     h.setUsage(230000);
     await h.fire('agent_settled');
-    expect(h.sent()).toHaveLength(1); // queued for the next real turn, not a new turn
-    expect(h.sent()[0]?.options).toEqual({ triggerTurn: false, deliverAs: 'nextTurn' });
+    expect(h.sent()).toHaveLength(0);
+    const [context] = await h.fire('context', { messages: [] });
+    expect(JSON.stringify(context)).toContain('230000');
   });
 
-  it('steers ongoing work at warning instead of waiting for the task to finish', async () => {
+  it('refreshes warning numbers for every request without persisting stale guidance', async () => {
     const h = makeHarness();
     await h.fire('session_start');
     h.ctx.isIdle = () => false;
     h.setUsage(255000);
     await h.fire('turn_end');
-    expect(h.sent()[0]?.options).toEqual({ triggerTurn: false, deliverAs: 'steer' });
+    const [first] = await h.fire('context', { messages: [] });
+    expect(JSON.stringify(first)).toContain('255000');
+    h.setUsage(259000);
+    const [second] = await h.fire('context', first);
+    expect(JSON.stringify(second)).toContain('259000');
+    expect(JSON.stringify(second)).not.toContain('255000');
+    expect((second as { messages: unknown[] }).messages).toHaveLength(1);
+    expect(h.sent()).toHaveLength(0);
   });
 
   it('lets the model answer a hard-cutoff tool rejection with self_compact', async () => {
@@ -393,36 +426,68 @@ describe('threshold enforcement', () => {
   });
 });
 
-describe('handoff lifecycle continuation waiting', () => {
-  it('keeps the settled handler alive beyond 30 seconds until the continuation finishes', async () => {
-    vi.useFakeTimers();
-    try {
-      const h = makeHarness();
-      await h.call('Continue a long-running task');
-      h.entries.push({
-        type: 'custom',
-        customType: STATE_ENTRY,
-        data: { ...h.state(), phase: 'ready-to-deliver' },
-        id: 'ready',
-        parentId: null,
-        timestamp: new Date().toISOString(),
-      } as SessionEntry);
-      let idleChecks = 0;
-      let completed = false;
-      h.ctx.isIdle = () => ++idleChecks === 1 || completed;
-      let returned = false;
-      const running = h.fire('agent_settled').then(() => {
-        returned = true;
-      });
-      await vi.advanceTimersByTimeAsync(31000);
-      expect(returned).toBe(false);
-      completed = true;
-      await vi.advanceTimersByTimeAsync(100);
-      await running;
-      expect(h.active()).toContain(TOOL_NAME);
-    } finally {
-      vi.useRealTimers();
-    }
+describe('journaled continuation delivery', () => {
+  it('retains a retryable handoff when continuation submission throws', async () => {
+    const h = makeHarness();
+    await h.call('Unfinished work');
+    h.entries.push({
+      type: 'custom',
+      customType: STATE_ENTRY,
+      data: { ...h.state(), phase: 'ready-to-deliver' },
+      id: 'ready',
+      parentId: h.entries.at(-1)!.id,
+      timestamp: new Date().toISOString(),
+    } as SessionEntry);
+    h.setSendThrow(true);
+    await expect(h.fire('agent_settled')).rejects.toThrow('continuation submission failed');
+    expect(h.state()?.phase).toBe('ready-to-deliver');
+    expect(h.appended.some((e) => e.type === DELIVERY_ENTRY)).toBe(false);
+    expect(h.active()).toEqual([TOOL_NAME]);
+    h.setSendThrow(false);
+    await h.fire('agent_settled');
+    expect(h.sent()).toHaveLength(1);
+  });
+
+  it('returns from settled dispatch without acknowledging an unjournaled continuation', async () => {
+    const h = makeHarness();
+    await h.call('Continue a long-running task');
+    h.entries.push({
+      type: 'custom',
+      customType: STATE_ENTRY,
+      data: { ...h.state(), phase: 'ready-to-deliver' },
+      id: 'ready',
+      parentId: h.entries.at(-1)!.id,
+      timestamp: new Date().toISOString(),
+    } as SessionEntry);
+    await h.fire('agent_settled');
+    expect(h.state()?.phase).toBe('ready-to-deliver');
+    expect(h.appended.some((e) => e.type === DELIVERY_ENTRY)).toBe(false);
+    await h.fire('agent_settled');
+    expect(h.sent()).toHaveLength(1);
+    // Pi dispatches message_end to extensions before journaling the message.
+    await h.fire('message_end', {
+      message: {
+        role: 'custom',
+        customType: CONTINUATION_MESSAGE_TYPE,
+        content: 'Continue a long-running task',
+        details: { cycleId: h.state()!.cycleId },
+      },
+    });
+    expect(h.appended.some((e) => e.type === DELIVERY_ENTRY)).toBe(false);
+    h.entries.push({
+      type: 'custom_message',
+      customType: CONTINUATION_MESSAGE_TYPE,
+      content: 'Continue a long-running task',
+      display: true,
+      details: { cycleId: h.state()!.cycleId },
+      id: 'journal',
+      parentId: h.entries.at(-1)!.id,
+      timestamp: new Date().toISOString(),
+    });
+    await h.fire('context', { messages: [] });
+    expect(h.state()?.phase).toBe('delivered');
+    expect(h.state()?.completedCycles).toBe(1);
+    expect(h.appended.some((e) => e.type === DELIVERY_ENTRY)).toBe(true);
   });
 });
 
@@ -468,7 +533,7 @@ describe('recovery after interrupted compaction', () => {
       customType: STATE_ENTRY,
       data: { ...h.state(), phase: 'compacting' },
       id: 'interrupted',
-      parentId: null,
+      parentId: h.entries.at(-1)!.id,
       timestamp: new Date().toISOString(),
     } as SessionEntry);
     await h.fire('session_start');
@@ -528,7 +593,63 @@ describe('statusline color integration', () => {
   });
 });
 
+describe('safe turn-boundary guidance', () => {
+  it('requests one continuation for an active tool turn at warning without duplicating requests', async () => {
+    const h = makeHarness();
+    h.setUsage(255000);
+    const event = {
+      outcome: 'completed',
+      context: { canContinue: true },
+      entries: [],
+      toolResults: [{ toolName: 'read' }],
+    };
+    expect((await h.fire('turn_end', event))[0]).toEqual({ continue: true });
+    expect((await h.fire('turn_end', event))[0]).toBeUndefined();
+    expect(h.sent()).toHaveLength(0);
+  });
+
+  it.each(['aborted', 'error', 'completed'])('does not restart a terminal %s answer', async (outcome) => {
+    const h = makeHarness();
+    h.setUsage(255000);
+    expect((await h.fire('turn_end', { outcome, context: { canContinue: true }, toolResults: [] }))[0]).toBeUndefined();
+  });
+
+  it('does not lock or reserve an empty session even past the hard cutoff', async () => {
+    const h = makeHarness();
+    h.entries.splice(0);
+    h.setUsage(300000);
+    await h.fire('turn_end');
+    expect((await h.fire('tool_call', { toolName: 'read' }))[0]).toBeUndefined();
+    await expect(h.call('Keep working')).rejects.toThrow('Nothing to compact');
+    expect(h.state()).toBeUndefined();
+    expect(h.active()).toContain('read');
+  });
+
+  it('replaces old guidance, preserves other messages, and drops it when usage becomes unknown', async () => {
+    const h = makeHarness();
+    h.setUsage(255000);
+    const user = { role: 'user', content: 'Keep my message' };
+    const [first] = await h.fire('context', {
+      messages: [user, { role: 'custom', customType: 'self-compact:guidance-soft', content: 'stale' }],
+    });
+    const messages = (first as { messages: Array<{ customType?: string }> }).messages;
+    expect(messages[0]).toEqual(user);
+    expect(messages[1]?.customType).toBe(GUIDANCE_MESSAGE_TYPE);
+    h.setUsage(null);
+    const [second] = await h.fire('context', first);
+    expect(second).toEqual({ messages: [user] });
+  });
+});
+
 describe('human commands', () => {
+  it('/self-compact-now steers an active run at its next safe tool boundary', async () => {
+    const h = makeHarness();
+    h.ctx.isIdle = () => false;
+    await h.runCommand(NOW_COMMAND);
+    expect(h.sent()[0]?.options).toEqual({ triggerTurn: true, deliverAs: 'steer' });
+    expect(h.state()).toBeUndefined();
+  });
+
   it('/self-compact-info reports resolved thresholds without sending a model message', async () => {
     const h = makeHarness({ contextWindow: 1_000_000 });
     await h.fire('session_start');

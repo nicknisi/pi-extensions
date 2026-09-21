@@ -12,7 +12,7 @@
  * reported as an error so the caller can cancel compaction and keep the handoff
  * locked, rather than falling back to Pi's default compactor.
  */
-import { compact } from '@earendil-works/pi-coding-agent';
+import { buildSessionProjection, compact, findCutPoint, type SessionEntry } from '@earendil-works/pi-coding-agent';
 import type { CompactionResult } from '@earendil-works/pi-coding-agent';
 import type {
   AssistantMessageEventStream,
@@ -25,6 +25,17 @@ import type {
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+/** Check the edited, retained context using Pi's cut-point rules, without persisting or locking. */
+export function hasCompactionMaterial(branch: SessionEntry[], keepRecentTokens: number): boolean {
+  if (branch.at(-1)?.type === 'compaction') return false;
+  const entries: SessionEntry[] = buildSessionProjection(branch).entries.flatMap(({ sourceEntry, messages }) =>
+    messages
+      .filter((message) => message.role !== 'system' && message.role !== 'compactionSummary')
+      .map((message) => ({ ...sourceEntry, type: 'message' as const, message })),
+  );
+  return findCutPoint(entries, 0, entries.length, keepRecentTokens).firstKeptEntryIndex > 0;
+}
 
 /** Name of the editable default summary instruction file, under `.pi/self-compact/`. */
 export const COMPACTION_MESSAGE_FILE = 'USER_PROMPT_COMPACTION_MESSAGE.md';

@@ -9,8 +9,8 @@ widget make the behavior observable and tunable.
 
 ## Requirements
 
-- **Pi >= 0.86.1.** The extension uses the lifecycle, terminating-tool,
-  summary-override, widget, and compactor APIs verified against this version.
+- **Pi >= 0.87.0.** The extension uses actionable turn boundaries, deferred
+  settled-handler continuations, and canonical session context from this version.
   Older runtimes are unsupported.
 - **No other extensions.** This package uses only the public extension API and
   has no dependency on any other extension or on `@nicknisi/pi-shared`.
@@ -152,17 +152,28 @@ compaction.
   or failed handoff and delivers the continuation once idle. Pi's automatic
   compaction can discharge a pending handoff but does not retry a failed one.
   The command is not reimplemented.
-- **Reload/resume.** Handoff state lives in branch-local custom entries, so an
-  ordinary reload reconstructs a pending/failed handoff without replaying a
-  delivered one and without starting a turn on its own. Branch navigation
-  isolates it.
+- **Reload/resume.** Handoff state lives in branch-local custom entries. A
+  pending/failed compaction stays recoverable; an already answered continuation
+  is not replayed. If compaction landed but the note was not sent, or the note
+  was journaled but never answered successfully, reload resumes it automatically
+  without compacting again. Branch navigation isolates recovery.
+- **Early requests.** A new checkpoint is rejected before saving or locking if
+  Pi's retained recent context leaves nothing to summarize. The preflight uses
+  projected context, including context edits and model-specific retention settings.
+- **Current guidance.** The model receives fresh threshold guidance before each
+  request rather than accumulated, stale notices. Humans see each crossing once.
+  Warning/hard crossings during tool work can request one response using Pi's
+  `turn_end` boundary; a finished answer is not restarted merely for a warning.
+  Busy `/self-compact-now` requests steer after the current tool batch, without
+  interrupting a running tool. Actual compaction still waits until idle.
 
 ## Durability limitations
 
 - **`--no-session`.** With no session file there is nothing durable to
   reconstruct on restart; a checkpoint only survives within the live process.
 - **Arbitrary-crash exactly-once is NOT promised.** Replay prevention covers
-  ordinary reload/resume via the delivered-cycle marker. A crash at exactly the
+  ordinary reload/resume via journaled continuation messages and later successful
+  assistant responses. A crash at exactly the
   wrong instant (e.g. between an external side effect and the delivery marker)
   can, in principle, repeat a side effect. Design resumable notes accordingly.
 
@@ -190,8 +201,13 @@ integration. Pi session and CLI tests use an offline scripted provider, so no
 model credentials or paid API calls are required. The helpers under `verify/`
 are fixtures used by those tests.
 
+SDK hosts using in-memory settings can supply the extension factory's optional
+second argument, `(ctx) => settingsManager.getCompactionKeepRecentTokens(ctx.model)`,
+so eligibility uses those same settings. Normal Pi loading reads its global and
+trusted project settings; the extension never modifies them.
+
 ## Dependencies
 
-- **Peer:** `@earendil-works/pi-coding-agent` (`>=0.86.1`) and `@earendil-works/pi-ai`
-  (`>=0.86.1`). Uses only the public extension API.
+- **Peer:** `@earendil-works/pi-coding-agent` (`>=0.87.0`) and `@earendil-works/pi-ai`
+  (`>=0.87.0`). Uses only the public extension API.
 - **Runtime:** `typebox` (tool schema). No workspace or sibling-extension deps.

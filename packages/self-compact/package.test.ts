@@ -49,8 +49,8 @@ describe('manifest', () => {
   });
 
   it('declares the minimum supported Pi runtime and pulls in no other extension', () => {
-    expect(pkg.peerDependencies?.['@earendil-works/pi-coding-agent']).toBe('>=0.86.1');
-    expect(pkg.peerDependencies?.['@earendil-works/pi-ai']).toBe('>=0.86.1');
+    expect(pkg.peerDependencies?.['@earendil-works/pi-coding-agent']).toBe('>=0.87.0');
+    expect(pkg.peerDependencies?.['@earendil-works/pi-ai']).toBe('>=0.87.0');
     const deps = { ...pkg.dependencies };
     // No dependency on sibling extensions or the workspace-shared library.
     for (const name of Object.keys(deps)) {
@@ -150,7 +150,7 @@ describe('release integration', () => {
     const readme = readFileSync(join(HERE, 'README.md'), 'utf8');
     expect(readme).toContain('self_compact');
     expect(readme).toContain('--compact-at');
-    expect(readme).toMatch(/0\.86\.1/);
+    expect(readme).toMatch(/0\.87\.0/);
   });
 
   it('has a changeset (or consumed changelog) release entry for this package', () => {

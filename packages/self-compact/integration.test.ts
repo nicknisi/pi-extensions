@@ -10,7 +10,13 @@ import {
   type SessionEntry,
 } from './verify/fixture-provider.js';
 import { runCli } from './verify/cli-runner.js';
-import { readDeliveredCycleIds, readHandoffState, STATE_ENTRY } from './extensions/self-compact/self-compact.js';
+import {
+  CONTINUATION_MESSAGE_TYPE,
+  DELIVERY_ENTRY,
+  readDeliveredCycleIds,
+  readHandoffState,
+  STATE_ENTRY,
+} from './extensions/self-compact/self-compact.js';
 import { loadDefaultCompactionInstruction } from './extensions/self-compact/prompts.js';
 
 const NOTE = 'Finish the task: write result.txt containing exactly done.';
@@ -56,6 +62,118 @@ async function withFixture<T>(
     fixture.dispose();
   }
 }
+
+describe('handoff reliability', () => {
+  it('rejects an early checkpoint without saving a note or blocking ordinary tools', async () => {
+    await withFixture(
+      {
+        keepRecentTokens: 20000,
+        responses: [
+          fauxAssistantMessage(fauxToolCall('self_compact', { note_to_self: NOTE })),
+          fauxAssistantMessage(fauxToolCall('write', { path: 'still-working.txt', content: 'ok' })),
+          fauxAssistantMessage('Continued normally.'),
+        ],
+      },
+      async (f) => {
+        await f.session.prompt('Begin a short task.');
+        expect(readHandoffState(f.branch())).toBeUndefined();
+        expect(compactionCount(f.branch())).toBe(0);
+        expect(JSON.stringify(f.branch())).toContain('Nothing to compact');
+        expect(readFileSync(join(f.dir, 'still-working.txt'), 'utf8')).toBe('ok');
+        expect(f.session.getActiveToolNames()).toContain('write');
+      },
+    );
+  });
+
+  for (const scenario of ['ready-to-deliver', 'delivered', 'compacting', 'answered'] as const) {
+    const phase = scenario === 'answered' ? 'ready-to-deliver' : scenario;
+    it(`reconciles a ${scenario} handoff without unnecessary compaction or replay`, async () => {
+      const original = await createFixture({ responses: [fauxAssistantMessage('Initial history.')] });
+      try {
+        await original.session.prompt('Begin.');
+        const cycleId = uuidv7();
+        const tools = scenario === 'answered' ? ['read', 'self_compact'] : original.session.getActiveToolNames();
+        original.sessionManager.appendCompaction('Keep existing constraints.', null, 5000, {
+          selfCompactCycleId: cycleId,
+        });
+        if (phase !== 'compacting') {
+          original.sessionManager.appendCustomMessageEntry(CONTINUATION_MESSAGE_TYPE, NOTE, true, { cycleId });
+        }
+        if (scenario === 'answered') original.sessionManager.appendMessage(fauxAssistantMessage('Already resumed.'));
+        if (phase === 'delivered') original.sessionManager.appendCustomEntry(DELIVERY_ENTRY, { cycleId });
+        original.sessionManager.appendCustomEntry(STATE_ENTRY, {
+          cycleId,
+          phase,
+          note: NOTE,
+          originalActiveTools: tools,
+          completedCycles: phase === 'delivered' ? 1 : 0,
+          acknowledged: phase === 'delivered',
+        });
+        original.session.dispose();
+        const resumed = await createFixture({
+          sessionFile: original.sessionFile,
+          responses: [fauxAssistantMessage('Resumed safely.')],
+        });
+        try {
+          if (scenario === 'answered') expect(resumed.faux.state.callCount).toBe(0);
+          else await waitFor(() => resumed.faux.state.callCount === 1);
+          await resumed.session.waitForIdle();
+          expect(readHandoffState(resumed.branch())?.phase).toBe('delivered');
+          expect(readHandoffState(resumed.branch())?.completedCycles).toBe(1);
+          expect(compactionCount(resumed.branch())).toBe(1);
+          const notes = resumed
+            .branch()
+            .filter(
+              (e) =>
+                e.type === 'custom_message' &&
+                e.customType === CONTINUATION_MESSAGE_TYPE &&
+                !(e.details as { resumed?: boolean } | undefined)?.resumed,
+            );
+          expect(notes).toHaveLength(1);
+          expect(JSON.stringify(notes[0])).toContain(NOTE);
+          expect(new Set(resumed.session.getActiveToolNames())).toEqual(new Set(tools));
+          expect(readDeliveredCycleIds(resumed.branch()).size).toBe(1);
+        } finally {
+          resumed.dispose();
+        }
+      } finally {
+        original.dispose();
+      }
+    });
+  }
+
+  it('steers a manual checkpoint request into an active run before ordinary work continues', async () => {
+    let requested = false;
+    await withFixture(
+      {
+        responses: [
+          fillerTurn(),
+          (context) => {
+            expect(JSON.stringify(context.messages)).toContain('write a precise note_to_self');
+            return fauxAssistantMessage(fauxToolCall('self_compact', { note_to_self: NOTE }));
+          },
+          summary(),
+          fauxAssistantMessage('Resumed.'),
+        ],
+      },
+      async (f) => {
+        const unsubscribe = f.session.subscribe((event) => {
+          if (event.type === 'tool_execution_start' && event.toolName === 'bash' && !requested) {
+            requested = true;
+            void f.session.prompt('/self-compact-now');
+          }
+        });
+        try {
+          await f.session.prompt('Begin.');
+          expect(requested).toBe(true);
+          expect(readHandoffState(f.branch())?.completedCycles).toBe(1);
+        } finally {
+          unsubscribe();
+        }
+      },
+    );
+  });
+});
 
 describe('handoff lifecycle', () => {
   it('supports a second checkpoint inside the autonomous continuation', async () => {
@@ -603,7 +721,7 @@ describe('reconciliation and queued messages', () => {
         expect(readDeliveredCycleIds(reopened.branch()).size).toBe(1);
         // The continuation turn writes the file after the handoff is marked
         // delivered, so wait for the side effect rather than racing it.
-        await waitFor(() => existsSync(join(reopened.dir, 'result.txt')), 15000);
+        await reopened.session.waitForIdle();
         expect(readFileSync(join(reopened.dir, 'result.txt'), 'utf8')).toBe('done');
       } finally {
         reopened.dispose();
