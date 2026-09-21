@@ -35,8 +35,10 @@ pi -e /abs/path/packages/self-compact/extensions/self-compact/self-compact.ts
 - **Commands:** `/self-compact-info` (thresholds, usage, handoff state — never
   calls the model) and `/self-compact-now` (asks the agent to checkpoint now;
   retries a pending note verbatim).
-- **Widget:** a 20-cell context bar above the editor (see the legend below). It
-  coexists with the built-in footer/statusline; it does not replace them.
+- **Context display:** when `@nicknisi/pi-statusline` is loaded, self-compact
+  colors its existing context bar and hides the separate widget. Without that
+  extension, a 20-cell context widget remains above the editor (legend below).
+  No other extension is required.
 - **Flags:** `--compact-soft-at`, `--compact-at`, `--compact-buffer`,
   `--compact-prompt`.
 
@@ -108,7 +110,16 @@ delivered separately as a continuation.
 
 ## Context bar legend
 
-The widget renders 20 cells inside brackets (each cell = 5% of the window),
+With `@nicknisi/pi-statusline`, the existing footer meter keeps its size, fill,
+labels, and **remaining-context** meaning. Self-compact supplies its color:
+green below soft, blue/accent at soft, amber at warning, red at hard or on a
+failed handoff, and dim while usage is unknown. No threshold ticks or additional
+footer row are added. Theme colors may differ from these descriptions.
+
+The optional integration uses Pi's event bus and works in either load order.
+If the statusline is removed, the standalone widget returns automatically.
+
+When running without the statusline, the widget renders 20 cells inside brackets (each cell = 5% of the window),
 followed by the used percentage. With explicit 20%/50%/10% thresholds,
 40% usage and half the used context cached:
 
