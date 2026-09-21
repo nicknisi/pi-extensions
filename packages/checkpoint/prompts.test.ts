@@ -7,8 +7,11 @@ import {
   type TranscriptContext,
 } from '@earendil-works/pi-ai';
 import { describe, expect, it } from 'vitest';
+import { SessionManager } from '@earendil-works/pi-coding-agent';
 import {
   applyLeadingSystemInstruction,
+  hasCompactionMaterial,
+  loadDefaultCompactionInstruction,
   buildSummaryStreamFn,
   interpolateGuidance,
   leadingSystemInstruction,
@@ -64,7 +67,44 @@ function fauxModel(): Model<string> {
 
 const DEFAULT_INSTRUCTION = 'DEFAULT summary instruction';
 
+describe('compaction eligibility', () => {
+  it('honors retention budgets and context omissions without counting old summaries as material', () => {
+    const sm = SessionManager.inMemory();
+    expect(hasCompactionMaterial(sm.getBranch(), 1)).toBe(false);
+    const user = sm.appendMessage({ role: 'user', content: 'Earlier work to summarize', timestamp: Date.now() });
+    sm.appendMessage(fauxAssistantMessage('Recent response'));
+    expect(hasCompactionMaterial(sm.getBranch(), 20000)).toBe(false);
+    expect(hasCompactionMaterial(sm.getBranch(), 1)).toBe(true);
+    sm.appendContextEdit(user, null);
+    expect(hasCompactionMaterial(sm.getBranch(), 1)).toBe(false);
+    sm.appendCompaction('Old summary', null, 100);
+    sm.appendCustomEntry('state', {});
+    expect(hasCompactionMaterial(sm.getBranch(), 1)).toBe(false);
+  });
+});
+
 describe('prompt overrides', () => {
+  it('passes prior constraints and unfinished work into the next native compaction request', async () => {
+    const retained = 'Constraint: never change config.ts. Done: fixed parser. Pending: run tests.';
+    const first = await runSelfCompaction({
+      preparation: preparation(),
+      model: fauxModel(),
+      streamSimple: capturingProvider(fauxAssistantMessage(retained)).streamSimple,
+    });
+    const secondProvider = capturingProvider(fauxAssistantMessage('Updated summary'));
+    await runSelfCompaction({
+      preparation: { ...preparation(), previousSummary: first.summary },
+      model: fauxModel(),
+      streamSimple: secondProvider.streamSimple,
+    });
+    expect(JSON.stringify(secondProvider.captured.context)).toContain(retained);
+    const instruction = leadingSystemInstruction(secondProvider.captured.context!);
+    expect(instruction).toContain('Do not');
+    expect(instruction).toContain('supporting tool results');
+    expect(instruction).toContain('Merge the previous summary');
+    expect(loadDefaultCompactionInstruction()).toContain('historical data');
+  });
+
   it('replaces the leading transcript system instruction, not an obsolete field', () => {
     const ctx = transcript('pi default summarizer prompt');
     applyLeadingSystemInstruction(ctx, 'CUSTOM instruction');

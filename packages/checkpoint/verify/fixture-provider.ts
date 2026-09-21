@@ -104,7 +104,10 @@ export async function createFixture(options: FixtureOptions = {}): Promise<Fixtu
     settingsManager,
     extensionFactories: [
       { name: 'faux-provider', factory: (pi) => pi.registerProvider(faux.provider) },
-      { name: 'self-compact', factory: selfCompactExtension },
+      {
+        name: 'self-compact',
+        factory: (pi) => selfCompactExtension(pi, () => settingsManager.getCompactionKeepRecentTokens(faux.getModel())),
+      },
     ],
   });
   await loader.reload();
@@ -160,6 +163,9 @@ export async function createFixture(options: FixtureOptions = {}): Promise<Fixtu
     // Rebind with a capturing UI (mode 'rpc' makes ctx.hasUI true) so the widget
     // and command notifications become observable, as they are under real RPC.
     await session.bindExtensions({ uiContext: capturingUi as never, mode: 'rpc' });
+  } else {
+    // Match CLI startup/resume, including session_start recovery hooks.
+    await session.bindExtensions({ mode: 'print' });
   }
 
   const ui: CapturedUI = {

@@ -35,15 +35,15 @@
     "typebox": "^1.1.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "0.86.1",
-    "@earendil-works/pi-coding-agent": "0.86.1",
-    "@earendil-works/pi-tui": "0.86.1",
+    "@earendil-works/pi-ai": "0.87.0",
+    "@earendil-works/pi-coding-agent": "0.87.0",
+    "@earendil-works/pi-tui": "0.87.0",
     "@types/node": "^24.0.0",
     "vitest": "^3.2.4"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.86.1",
-    "@earendil-works/pi-coding-agent": ">=0.86.1"
+    "@earendil-works/pi-ai": ">=0.87.0",
+    "@earendil-works/pi-coding-agent": ">=0.87.0"
   },
   "pi": {
     "extensions": [

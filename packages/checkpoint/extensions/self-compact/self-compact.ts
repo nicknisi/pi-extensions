@@ -22,6 +22,7 @@
 import { uuidv7 } from '@earendil-works/pi-ai';
 import {
   defineTool,
+  SettingsManager,
   type ExtensionAPI,
   type ExtensionCommandContext,
   type ExtensionContext,
@@ -46,6 +47,7 @@ import {
   COMPACTION_MESSAGE_FILE,
   SOFT_SELF_COMPACT_FILE,
   WARNING_SELF_COMPACT_FILE,
+  hasCompactionMaterial,
   loadDefaultCompactionInstruction,
   packageResourceDir,
   renderGuidance,
@@ -60,6 +62,7 @@ export const DELIVERY_ENTRY = 'self-compact:delivered';
 export const NOTIFY_ENTRY = 'self-compact:notify';
 export const HARD_ENTRY = 'self-compact:hard';
 export const CONTINUATION_MESSAGE_TYPE = 'self-compact:continuation';
+export const GUIDANCE_MESSAGE_TYPE = 'self-compact:guidance';
 export const WIDGET_KEY = 'self-compact';
 export const INFO_COMMAND = 'self-compact-info';
 export const NOW_COMMAND = 'self-compact-now';
@@ -90,6 +93,8 @@ export interface HandoffState {
   completedCycles: number;
   sessionId?: string;
   lastError?: string;
+  /** The continuation was observed in the session journal, not merely submitted. */
+  acknowledged?: boolean;
 }
 
 const noteSchema = Type.Object({
@@ -206,11 +211,18 @@ function isLockedPhase(phase: HandoffPhase): boolean {
   return phase === 'pending' || phase === 'compacting' || phase === 'failed' || phase === 'ready-to-deliver';
 }
 
-export default function (pi: ExtensionAPI) {
+export default function (
+  pi: ExtensionAPI,
+  getKeepRecentTokens = (ctx: ExtensionContext): number =>
+    SettingsManager.create(ctx.cwd, undefined, {
+      projectTrusted: ctx.isProjectTrusted(),
+    }).getCompactionKeepRecentTokens(ctx.model),
+) {
   // In-memory coordination only. Durable truth lives in branch custom entries.
   let busy = false;
   let lastReservedMessageId: string | undefined;
   let disposed = false;
+  let deliveryRequested: string | undefined;
   let sessionId: string | undefined;
   // Resolved threshold configuration for the current model, or an error when the
   // flags cannot fit the window. Fail-closed enforcement reads this.
@@ -336,6 +348,13 @@ export default function (pi: ExtensionAPI) {
     if (!validation.ok) return validation;
 
     const existing = currentState(ctx);
+    if ((!existing || existing.phase === 'delivered') && !compactable(ctx)) {
+      return {
+        ok: false,
+        error:
+          "Nothing to compact yet: recent messages fit inside Pi's retention budget. No new handoff was saved; keep working and compact later.",
+      };
+    }
     if (existing && isLockedPhase(existing.phase)) {
       if (existing.note !== validation.note) {
         return {
@@ -378,6 +397,40 @@ export default function (pi: ExtensionAPI) {
     return validation;
   }
 
+  function compactable(ctx: ExtensionContext): boolean {
+    return hasCompactionMaterial(branch(ctx), getKeepRecentTokens(ctx));
+  }
+
+  /** Reconcile only from journaled messages, never from sendMessage returning. */
+  function acknowledgeDelivery(ctx: ExtensionContext): void {
+    const state = currentState(ctx);
+    if (!state || state.phase !== 'ready-to-deliver') return;
+    const entries = branch(ctx);
+    if (
+      !entries.some(
+        (entry) =>
+          entry.type === 'custom_message' &&
+          entry.customType === CONTINUATION_MESSAGE_TYPE &&
+          (entry.details as { cycleId?: string } | undefined)?.cycleId === state.cycleId,
+      )
+    )
+      return;
+    const marked = readDeliveredCycleIds(entries).has(state.cycleId);
+    const alreadyCounted = state.acknowledged || marked;
+    // Persist the authoritative state first; a failed auxiliary marker write can
+    // be reconstructed from the journaled message without losing the note.
+    persist({
+      ...state,
+      phase: 'delivered',
+      acknowledged: true,
+      completedCycles: state.completedCycles + (alreadyCounted ? 0 : 1),
+    });
+    if (!marked) pi.appendEntry(DELIVERY_ENTRY, { cycleId: state.cycleId });
+    deliveryRequested = undefined;
+    restoreTools(state);
+    clearHard();
+  }
+
   /** Restrict tools to self_compact at the hard crossing, snapshotting the prior selection. */
   function enterHard(): void {
     if (hardActive) return;
@@ -403,15 +456,16 @@ export default function (pi: ExtensionAPI) {
     if (wasActive) persistHard({ active: false, originalActiveTools: [] });
   }
 
-  /**
-   * Deliver the continuation for a compacted cycle. Returns true when it
-   * actually triggered a continuation turn (so the caller can await it), false
-   * when there was nothing to deliver (disposed, or already delivered).
-   */
-  function deliver(ctx: ExtensionContext, state: HandoffState): boolean {
-    if (disposed) return false;
-    const delivered = readDeliveredCycleIds(branch(ctx));
-    if (delivered.has(state.cycleId) || state.phase === 'delivered') return false;
+  /** Submit the continuation once; acknowledgement requires a journaled message. */
+  function deliver(ctx: ExtensionContext, state: HandoffState): void {
+    if (disposed) return;
+    if (state.phase === 'delivered' || deliveryRequested === state.cycleId) return;
+    const journaled = branch(ctx).some(
+      (entry) =>
+        entry.type === 'custom_message' &&
+        entry.customType === CONTINUATION_MESSAGE_TYPE &&
+        (entry.details as { cycleId?: string } | undefined)?.cycleId === state.cycleId,
+    );
 
     restoreTools(state);
     // Successful compaction ends hard enforcement and resets guidance tracking
@@ -428,62 +482,35 @@ export default function (pi: ExtensionAPI) {
       '</self-compact-continuation>',
     ].join('\n');
 
-    pi.appendEntry(DELIVERY_ENTRY, { cycleId: state.cycleId });
-    persist({ ...state, phase: 'delivered', completedCycles: state.completedCycles + 1 });
-
-    // Triggers a fresh continuation turn. `sendMessage` is fire-and-forget, so
-    // the caller keeps the agent busy and awaits idle (see deliverAndAwait) to
-    // stop `pi -p`/JSON from disposing the process before it completes.
-    pi.sendMessage(
-      {
-        customType: CONTINUATION_MESSAGE_TYPE,
-        content: continuation,
-        display: true,
-        details: { cycleId: state.cycleId },
-      },
-      { triggerTurn: true, deliverAs: 'followUp' },
-    );
-    return true;
+    deliveryRequested = state.cycleId;
+    try {
+      // Pi 0.87 defers this run until settled handlers finish and awaits it in
+      // print/JSON modes. Do not poll or recursively coordinate inside the hook.
+      pi.sendMessage(
+        {
+          customType: CONTINUATION_MESSAGE_TYPE,
+          content: journaled
+            ? 'Resume the unanswered self-compaction note already present above. Do not restart completed work.'
+            : continuation,
+          display: true,
+          details: { cycleId: state.cycleId, resumed: journaled },
+        },
+        { triggerTurn: true, deliverAs: 'followUp' },
+      );
+    } catch (error) {
+      deliveryRequested = undefined;
+      lockTools();
+      throw error;
+    }
   }
 
-  /**
-   * Deliver, then block until the continuation turn settles. Called only while
-   * `busy` is held, so a re-entrant `agent_settled` from the continuation turn
-   * short-circuits. Awaiting here keeps the outer `agent_settled` handler (and
-   * thus `session.prompt`) pending until the continuation finishes, which is
-   * what prevents print/JSON single-shot modes from exiting early.
-   */
-  async function deliverAndAwait(ctx: ExtensionContext, state: HandoffState): Promise<void> {
+  /** Submit once and release coordination so Pi can drain its deferred run. */
+  function queueContinuation(ctx: ExtensionContext, state: HandoffState): void {
     try {
-      const started = deliver(ctx, state);
-      if (started) await waitForContinuationIdle(ctx);
+      deliver(ctx, state);
     } finally {
       busy = false;
       lastReservedMessageId = undefined;
-    }
-    // A continuation may itself checkpoint. Its re-entrant settled handler ran
-    // under busy, so drive that new pending cycle once the outer turn is idle.
-    if (!disposed) await coordinate(ctx);
-  }
-
-  /**
-   * Wait until the just-triggered continuation turn settles. The continuation
-   * runs as a detached turn (`sendMessage` returns no promise), so poll the
-   * public idle check rather than awaiting an internal promise. Never awaits
-   * `waitForIdle` (unavailable on the settled ctx and prone to deadlock).
-   */
-  async function waitForContinuationIdle(ctx: ExtensionContext): Promise<void> {
-    // A valid continuation can run for minutes. Returning on an arbitrary
-    // deadline lets print mode dispose an otherwise healthy active task.
-    while (!disposed) {
-      let idle: boolean;
-      try {
-        idle = ctx.isIdle();
-      } catch {
-        return; // ctx went stale (session replaced/shut down); nothing to await.
-      }
-      if (idle) return;
-      await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
 
@@ -502,11 +529,7 @@ export default function (pi: ExtensionAPI) {
     return !!state && state.cycleId === cycleId && state.phase === 'failed';
   }
 
-  /**
-   * Drive a pending cycle to completion: compact, then deliver and await the
-   * continuation. Awaited by `agent_settled` so the whole lifecycle finishes
-   * before the settled handler returns.
-   */
+  /** Compact while idle, then let Pi run the continuation after settled handlers return. */
   async function compactThenDeliver(ctx: ExtensionContext, cycleId: string): Promise<void> {
     try {
       await compactOnce(ctx);
@@ -529,7 +552,15 @@ export default function (pi: ExtensionAPI) {
       busy = false;
       return;
     }
-    await deliverAndAwait(ctx, { ...state, phase: 'ready-to-deliver' });
+    const ready: HandoffState = { ...state, phase: 'ready-to-deliver' };
+    try {
+      persist(ready);
+      queueContinuation(ctx, ready);
+    } finally {
+      // A failed ready-state write must not leave the coordinator permanently busy.
+      busy = false;
+      lastReservedMessageId = undefined;
+    }
   }
 
   function recordFailure(ctx: ExtensionContext, state: HandoffState, error: unknown): void {
@@ -562,7 +593,9 @@ export default function (pi: ExtensionAPI) {
         scheduleReconciledDelivery(ctx, attempt + 1);
         return;
       }
-      void coordinate(ctx);
+      void coordinate(ctx).catch((error: unknown) => {
+        ctx.ui.notify(`self-compact: continuation remains recoverable: ${String(error)}`, 'error');
+      });
     }, 20);
     reconcileTimers.add(timer);
   }
@@ -583,7 +616,7 @@ export default function (pi: ExtensionAPI) {
     if (state.phase === 'ready-to-deliver') {
       if (!ctx.isIdle()) return;
       busy = true;
-      await deliverAndAwait(ctx, state);
+      queueContinuation(ctx, state);
       return;
     }
 
@@ -684,7 +717,7 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  /** Inject soft/warning guidance without ever starting a turn just to show it. */
+  /** Announce crossings to the human without persisting stale model guidance. */
   function deliverGuidance(ctx: ExtensionContext, level: GuidanceLevel, tokens: number): void {
     if (disposed) return;
     const values = guidanceValues(tokens);
@@ -696,11 +729,8 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(error instanceof Error ? error.message : String(error), 'error');
       return;
     }
-    const idle = safeIsIdle(ctx);
-    pi.sendMessage(
-      { customType: `self-compact:guidance-${level}`, content, display: true },
-      { triggerTurn: false, deliverAs: idle ? 'nextTurn' : 'steer' },
-    );
+    // Humans see the crossing once; model guidance is rebuilt per request.
+    if (ctx.hasUI) ctx.ui.notify(content, level === 'warning' ? 'warning' : 'info');
   }
 
   /**
@@ -709,32 +739,33 @@ export default function (pi: ExtensionAPI) {
    * guidance level once per compaction cycle. Unknown usage waits for a real
    * measurement; it never fabricates a zero or a lock.
    */
-  function evaluateThresholds(ctx: ExtensionContext): void {
+  function evaluateThresholds(ctx: ExtensionContext): boolean {
     ensureConfig(ctx);
     updateWidget(ctx);
-    if (!config || !config.ok) return;
+    if (!config || !config.ok) return false;
 
     const handoff = currentState(ctx);
     const handoffLocked = handoff ? isLockedPhase(handoff.phase) : false;
-    if (handoffLocked) return; // the handoff lock owns tool state during a cycle
+    if (handoffLocked) return false; // the handoff lock owns tool state during a cycle
 
     const tokens = measuredTokens(ctx);
-    if (tokens === null) return; // unknown: wait for a valid measurement
+    if (tokens === null || !compactable(ctx)) return false; // never lock an uncompactable session
 
     const level = currentLevel(tokens);
 
     if (level === 'hard') enterHard();
 
-    if (level === 'none') return;
+    if (level === 'none') return false;
     const cycle = handoff?.completedCycles ?? 0;
     const last = readNotifyState(branch(ctx));
     const notifiedRank = last && last.cycle === cycle ? LEVEL_RANK[last.level] : 0;
-    if (LEVEL_RANK[level] <= notifiedRank) return; // already announced this level (or stronger)
+    if (LEVEL_RANK[level] <= notifiedRank) return false; // already announced this level (or stronger)
     persistNotify({ level, cycle });
     // Hard enforcement is delivered through the tool_call gate; soft/warning are
     // advisory model-facing messages. A direct jump to hard therefore emits no
     // soft/warning cascade.
     if (level === 'soft' || level === 'warning') deliverGuidance(ctx, level, tokens);
+    return level === 'warning' || level === 'hard';
   }
 
   pi.registerFlag(FLAG_SOFT_AT, {
@@ -820,7 +851,12 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       const state = currentState(ctx);
-      if (state && (state.phase === 'compacting' || state.phase === 'ready-to-deliver')) {
+      if (state?.phase === 'ready-to-deliver') {
+        deliveryRequested = undefined;
+        if (safeIsIdle(ctx)) await coordinate(ctx);
+        return;
+      }
+      if (state?.phase === 'compacting') {
         ctx.ui.notify('self-compact: a compaction is already in progress.', 'info');
         return;
       }
@@ -836,11 +872,11 @@ export default function (pi: ExtensionAPI) {
           'Finish or safely pause your current step, write a precise note_to_self with the exact next action to resume, then call self_compact as your only action.';
       }
       const idle = safeIsIdle(ctx);
-      // Idle: start a fresh turn asking the model to checkpoint. Busy: queue a
-      // follow-up so we never launch a concurrent compaction or duplicate cycle.
+      // Steering is delivered after the running tool batch, not after the whole
+      // run. Only the model's subsequent self_compact call reserves a handoff.
       pi.sendMessage(
         { customType: 'self-compact:manual-request', content, display: true },
-        idle ? { triggerTurn: true } : { triggerTurn: false, deliverAs: 'followUp' },
+        idle ? { triggerTurn: true } : { triggerTurn: true, deliverAs: 'steer' },
       );
       ctx.ui.notify('self-compact: requested a checkpoint.', 'info');
     },
@@ -909,7 +945,7 @@ export default function (pi: ExtensionAPI) {
       }
       if (config && config.ok) {
         const tokens = measuredTokens(ctx);
-        if (hardActive || (tokens !== null && tokens >= config.thresholds.hardTokens)) {
+        if (hardActive || (tokens !== null && tokens >= config.thresholds.hardTokens && compactable(ctx))) {
           // Restrict the visible tool selection too, snapshotting the original.
           enterHard();
           return {
@@ -928,6 +964,7 @@ export default function (pi: ExtensionAPI) {
     for (const timer of reconcileTimers) clearTimeout(timer);
     reconcileTimers.clear();
     disposed = false;
+    deliveryRequested = undefined;
     busy = false;
     lastReservedMessageId = undefined;
     hardActive = false;
@@ -936,7 +973,50 @@ export default function (pi: ExtensionAPI) {
 
     resolveConfig(ctx);
 
-    const state = currentState(ctx);
+    let state = currentState(ctx);
+    if (state) {
+      const entries = branch(ctx);
+      const cycleId = state.cycleId;
+      const journalIndex = entries
+        .map(
+          (entry) =>
+            entry.type === 'custom_message' &&
+            entry.customType === CONTINUATION_MESSAGE_TYPE &&
+            (entry.details as { cycleId?: string } | undefined)?.cycleId === cycleId,
+        )
+        .lastIndexOf(true);
+      const answered =
+        journalIndex >= 0 &&
+        entries
+          .slice(journalIndex + 1)
+          .some(
+            (entry) =>
+              entry.type === 'message' &&
+              entry.message.role === 'assistant' &&
+              entry.message.stopReason !== 'error' &&
+              entry.message.stopReason !== 'aborted',
+          );
+      const landed = entries.some(
+        (entry) =>
+          entry.type === 'compaction' &&
+          (entry.details as { selfCompactCycleId?: string } | undefined)?.selfCompactCycleId === cycleId,
+      );
+      if (
+        (state.phase === 'delivered' && !answered) ||
+        (state.phase !== 'delivered' && (journalIndex >= 0 || landed))
+      ) {
+        state = {
+          ...state,
+          phase: 'ready-to-deliver',
+          acknowledged: state.acknowledged || readDeliveredCycleIds(entries).has(state.cycleId),
+        };
+        persist(state);
+        if (answered) {
+          acknowledgeDelivery(ctx);
+          state = currentState(ctx);
+        }
+      }
+    }
     const handoffLocked = state ? isLockedPhase(state.phase) : false;
     if (handoffLocked) {
       if (state?.phase === 'compacting') {
@@ -953,7 +1033,9 @@ export default function (pi: ExtensionAPI) {
       }
     }
     updateWidget(ctx);
-    // ready-to-deliver / pending resume once the agent is idle (agent_settled).
+    // A landed but unanswered continuation needs no new human prompt. Pending
+    // compaction still waits for the next genuine idle boundary.
+    if (state?.phase === 'ready-to-deliver') scheduleReconciledDelivery(ctx);
   }
 
   pi.on('session_start', async (_event, ctx) => {
@@ -978,8 +1060,48 @@ export default function (pi: ExtensionAPI) {
     evaluateThresholds(ctx);
   });
 
-  pi.on('turn_end', async (_event, ctx) => {
-    evaluateThresholds(ctx);
+  pi.on('turn_end', async (event, ctx) => {
+    acknowledgeDelivery(ctx);
+    const crossed = evaluateThresholds(ctx);
+    // Ask for one response at a safe tool boundary, not after a completed answer
+    // or a terminating checkpoint. Natural tool/steering work satisfies it too.
+    if (
+      crossed &&
+      event.outcome === 'completed' &&
+      event.toolResults.length > 0 &&
+      event.context.canContinue &&
+      !event.toolResults.some((result) => result.toolName === TOOL_NAME)
+    )
+      return { continue: true };
+  });
+
+  pi.on('context', async (event, ctx) => {
+    acknowledgeDelivery(ctx);
+    ensureConfig(ctx);
+    const messages = event.messages.filter(
+      (message) =>
+        !(
+          message.role === 'custom' &&
+          (message.customType === GUIDANCE_MESSAGE_TYPE || message.customType.startsWith('self-compact:guidance-'))
+        ),
+    );
+    const tokens = measuredTokens(ctx);
+    const state = currentState(ctx);
+    if (!config?.ok || tokens === null || (state && isLockedPhase(state.phase)) || !compactable(ctx))
+      return { messages };
+    const level = currentLevel(tokens);
+    if (level === 'none') return { messages };
+    const values = guidanceValues(tokens)!;
+    const content =
+      level === 'hard'
+        ? `Context usage is ${tokens} tokens, at or above the hard cutoff ${config.thresholds.hardTokens}. Call self_compact alone with the exact unfinished next action.`
+        : renderGuidance(level, values);
+    return {
+      messages: [
+        ...messages,
+        { role: 'custom' as const, customType: GUIDANCE_MESSAGE_TYPE, content, display: false, timestamp: Date.now() },
+      ],
+    };
   });
 
   pi.on('tool_result', async (_event, ctx) => {
@@ -1023,7 +1145,16 @@ export default function (pi: ExtensionAPI) {
           : {}),
         loadDefault: () => loadDefaultCompactionInstruction(),
       });
-      return { compaction: result };
+      const state = currentState(ctx);
+      return {
+        compaction: {
+          ...result,
+          details: {
+            ...(result.details && typeof result.details === 'object' ? result.details : {}),
+            ...(state && isLockedPhase(state.phase) ? { selfCompactCycleId: state.cycleId } : {}),
+          },
+        },
+      };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       // Record the failure authoritatively here (before returning cancel) so the
