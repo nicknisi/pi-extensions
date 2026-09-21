@@ -58,6 +58,30 @@ async function withFixture<T>(
 }
 
 describe('handoff lifecycle', () => {
+  it('supports a second checkpoint inside the autonomous continuation', async () => {
+    await withFixture(
+      {
+        responses: [
+          fillerTurn(),
+          fauxAssistantMessage(fauxToolCall('self_compact', { note_to_self: 'Checkpoint again before writing.' })),
+          summary(),
+          fauxAssistantMessage(fauxToolCall('self_compact', { note_to_self: NOTE })),
+          summary(),
+          summary(),
+          fauxAssistantMessage(fauxToolCall('write', { path: 'result.txt', content: 'done' })),
+          fauxAssistantMessage('Done.'),
+        ],
+      },
+      async (fixture) => {
+        await fixture.session.prompt('Begin.');
+        const state = readHandoffState(fixture.branch());
+        expect(state?.completedCycles, JSON.stringify(state)).toBe(2);
+        expect(readDeliveredCycleIds(fixture.branch()).size).toBe(2);
+        expect(readFileSync(join(fixture.dir, 'result.txt'), 'utf8')).toBe('done');
+      },
+    );
+  }, 15000);
+
   it('compacts once idle then resumes unfinished work via one continuation, restoring tools', async () => {
     await withFixture(
       {
@@ -85,6 +109,7 @@ describe('handoff lifecycle', () => {
         const active = new Set(fixture.session.agent.state.tools.map((t) => t.name));
         expect(active.has('write')).toBe(true);
         expect(active.has('read')).toBe(true);
+        expect(active.has('self_compact')).toBe(true);
       },
     );
   }, 40000);
@@ -273,6 +298,82 @@ describe('human commands', () => {
 });
 
 describe('recovery', () => {
+  it('native tree navigation releases the abandoned handoff lock and reapplies it on return', async () => {
+    await withFixture(
+      {
+        captureUI: true,
+        responses: [
+          fauxAssistantMessage('An earlier safe point.'),
+          fillerTurn(),
+          fauxAssistantMessage(fauxToolCall('self_compact', { note_to_self: NOTE })),
+          failingSummary,
+        ],
+      },
+      async (fixture) => {
+        await fixture.session.prompt('Establish a safe point.');
+        const target = fixture.sessionManager.getLeafId();
+        expect(target).toBeTruthy();
+        await fixture.session.prompt('Begin the task.');
+        const failedLeaf = fixture.sessionManager.getLeafId();
+        expect(readHandoffState(fixture.branch())?.phase).toBe('failed');
+        expect(fixture.session.agent.state.tools.map((t) => t.name)).toEqual(['self_compact']);
+        await fixture.session.navigateTree(target!, { summarize: false });
+        expect(readHandoffState(fixture.branch())).toBeUndefined();
+        expect(fixture.session.agent.state.tools.map((t) => t.name)).toContain('write');
+        await fixture.session.navigateTree(failedLeaf!, { summarize: false });
+        expect(readHandoffState(fixture.branch())?.phase).toBe('failed');
+        expect(fixture.session.agent.state.tools.map((t) => t.name)).toEqual(['self_compact']);
+      },
+    );
+  }, 15000);
+
+  it('retains the note and lock after actual compaction cancellation, then permits manual recovery', async () => {
+    await withFixture(
+      {
+        tokensPerSecond: 500,
+        responses: [
+          fillerTurn(),
+          fauxAssistantMessage(fauxToolCall('self_compact', { note_to_self: NOTE })),
+          summary('summary '.repeat(2000)),
+        ],
+      },
+      async (fixture) => {
+        const running = fixture.session.prompt('Begin.');
+        await waitFor(() => fixture.session.isCompacting, 10000);
+        fixture.session.abortCompaction();
+        await running;
+        expect(readHandoffState(fixture.branch())?.phase).toBe('failed');
+        expect(readHandoffState(fixture.branch())?.note).toBe(NOTE);
+        expect(fixture.session.agent.state.tools.map((t) => t.name)).toEqual(['self_compact']);
+        fixture.faux.appendResponses([summary(), fauxAssistantMessage('Recovered.')]);
+        await fixture.session.compact();
+        await waitFor(() => readHandoffState(fixture.branch())?.phase === 'delivered', 5000);
+        expect(readDeliveredCycleIds(fixture.branch()).size).toBe(1);
+      },
+    );
+  }, 20000);
+
+  it('manual compaction recovers a failed handoff without another self_compact call', async () => {
+    await withFixture(
+      {
+        responses: [
+          fillerTurn(),
+          fauxAssistantMessage(fauxToolCall('self_compact', { note_to_self: NOTE })),
+          failingSummary,
+        ],
+      },
+      async (fixture) => {
+        await fixture.session.prompt('Begin.');
+        expect(readHandoffState(fixture.branch())?.phase).toBe('failed');
+        fixture.faux.appendResponses([summary(), fauxAssistantMessage('Recovered through manual compaction.')]);
+        await fixture.session.compact();
+        await waitFor(() => readHandoffState(fixture.branch())?.phase === 'delivered', 3000);
+        expect(readHandoffState(fixture.branch())?.note).toBe(NOTE);
+        expect(fixture.session.agent.state.tools.map((t) => t.name)).toContain('self_compact');
+      },
+    );
+  }, 15000);
+
   it('keeps the note and lock on summary failure, then delivers on explicit retry with the unchanged note', async () => {
     await withFixture(
       {
