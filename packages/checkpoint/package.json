@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-checkpoint",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Durable self-compaction: a note-bearing self_compact tool that checkpoints a long-running agent and resumes its exact next action",
   "keywords": [
     "pi",
