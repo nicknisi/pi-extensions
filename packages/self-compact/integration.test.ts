@@ -173,6 +173,103 @@ describe('prompt overrides', () => {
       },
     );
   }, 40000);
+
+  it('routes a literal --compact-prompt flag as the summary system message, note delivered separately', async () => {
+    let capturedSystem: string | undefined;
+    const captureSummary = (context: {
+      messages: Array<{ role: string; content: string | Array<{ text?: string }> }>;
+    }) => {
+      const first = context.messages[0];
+      if (first && first.role === 'system') {
+        capturedSystem =
+          typeof first.content === 'string' ? first.content : first.content.map((c) => c.text ?? '').join('');
+      }
+      return summary('## Goal\nSUMMARY BODY CONTENT');
+    };
+    await withFixture(
+      {
+        flags: { 'compact-prompt': 'LITERAL SUMMARY OVERRIDE FROM FLAG' },
+        responses: [
+          fillerTurn(),
+          fauxAssistantMessage(fauxToolCall('self_compact', { note_to_self: NOTE })),
+          captureSummary as unknown as AssistantMessage,
+          fauxAssistantMessage('Done.'),
+        ],
+      },
+      async (fixture) => {
+        await fixture.session.prompt('Begin.');
+        await waitFor(() => readHandoffState(fixture.branch())?.phase === 'delivered', 20000);
+        // The flag literal wins over the default file and is never treated as a filename.
+        expect(capturedSystem).toBe('LITERAL SUMMARY OVERRIDE FROM FLAG');
+        expect(capturedSystem).not.toContain(NOTE);
+        const serialized = JSON.stringify(fixture.branch());
+        expect(serialized).toContain(NOTE); // note still delivered verbatim as the continuation
+      },
+    );
+  }, 40000);
+});
+
+describe('context widget', () => {
+  it('publishes a 20-cell RPC context widget with a percentage label', async () => {
+    await withFixture(
+      {
+        captureUI: true,
+        responses: [fauxAssistantMessage('working on it'), fauxAssistantMessage('done')],
+      },
+      async (fixture) => {
+        await fixture.session.prompt('Do a little work.');
+        await waitFor(() => fixture.ui.widget() !== undefined, 10000);
+        const line = fixture.ui.widget()?.[0] ?? '';
+        // [<20 cells>] <n>% or ?% when usage is momentarily unknown.
+        expect(line).toMatch(/^\[.{20}\] (\d+%|\?%)$/u);
+      },
+    );
+  }, 30000);
+});
+
+describe('human commands', () => {
+  it('/self-compact-info reports diagnostics via RPC without calling the model', async () => {
+    await withFixture({ captureUI: true, responses: [] }, async (fixture) => {
+      const before = fixture.faux.state.callCount;
+      await fixture.session.prompt('/self-compact-info');
+      const info = fixture.ui.notifications().find((n) => n.message.startsWith('self-compact info:'));
+      expect(info).toBeDefined();
+      expect(info?.message).toContain('resolved:');
+      expect(fixture.faux.state.callCount).toBe(before); // no provider request triggered
+    });
+  }, 30000);
+
+  it('/self-compact-now re-delivers the exact saved note and drives a real retry (no ctx.compact bypass)', async () => {
+    await withFixture(
+      {
+        captureUI: true,
+        responses: [
+          fillerTurn(),
+          fauxAssistantMessage(fauxToolCall('self_compact', { note_to_self: NOTE })),
+          failingSummary, // fail -> locked, pending note preserved
+        ],
+      },
+      async (fixture) => {
+        await fixture.session.prompt('Begin.');
+        await waitFor(() => readHandoffState(fixture.branch())?.phase === 'failed', 15000);
+
+        // The model's retry follows the required-note workflow (self_compact tool),
+        // not a direct forced compaction from the command.
+        fixture.faux.appendResponses([
+          fauxAssistantMessage(fauxToolCall('self_compact', { note_to_self: NOTE })),
+          summary(),
+          fauxAssistantMessage('Recovered.'),
+        ]);
+        await fixture.session.prompt('/self-compact-now');
+        await waitFor(() => readHandoffState(fixture.branch())?.phase === 'delivered', 20000);
+
+        expect(readDeliveredCycleIds(fixture.branch()).size).toBe(1);
+        expect(readHandoffState(fixture.branch())?.note).toBe(NOTE);
+        const serialized = JSON.stringify(fixture.branch());
+        expect(serialized).toContain('self-compact:manual-request');
+      },
+    );
+  }, 45000);
 });
 
 describe('recovery', () => {
@@ -403,6 +500,9 @@ describe('reconciliation and queued messages', () => {
 
         expect(statePhases(reopened.branch())).toContain('ready-to-deliver');
         expect(readDeliveredCycleIds(reopened.branch()).size).toBe(1);
+        // The continuation turn writes the file after the handoff is marked
+        // delivered, so wait for the side effect rather than racing it.
+        await waitFor(() => existsSync(join(reopened.dir, 'result.txt')), 15000);
         expect(readFileSync(join(reopened.dir, 'result.txt'), 'utf8')).toBe('done');
       } finally {
         reopened.dispose();
