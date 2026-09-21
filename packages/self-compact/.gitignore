@@ -1,0 +1,17 @@
+# Build output
+dist/
+
+# Dependencies (package-local install pins the tested Pi runtime)
+node_modules/
+
+# Local verification evidence: the pre-build boundary baseline is a
+# machine-specific snapshot, not a committed fixture. Sanitized results and
+# real-model transcripts stay local too.
+verify/results/
+
+# Live-continuation artifact written by real-model acceptance checks
+result.txt
+
+# Disposable session/log output
+*.log
+.sessions/
