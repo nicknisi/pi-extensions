@@ -1,0 +1,3037 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Self-Compaction — Contract</title>
+    <script>
+      // Apply a saved forced theme before first paint to avoid a flash
+      try {
+        const saved = localStorage.getItem('ideation-contract-theme');
+        if (saved === 'light' || saved === 'dark')
+          document.documentElement.dataset.theme = saved;
+      } catch {}
+    </script>
+    <style>
+/* ═══════════════════════════════════════════════════════════════════
+   Contract — the pre-flight document.
+
+   THESIS   A contract is what you sign before handing hours of
+            autonomous work to a machine. So it shows the machine's
+            behavior, not only the plan's prose. It refuses the dark
+            instrument-panel dashboard this file used to be.
+   WORLD    The ideation field guide — DESIGN.md is the token
+            authority; this file is one of its two canonical
+            declarations. Paper ground, ink, ONE cobalt accent,
+            serif display, letterpress offset chips, hairline
+            rules, 3px radii. Graphite dark deck, never navy.
+   REGISTER Serif carries headings and prose. Mono is demoted to what
+            is literally a command, a path, or a measured number —
+            never a costume for "technical".
+   MOTION   One authored moment: the run model's token traverses
+            scout→build→review→commit once, on entry. Everything else
+            is a state change under 160ms.
+
+   Inlined into generated HTML by contract-gen.ts at build time.
+   Self-contained: no fonts, no CDNs, no images.
+   ═══════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Auto: follow the system. The masthead toggle forces a deck by
+     setting data-theme, which pins color-scheme and resolves every
+     light-dark() below. */
+  color-scheme: light dark;
+
+  /* ── Palette ─────────────────────────────────────────────────
+     light-dark(paper deck, graphite deck). Values are the shipped
+     ideation site's, so a contract looks like the product that
+     produced it. */
+  --bg: light-dark(#f7f7f3, #131417);
+  --surface-1: light-dark(#fcfcfa, #1a1c20);
+  --surface-2: light-dark(#ffffff, #202329);
+  --wash: light-dark(#ebebe4, #0c0d0f);
+  --line: light-dark(#dededf, #2d3036);
+  --line-strong: light-dark(#a6a6a0, #4c505a);
+  --ink: light-dark(#191b1d, #e9e9e4);
+  --muted: light-dark(#50555a, #a8aaa6);
+  --faint: light-dark(#75797d, #82858a);
+
+  --accent: light-dark(#2b46c7, #93a7ff);
+  --accent-tint: light-dark(#e6eafb, #1e2542);
+  --go: light-dark(#187a48, #63bf8d);
+  --go-tint: light-dark(#e0f0e7, #15291e);
+  --caution: light-dark(#94660a, #d2ad55);
+  --caution-tint: light-dark(#f5ecd2, #2b2513);
+  --danger: light-dark(#bb3a2c, #e0796e);
+  --danger-tint: light-dark(#f8e2de, #331714);
+
+  /* Letterpress: an offset, no blur. The world's depth device. */
+  --press: 3px 3px 0 0 var(--line);
+  --press-strong: 4px 4px 0 0 var(--wash);
+
+  /* ── Type ────────────────────────────────────────────────────
+     Serif = voice. Sans = interface furniture. Mono = evidence. */
+  --font-serif:
+    'Iowan Old Style', 'Palatino Nova', Palatino, 'Book Antiqua', Georgia,
+    'Times New Roman', serif;
+  --font-mono:
+    'Berkeley Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', Menlo, Consolas,
+    monospace;
+  --font-sans:
+    system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial,
+    sans-serif;
+
+  --t-kicker: 0.6875rem;
+  --t-meta: 0.75rem;
+  --t-data: 0.8125rem;
+  --t-small: 0.875rem;
+  --t-body: 1rem;
+  --t-lead: 1.125rem;
+  --t-h3: 1.25rem;
+  --t-h2: 1.75rem;
+  --t-display: clamp(2.25rem, 5.5vw, 3.5rem);
+  --t-figure: clamp(1.75rem, 4vw, 2.5rem);
+
+  /* ── Space (4pt) ─────────────────────────────────────────── */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+  --s8: 72px;
+  --s9: 104px;
+
+  --radius: 3px;
+  --radius-lg: 4px;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --measure: 68ch;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+:root[data-theme='dark'] {
+  color-scheme: dark;
+}
+
+/* ── Reset ─────────────────────────────────────────────────── */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+html {
+  scroll-behavior: smooth;
+  /* clear the running head when jumping to a section */
+  scroll-padding-top: 76px;
+}
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+body {
+  font-family: var(--font-serif);
+  font-size: var(--t-body);
+  line-height: 1.6;
+  color: var(--ink);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  font-kerning: normal;
+}
+:where(button, summary):focus-visible,
+:where(a, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius);
+}
+.wrap {
+  max-width: 1140px;
+  margin: 0 auto;
+  padding-inline: var(--s6);
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ── Voices ────────────────────────────────────────────────── */
+
+/* Reserved for labels on measurements and for the two stamps.
+   Not an eyebrow over every section — sections get real serif heads. */
+.kicker {
+  font-family: var(--font-mono);
+  font-size: var(--t-kicker);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.meta {
+  font-family: var(--font-mono);
+  font-size: var(--t-meta);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+/* Letterpress stamp — status, worn like a rubber stamp on paper. */
+.stamp {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  font-family: var(--font-mono);
+  font-size: var(--t-meta);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: var(--s1) var(--s3);
+  border: 1.5px solid currentColor;
+  border-radius: var(--radius);
+  white-space: nowrap;
+}
+.stamp::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: 0 0 auto;
+}
+.is-go {
+  color: var(--go);
+}
+.is-caution {
+  color: var(--caution);
+}
+.is-danger {
+  color: var(--danger);
+}
+.is-accent {
+  color: var(--accent);
+}
+
+/* Inline chips — small facts that ride next to text. Flat, hairline. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: var(--t-kicker);
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.chip-go {
+  color: var(--go);
+  border-color: currentColor;
+  background: var(--go-tint);
+}
+.chip-caution {
+  color: var(--caution);
+  border-color: currentColor;
+  background: var(--caution-tint);
+}
+.chip-danger {
+  color: var(--danger);
+  border-color: currentColor;
+  background: var(--danger-tint);
+}
+.chip-accent {
+  color: var(--accent);
+  border-color: currentColor;
+  background: var(--accent-tint);
+}
+
+/* ── Running head ──────────────────────────────────────────
+   A book's running head, not an app bar: hairline, quiet, and it
+   only appears once the masthead has scrolled away. */
+
+.runhead {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  background: color-mix(in oklab, var(--bg) 88%, transparent);
+  backdrop-filter: blur(8px) saturate(1.4);
+  border-bottom: 1px solid var(--line);
+  opacity: 0;
+  transform: translateY(-100%);
+  transition:
+    opacity 0.22s var(--ease),
+    transform 0.22s var(--ease);
+  pointer-events: none;
+}
+.runhead[data-visible='true'] {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+.runhead-inner {
+  display: flex;
+  align-items: center;
+  gap: var(--s5);
+  height: 52px;
+}
+.runhead-name {
+  font-family: var(--font-serif);
+  font-size: var(--t-small);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 24ch;
+}
+.runhead-nav {
+  display: flex;
+  gap: var(--s1);
+  margin-inline-start: auto;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.runhead-nav::-webkit-scrollbar {
+  display: none;
+}
+.runhead-nav a {
+  font-family: var(--font-mono);
+  font-size: var(--t-kicker);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--faint);
+  text-decoration: none;
+  padding: var(--s1) var(--s2);
+  border-radius: var(--radius);
+  white-space: nowrap;
+  transition: color 0.14s var(--ease);
+}
+.runhead-nav a:hover {
+  color: var(--ink);
+  background: var(--wash);
+}
+.runhead-nav a[aria-current='true'] {
+  color: var(--accent);
+  box-shadow: inset 0 -2px 0 0 var(--accent);
+}
+.runhead-run {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: var(--t-kicker);
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  padding: 5px var(--s3);
+  color: var(--bg);
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.runhead-run:hover {
+  filter: brightness(1.08);
+}
+
+/* ── Masthead ──────────────────────────────────────────────── */
+
+.masthead {
+  padding-block: var(--s7) var(--s7);
+}
+.masthead-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s5);
+  flex-wrap: wrap;
+}
+.masthead-slug {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-bottom: var(--s3);
+}
+/* The mark: a rotated square, the same glyph as the plugin's favicon. */
+.masthead-mark {
+  width: 10px;
+  height: 10px;
+  background: var(--accent);
+  transform: rotate(45deg);
+  flex: 0 0 auto;
+}
+.masthead h1 {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: var(--t-display);
+  font-weight: 600;
+  line-height: 1.02;
+  letter-spacing: -0.022em;
+  text-wrap: balance;
+  max-width: 18ch;
+}
+.masthead-aside {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--s2);
+  text-align: right;
+  flex: 0 0 auto;
+}
+.masthead-dates {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-end;
+}
+.theme-toggle {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  margin-top: var(--s1);
+  padding: 0;
+  color: var(--faint);
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.theme-toggle::after {
+  content: '';
+  position: absolute;
+  inset: -7px;
+}
+.theme-toggle:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.theme-toggle svg {
+  width: 15px;
+  height: 15px;
+  display: none;
+}
+.theme-toggle[data-mode='auto'] .i-auto,
+.theme-toggle[data-mode='light'] .i-light,
+.theme-toggle[data-mode='dark'] .i-dark {
+  display: block;
+}
+
+/* The lede — one sentence of what this contract commits to. */
+.masthead-lede {
+  margin: var(--s5) 0 0;
+  font-size: var(--t-lead);
+  line-height: 1.55;
+  color: var(--muted);
+  max-width: 62ch;
+  text-wrap: pretty;
+}
+.masthead-lede strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* ── Flight strip ──────────────────────────────────────────
+   The five measurements that decide whether you hand this over.
+   One bordered strip of cells, not a row of floating cards. */
+
+.flightstrip {
+  margin-top: var(--s6);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(184px, 1fr));
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface-1);
+  box-shadow: var(--press);
+  overflow: hidden;
+}
+.fs-cell {
+  padding: var(--s4) var(--s4) var(--s3);
+  border-inline-start: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  min-width: 0;
+}
+.fs-cell:first-child {
+  border-inline-start: 0;
+}
+.fs-figure {
+  font-family: var(--font-mono);
+  font-size: var(--t-figure);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+.fs-figure .fs-of {
+  font-size: 0.5em;
+  color: var(--faint);
+  font-weight: 500;
+  letter-spacing: 0;
+}
+.fs-note {
+  font-family: var(--font-sans);
+  font-size: var(--t-meta);
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+/* Coverage meter — a real proportion, drawn to scale. */
+.meter {
+  display: flex;
+  gap: 2px;
+  height: 6px;
+  margin-top: var(--s1);
+}
+.meter span {
+  flex: 1;
+  border-radius: 1px;
+  background: var(--line-strong);
+}
+.meter .on {
+  background: var(--go);
+}
+.meter .warn {
+  background: var(--caution);
+}
+
+/* Risk bar — proportional segments, labelled, never colour alone. */
+.riskbar {
+  display: flex;
+  height: 6px;
+  margin-top: var(--s1);
+  border-radius: 1px;
+  overflow: hidden;
+  background: var(--wash);
+}
+.riskbar i {
+  display: block;
+}
+.riskbar .r-high {
+  background: var(--danger);
+}
+.riskbar .r-medium {
+  background: var(--caution);
+}
+.riskbar .r-low {
+  background: var(--go);
+}
+
+/* ── Section furniture ─────────────────────────────────────── */
+
+.band {
+  padding-block: var(--s8);
+  border-top: 1px solid var(--line);
+}
+.masthead {
+  border-top: 0;
+}
+.band-wash {
+  background: var(--surface-1);
+}
+.sec-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--s5);
+  margin-bottom: var(--s6);
+  flex-wrap: wrap;
+}
+.sec-head h2 {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: var(--t-h2);
+  font-weight: 600;
+  letter-spacing: -0.018em;
+  line-height: 1.15;
+}
+.sec-sub {
+  margin: var(--s2) 0 0;
+  font-size: var(--t-small);
+  line-height: 1.55;
+  color: var(--muted);
+  max-width: 62ch;
+  text-wrap: pretty;
+}
+.sec-count {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: var(--t-meta);
+  color: var(--faint);
+  letter-spacing: 0.03em;
+  padding-bottom: 3px;
+}
+
+/* ── Gate board ────────────────────────────────────────────── */
+
+.gates {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.gate {
+  padding: var(--s4);
+  border-inline-start: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--s1) var(--s3);
+  align-content: start;
+}
+.gate:first-child {
+  border-inline-start: 0;
+}
+.gate-mark {
+  grid-row: span 2;
+  font-family: var(--font-mono);
+  font-size: var(--t-body);
+  font-weight: 700;
+  line-height: 1.2;
+}
+.gate-name {
+  font-family: var(--font-serif);
+  font-size: var(--t-small);
+  font-weight: 600;
+  color: var(--ink);
+  align-self: center;
+}
+.gate-ev {
+  grid-column: 2;
+  font-family: var(--font-sans);
+  font-size: var(--t-meta);
+  line-height: 1.5;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+
+/* ── Run advice ────────────────────────────────────────────
+   verify.mjs's adviseRunMode(), rendered. The verdict the routing
+   decision is made on, printed in the contract instead of lost in
+   a transcript. */
+
+/* Two columns only when there is enough to fill the second one. adviseRunMode
+   short-circuits on the first disqualifying reason, so a one-reason verdict is
+   the common case, not the edge case. */
+.advice {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) 1fr;
+  gap: var(--s6);
+  align-items: start;
+  padding: var(--s5);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+  box-shadow: var(--press);
+}
+.advice-verdict {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s2);
+}
+.advice[data-few='true'] {
+  grid-template-columns: 1fr;
+  gap: var(--s4);
+}
+.advice[data-few='true'] .advice-reasons {
+  padding: var(--s4) 0 0;
+  border-inline-start: 0;
+  border-top: 1px solid var(--line);
+}
+.advice-mode {
+  font-family: var(--font-serif);
+  font-size: var(--t-h3);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+}
+.advice-gloss {
+  font-family: var(--font-sans);
+  font-size: var(--t-meta);
+  line-height: 1.55;
+  color: var(--muted);
+}
+.advice-reasons {
+  margin: 0;
+  padding: 0 0 0 var(--s6);
+  border-inline-start: 1px solid var(--line);
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  align-self: stretch;
+}
+.advice-reasons li {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  gap: var(--s3);
+  font-family: var(--font-sans);
+  font-size: var(--t-small);
+  line-height: 1.55;
+  color: var(--ink);
+  align-items: start;
+}
+.advice-reasons .r-mark {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  line-height: 1.45;
+}
+.advice-reasons .m-ok {
+  color: var(--go);
+}
+.advice-reasons .m-no {
+  color: var(--danger);
+}
+.advice-reasons .m-warn {
+  color: var(--caution);
+}
+
+/* ── Prose & goals ─────────────────────────────────────────── */
+
+.split {
+  display: grid;
+  grid-template-columns: 1.15fr 1fr;
+  gap: var(--s8);
+  align-items: start;
+}
+.prose p {
+  margin: 0 0 var(--s4);
+  font-size: var(--t-body);
+  line-height: 1.68;
+  max-width: var(--measure);
+  text-wrap: pretty;
+}
+.prose p:last-child {
+  margin-bottom: 0;
+}
+/* Drop cap on the first paragraph — the field guide's opening device. */
+.prose > p:first-child::first-letter {
+  float: left;
+  font-size: 3.1em;
+  line-height: 0.82;
+  padding: 0.06em 0.09em 0 0;
+  font-weight: 600;
+  color: var(--accent);
+}
+.goals {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: goal;
+}
+.goals li {
+  counter-increment: goal;
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  gap: var(--s3);
+  padding: var(--s3) 0;
+  border-top: 1px solid var(--line);
+  font-size: var(--t-small);
+  line-height: 1.6;
+  text-wrap: pretty;
+}
+.goals li:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+.goals li::before {
+  content: counter(goal, decimal-leading-zero);
+  font-family: var(--font-mono);
+  font-size: var(--t-meta);
+  font-weight: 600;
+  color: var(--accent);
+  padding-top: 3px;
+}
+
+/* ── Scope ─────────────────────────────────────────────────
+   The nesting diagram stops being decoration: hovering or focusing
+   a tier lights its own items, and the counts are live. */
+
+.scope {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: var(--s7);
+  align-items: start;
+}
+.nest {
+  position: relative;
+  width: 280px;
+  height: 280px;
+  flex: 0 0 auto;
+}
+.nest-ring {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  border-radius: var(--radius-lg);
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  transition: background 0.16s var(--ease);
+}
+.nest-stretch {
+  width: 280px;
+  height: 280px;
+  border: 1px dashed var(--line-strong);
+}
+.nest-full {
+  width: 202px;
+  height: 202px;
+  border: 1px solid var(--accent);
+}
+.nest-mvp {
+  width: 124px;
+  height: 124px;
+  border: 1.5px solid var(--accent);
+  background: var(--accent-tint);
+}
+.nest-ring[aria-pressed='true'],
+.nest-ring:hover {
+  background: var(--accent-tint);
+}
+.nest-mvp[aria-pressed='true'],
+.nest-mvp:hover {
+  background: color-mix(in oklab, var(--accent) 22%, transparent);
+}
+.nest-label {
+  position: absolute;
+  top: 7px;
+  left: 10px;
+  font-family: var(--font-mono);
+  font-size: var(--t-kicker);
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--accent);
+  white-space: nowrap;
+}
+.nest-stretch > .nest-label {
+  color: var(--faint);
+}
+.nest-caption {
+  margin-top: var(--s3);
+  font-family: var(--font-sans);
+  font-size: var(--t-meta);
+  line-height: 1.5;
+  color: var(--muted);
+  max-width: 280px;
+}
+.tiers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s5);
+}
+.tier-hd {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin-bottom: var(--s2);
+}
+.tier-hd h3 {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: var(--t-body);
+  font-weight: 600;
+}
+.hrule {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+  min-width: var(--s5);
+}
+.items {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.items li {
+  font-size: var(--t-small);
+  line-height: 1.55;
+  padding-inline-start: var(--s4);
+  position: relative;
+  text-wrap: pretty;
+  margin-bottom: var(--s1);
+}
+.items li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.62em;
+  width: 6px;
+  height: 6px;
+  background: var(--accent);
+  transform: rotate(45deg);
+}
+.items strong {
+  font-weight: 600;
+}
+/* The reason goes on its own line: run inline, a five-clause justification
+   turns a scannable list of commitments into a wall of paragraph. */
+.items .why {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--font-sans);
+  font-size: var(--t-meta);
+  line-height: 1.5;
+  color: var(--muted);
+}
+/* Tier dimming when a ring is engaged */
+.tiers[data-tier] .tier-group {
+  opacity: 0.3;
+  transition: opacity 0.18s var(--ease);
+}
+.tiers[data-tier='mvp'] .tier-group[data-tier='mvp'],
+.tiers[data-tier='full'] .tier-group[data-tier='full'],
+.tiers[data-tier='stretch'] .tier-group[data-tier='stretch'] {
+  opacity: 1;
+}
+
+.boundaries {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s5);
+  margin-top: var(--s7);
+}
+.bound {
+  padding: var(--s4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+}
+.bound h3 {
+  margin: 0 0 var(--s3);
+  font-family: var(--font-serif);
+  font-size: var(--t-small);
+  font-weight: 600;
+}
+.bound-out h3 {
+  color: var(--danger);
+}
+.bound ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.bound li {
+  font-size: var(--t-data);
+  line-height: 1.55;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+.struck {
+  color: var(--ink);
+  font-weight: 600;
+  text-decoration: line-through;
+  text-decoration-color: var(--danger);
+  text-decoration-thickness: 1.5px;
+}
+.bound-empty {
+  font-size: var(--t-data);
+  color: var(--faint);
+  font-style: italic;
+}
+
+/* ── Plan: the graph ───────────────────────────────────────
+   HTML nodes, so titles wrap and never truncate. Edges are an SVG
+   overlay measured from real geometry after layout — which is also
+   why the graph survives a font the machine actually has. */
+
+.graph {
+  position: relative;
+  padding: var(--s5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+  overflow-x: auto;
+}
+.graph-edges {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+.graph-edges path {
+  fill: none;
+  stroke: var(--line-strong);
+  stroke-width: 1.5;
+}
+.graph-edges .e-hot {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+.graph-grid {
+  position: relative;
+  display: grid;
+  gap: var(--s5) var(--s7);
+  justify-content: start;
+  align-items: start;
+  min-width: min-content;
+}
+.wave-label {
+  grid-row: 1;
+  font-family: var(--font-mono);
+  font-size: var(--t-kicker);
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--faint);
+  padding-bottom: var(--s2);
+  border-bottom: 1px solid var(--line);
+  margin-bottom: var(--s2);
+}
+
+/* A phase node. Left rail carries risk; the whole thing is a button. */
+.pnode {
+  position: relative;
+  width: 216px;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  padding: var(--s3) var(--s3) var(--s3) var(--s4);
+  background: var(--surface-1);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--press);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  transition:
+    transform 0.16s var(--ease),
+    box-shadow 0.16s var(--ease),
+    border-color 0.16s var(--ease);
+}
+.pnode::before {
+  content: '';
+  position: absolute;
+  inset-inline-start: 0;
+  inset-block: 0;
+  width: 3px;
+  border-radius: var(--radius) 0 0 var(--radius);
+  background: var(--go);
+}
+.pnode[data-risk='medium']::before {
+  background: var(--caution);
+}
+.pnode[data-risk='high']::before {
+  background: var(--danger);
+}
+.pnode:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 0 var(--line);
+  border-color: var(--accent);
+}
+.pnode-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+.pnode-n {
+  font-family: var(--font-mono);
+  font-size: var(--t-meta);
+  font-weight: 700;
+  color: var(--faint);
+  letter-spacing: 0.06em;
+}
+.pnode-title {
+  font-family: var(--font-serif);
+  font-size: var(--t-small);
+  font-weight: 600;
+  line-height: 1.3;
+  text-wrap: pretty;
+}
+.pnode-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s2);
+  align-items: center;
+  margin-top: 2px;
+}
+.pnode-gate {
+  background: var(--accent-tint);
+  border-style: dashed;
+}
+/* Focus state: one phase selected, the rest recede. */
+.graph[data-focus] .pnode {
+  opacity: 0.42;
+  filter: saturate(0.5);
+}
+.graph[data-focus] .pnode[aria-pressed='true'] {
+  opacity: 1;
+  filter: none;
+  border-color: var(--accent);
+  box-shadow: 4px 4px 0 0 var(--accent-tint);
+}
+.graph-hint {
+  margin-top: var(--s4);
+  font-family: var(--font-sans);
+  font-size: var(--t-meta);
+  color: var(--faint);
+  display: flex;
+  gap: var(--s3);
+  align-items: center;
+  flex-wrap: wrap;
+}
+.graph-clear {
+  font-family: var(--font-mono);
+  font-size: var(--t-kicker);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  padding: 2px var(--s2);
+  cursor: pointer;
+  visibility: hidden;
+}
+.graph-hint[data-active='true'] .graph-clear {
+  visibility: visible;
+}
+
+/* ── Plan: the ledger ──────────────────────────────────────
+   One row per phase. Not cards — a ledger, so notes have room and
+   the eye tracks down a single column of titles. */
+
+.ledger {
+  margin-top: var(--s5);
+  display: flex;
+  flex-direction: column;
+}
+.lrow {
+  display: grid;
+  grid-template-columns: 40px minmax(180px, 1.1fr) 2fr;
+  gap: var(--s5);
+  padding: var(--s4) var(--s3);
+  border-top: 1px solid var(--line);
+  align-items: start;
+  scroll-margin-top: 96px;
+  transition:
+    opacity 0.18s var(--ease),
+    background 0.18s var(--ease);
+}
+.ledger[data-focus] .lrow {
+  opacity: 0.35;
+}
+.ledger[data-focus] .lrow[data-hot='true'] {
+  opacity: 1;
+  background: var(--accent-tint);
+  border-radius: var(--radius);
+}
+.lrow-n {
+  font-family: var(--font-mono);
+  font-size: var(--t-body);
+  font-weight: 700;
+  color: var(--faint);
+  letter-spacing: -0.01em;
+  line-height: 1.4;
+}
+.lrow-head h3 {
+  margin: 0 0 var(--s2);
+  font-family: var(--font-serif);
+  font-size: var(--t-body);
+  font-weight: 600;
+  line-height: 1.3;
+  text-wrap: pretty;
+}
+.lrow-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s2);
+}
+.lrow-body {
+  font-family: var(--font-sans);
+  font-size: var(--t-data);
+  line-height: 1.6;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+.lrow-body .spec {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: var(--s2);
+  font-family: var(--font-mono);
+  font-size: var(--t-meta);
+  color: var(--accent);
+  word-break: break-all;
+}
+.lrow-none {
+  font-style: italic;
+  color: var(--faint);
+}
+
+/* ── The run model ─────────────────────────────────────────
+   The signature moment. Five stages, the loop that can send review
+   back to build, and the gates that stop the run — with this
+   contract's own numbers in them. */
+
+.model {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+  box-shadow: var(--press);
+  overflow: hidden;
+}
+.model-track {
+  position: relative;
+  padding: var(--s6) var(--s5) var(--s7);
+  overflow-x: auto;
+}
+.stages {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(150px, 1fr));
+  gap: var(--s5);
+  min-width: 780px;
+  /* room under the outcome chips for the review⇄fix arc to pass through */
+  padding-bottom: 52px;
+}
+.stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding-top: var(--s5);
+}
+/* The rail every stage sits on, and the travelling token. */
+/* Bridges the grid gap so the rail reads as one track, not five dashes. */
+.stage::before {
+  content: '';
+  position: absolute;
+  top: 9px;
+  inset-inline: calc(var(--s5) / -2 - 1px);
+  height: 1px;
+  background: var(--line-strong);
+}
+.stage:first-child::before {
+  inset-inline-start: 50%;
+}
+.stage:last-child::before {
+  inset-inline-end: 50%;
+}
+.stage-dot {
+  position: absolute;
+  top: 3px;
+  left: calc(50% - 6.5px);
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  border: 2px solid var(--line-strong);
+  z-index: 1;
+  transition:
+    border-color 0.3s var(--ease),
+    background 0.3s var(--ease),
+    transform 0.3s var(--ease);
+}
+.model[data-lit] .stage[data-reached='true'] .stage-dot {
+  border-color: var(--accent);
+  background: var(--accent);
+  transform: scale(1.18);
+}
+.stage-name {
+  font-family: var(--font-serif);
+  font-size: var(--t-body);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.stage-agent {
+  font-family: var(--font-mono);
+  font-size: var(--t-kicker);
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+.stage-what {
+  font-family: var(--font-sans);
+  font-size: var(--t-meta);
+  line-height: 1.5;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+.stage-outs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+  margin-top: var(--s1);
+}
+/* Where the run leaves the loop. Set in caution so the eye can read the exits
+   as a row across the track without reading the prose. */
+.stage-exit {
+  margin-top: var(--s1);
+  padding-top: var(--s2);
+  border-top: 1px dashed var(--line);
+  font-family: var(--font-sans);
+  font-size: var(--t-meta);
+  line-height: 1.45;
+  color: var(--caution);
+  text-wrap: pretty;
+}
+.stage-exit code {
+  font-family: var(--font-mono);
+}
+/* The fix loop: an arc from review back to build. */
+/* Spans the Review column's centre (50%) to the Fix column's (70%) — the two
+   stages the cycle actually runs between. */
+.loopback {
+  position: absolute;
+  left: 50%;
+  right: 30%;
+  bottom: 22px;
+  height: 26px;
+  pointer-events: none;
+}
+.loopback svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.loopback path {
+  fill: none;
+  stroke: var(--caution);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+}
+.loopback-label {
+  position: absolute;
+  left: 50%;
+  bottom: -22px;
+  transform: translateX(-50%);
+  font-family: var(--font-mono);
+  font-size: var(--t-kicker);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--caution);
+  background: var(--surface-2);
+  padding-inline: var(--s2);
+  white-space: nowrap;
+}
+
+/* Run-level rules — what the engine does around the per-phase loop. */
+.rules {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  border-top: 1px solid var(--line);
+}
+.rule {
+  padding: var(--s4) var(--s5);
+  border-inline-start: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.rule:first-child {
+  border-inline-start: 0;
+}
+.rule h3 {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: var(--t-small);
+  font-weight: 600;
+}
+.rule p {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--t-meta);
+  line-height: 1.55;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+.rule code {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+  color: var(--ink);
+  background: var(--wash);
+  padding: 0 3px;
+  border-radius: 2px;
+}
+
+/* ── Done when ─────────────────────────────────────────────
+   The completion predicate, shown as the scoreboard it becomes. */
+
+.score {
+  display: grid;
+  grid-template-columns: minmax(260px, 340px) 1fr;
+  gap: var(--s7);
+  align-items: start;
+}
+/* Grid and flex items default to min-width:auto, so one nowrap command string
+   inside the panel would set a floor the whole page has to scroll to reach. */
+.score > *,
+.split > *,
+.scope > *,
+.advice > * {
+  min-width: 0;
+}
+.score-panel {
+  padding: var(--s5);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+  box-shadow: var(--press);
+  position: sticky;
+  top: 76px;
+}
+.score-figure {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  font-family: var(--font-mono);
+  font-size: var(--t-figure);
+  font-weight: 600;
+  letter-spacing: -0.04em;
+  line-height: 1;
+}
+.score-figure .of {
+  font-size: 0.44em;
+  color: var(--faint);
+  letter-spacing: 0;
+}
+.score-label {
+  margin-top: var(--s2);
+  font-family: var(--font-sans);
+  font-size: var(--t-meta);
+  line-height: 1.5;
+  color: var(--muted);
+}
+.verify-line {
+  margin-top: var(--s4);
+  padding: var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--wash);
+  font-family: var(--font-mono);
+  font-size: var(--t-meta);
+  line-height: 1.6;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.verify-line .vk {
+  color: var(--faint);
+}
+.verify-line .vg {
+  color: var(--go);
+  font-weight: 700;
+}
+.verify-cap {
+  margin-top: var(--s2);
+  font-family: var(--font-sans);
+  font-size: var(--t-meta);
+  line-height: 1.5;
+  color: var(--faint);
+}
+
+.crit-group + .crit-group {
+  margin-top: var(--s6);
+}
+.crit-group > h3 {
+  margin: 0 0 var(--s3);
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  font-family: var(--font-serif);
+  font-size: var(--t-small);
+  font-weight: 600;
+}
+.crits {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.crit {
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  gap: var(--s3);
+  padding: var(--s3) 0;
+  border-top: 1px solid var(--line);
+  align-items: start;
+}
+.crit:first-child {
+  border-top: 0;
+}
+.crit-n {
+  font-family: var(--font-mono);
+  font-size: var(--t-meta);
+  font-weight: 600;
+  color: var(--faint);
+  padding-top: 3px;
+}
+.crit-text {
+  font-size: var(--t-small);
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+.crit-check {
+  display: block;
+  margin-top: var(--s2);
+  font-family: var(--font-mono);
+  font-size: var(--t-meta);
+  line-height: 1.55;
+  color: var(--ink);
+  background: var(--wash);
+  border: 1px solid var(--line);
+  /* Hairline, not a 2px tab: the mechanical/judgment split is already carried
+     by the group heading and by the mono/sans switch, so this is the third
+     signal and gets the least weight. */
+  border-inline-start: 1px solid var(--go);
+  padding: var(--s2) var(--s3);
+  border-radius: var(--radius);
+  overflow-wrap: anywhere;
+}
+.crit-judge .crit-check {
+  border-inline-start-color: var(--caution);
+  font-family: var(--font-sans);
+  color: var(--muted);
+}
+.crit-expect {
+  display: block;
+  margin-top: 5px;
+  font-family: var(--font-sans);
+  font-size: var(--t-meta);
+  color: var(--muted);
+}
+.crit-static {
+  margin-inline-start: var(--s2);
+}
+
+/* ── Decisions ─────────────────────────────────────────────── */
+
+.decisions {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  columns: 2;
+  column-gap: var(--s8);
+}
+.decision {
+  break-inside: avoid;
+  padding: var(--s4) 0;
+  border-top: 1px solid var(--line);
+}
+.decision:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+.decision h3 {
+  margin: 0 0 var(--s2);
+  font-family: var(--font-serif);
+  font-size: var(--t-small);
+  font-weight: 600;
+  line-height: 1.4;
+  text-wrap: pretty;
+}
+.decision p {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--t-meta);
+  line-height: 1.6;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+.decision .rejected {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* ── Open questions ────────────────────────────────────────── */
+
+.openqs {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.openq {
+  break-inside: avoid;
+  padding: var(--s4) 0;
+  border-top: 1px solid var(--line);
+}
+.openq:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+.openq h3 {
+  margin: var(--s2) 0 var(--s2);
+  font-family: var(--font-serif);
+  font-size: var(--t-small);
+  font-weight: 600;
+  line-height: 1.4;
+  text-wrap: pretty;
+}
+/* A label on a kind, not an eyebrow over a section — the four kinds are the
+   thing the reader routes on. */
+.openq-type {
+  font-family: var(--font-mono);
+  font-size: var(--t-meta);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.openq-meta {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--t-meta);
+  line-height: 1.6;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+/* Blocked entries are marked by the word, coloured to be findable in a scan. */
+.openq-wait {
+  color: var(--caution);
+  font-weight: 600;
+}
+/* An id is a handle the next session types back in, so it is mono. No chip:
+   padding would open a gap before the comma that separates two of them. */
+.openq-meta code {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+  color: var(--ink);
+}
+/* The entry's own id leads its meta line, and the ids after "waiting on" are
+   references to other entries. Same mono treatment would make the two
+   indistinguishable, so the leading one carries the weight: it is the label
+   a reader scans for when resolving somebody else's "waiting on". */
+.openq-id {
+  font-weight: 600;
+}
+
+/* ── Commands ──────────────────────────────────────────────── */
+
+.runbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(300px, 1.5fr);
+  gap: var(--s5);
+  align-items: center;
+  padding: var(--s5);
+  border: 1.5px solid var(--accent);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+  box-shadow: var(--press-strong);
+}
+.runbar h3 {
+  margin: 0 0 var(--s2);
+  font-family: var(--font-serif);
+  font-size: var(--t-h3);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+.runbar p {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--t-meta);
+  line-height: 1.55;
+  color: var(--muted);
+  max-width: 46ch;
+}
+.cmd {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s3);
+  background: var(--wash);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: var(--t-data);
+  line-height: 1.5;
+  min-width: 0;
+}
+.cmd-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: all;
+}
+.cmd-block {
+  align-items: flex-start;
+}
+.cmd-block .cmd-text {
+  white-space: pre-wrap;
+  overflow: visible;
+  overflow-wrap: anywhere;
+}
+.copy {
+  position: relative;
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: var(--t-kicker);
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  padding: 3px var(--s2);
+  cursor: pointer;
+  min-width: 5.4em;
+  text-align: center;
+}
+.copy::after {
+  content: '';
+  position: absolute;
+  inset: -9px;
+}
+.copy:hover {
+  background: var(--accent-tint);
+  border-color: var(--accent);
+}
+.copy[data-state='done'] {
+  color: var(--go);
+  border-color: var(--go);
+  background: var(--go-tint);
+}
+
+.fold {
+  margin-top: var(--s4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-1);
+  overflow: hidden;
+}
+.fold > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: var(--s3) var(--s4);
+  font-family: var(--font-serif);
+  font-size: var(--t-small);
+  font-weight: 600;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+.fold > summary::-webkit-details-marker {
+  display: none;
+}
+.fold > summary:hover {
+  color: var(--ink);
+}
+.fold > summary::before {
+  content: '';
+  width: 0;
+  height: 0;
+  border-block: 4px solid transparent;
+  border-inline-start: 6px solid var(--faint);
+  transition: transform 0.16s var(--ease);
+}
+.fold[open] > summary::before {
+  transform: rotate(90deg);
+}
+.fold-body {
+  padding: var(--s4);
+  border-top: 1px solid var(--line);
+}
+.fold-body > p {
+  margin: 0 0 var(--s4);
+  font-family: var(--font-sans);
+  font-size: var(--t-meta);
+  line-height: 1.6;
+  color: var(--muted);
+  max-width: 76ch;
+}
+.phase-cmds {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+.phase-cmd {
+  display: grid;
+  grid-template-columns: 34px minmax(140px, 220px) 1fr;
+  gap: var(--s4);
+  align-items: center;
+}
+.phase-cmd .n {
+  font-family: var(--font-mono);
+  font-size: var(--t-meta);
+  font-weight: 600;
+  color: var(--faint);
+}
+.phase-cmd .t {
+  font-family: var(--font-serif);
+  font-size: var(--t-data);
+  font-weight: 600;
+}
+
+/* ── Awaiting approval / close ─────────────────────────────── */
+
+.awaiting {
+  margin-top: var(--s5);
+  padding: var(--s5);
+  border: 1px solid var(--caution);
+  border-radius: var(--radius-lg);
+  background: var(--caution-tint);
+}
+.awaiting p {
+  margin: var(--s2) 0 0;
+  font-family: var(--font-sans);
+  font-size: var(--t-data);
+  line-height: 1.6;
+  color: var(--ink);
+  max-width: 64ch;
+}
+.placeholder {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.close {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--s5);
+  align-items: center;
+  padding: var(--s6) var(--s5);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+  box-shadow: var(--press);
+  overflow: hidden;
+}
+/* The approved cap. As a `border-top: 3px` it mitered into the 1px side
+   borders inside a 4px corner arc — a visible wedge. Clipped by the parent's
+   radius instead, so the cap follows the corner. */
+.close::before {
+  content: '';
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline: 0;
+  height: 3px;
+  background: var(--go);
+}
+.close h2 {
+  margin: var(--s2) 0 0;
+  font-family: var(--font-serif);
+  font-size: var(--t-h2);
+  font-weight: 600;
+  letter-spacing: -0.018em;
+}
+.close p {
+  margin: var(--s3) 0 0;
+  font-family: var(--font-sans);
+  font-size: var(--t-data);
+  line-height: 1.6;
+  color: var(--muted);
+  max-width: 62ch;
+  text-wrap: pretty;
+}
+.close-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--s2);
+  text-align: right;
+}
+.colophon {
+  padding-block: var(--s6) var(--s8);
+  font-family: var(--font-sans);
+  font-size: var(--t-meta);
+  color: var(--faint);
+  line-height: 1.6;
+}
+.colophon code {
+  font-family: var(--font-mono);
+}
+
+/* ── Responsive ────────────────────────────────────────────── */
+
+@media (max-width: 1020px) {
+  .split,
+  .scope,
+  .score {
+    grid-template-columns: 1fr;
+    gap: var(--s6);
+  }
+  .score-panel {
+    position: static;
+  }
+  .advice {
+    grid-template-columns: 1fr;
+    gap: var(--s5);
+  }
+  .decisions {
+    columns: 1;
+  }
+}
+
+@media (max-width: 720px) {
+  .wrap {
+    padding-inline: var(--s4);
+  }
+  .band {
+    padding-block: var(--s7);
+  }
+  .masthead {
+    padding-top: var(--s6);
+  }
+  .masthead-top {
+    flex-direction: column;
+  }
+  .masthead-aside {
+    align-items: flex-start;
+    text-align: left;
+  }
+  .masthead-dates {
+    align-items: flex-start;
+  }
+  /* Two-up, with the rules following the grid: auto-fit would keep two
+     columns here while the single-column border rules assumed one. */
+  .flightstrip {
+    grid-template-columns: 1fr 1fr;
+  }
+  .fs-cell {
+    border-top: 1px solid var(--line);
+  }
+  .fs-cell:nth-child(-n + 2) {
+    border-top: 0;
+  }
+  .fs-cell:nth-child(odd) {
+    border-inline-start: 0;
+  }
+  .fs-cell:last-child:nth-child(odd) {
+    grid-column: span 2;
+  }
+  .gate {
+    border-inline-start: 0;
+    border-top: 1px solid var(--line);
+  }
+  .gate:first-child {
+    border-top: 0;
+  }
+  .rule {
+    border-inline-start: 0;
+    border-top: 1px solid var(--line);
+  }
+  .rule:first-child {
+    border-top: 0;
+  }
+  .nest {
+    display: none;
+  }
+  .boundaries,
+  .runbar,
+  .close {
+    grid-template-columns: 1fr;
+  }
+  .close-meta {
+    align-items: flex-start;
+    text-align: left;
+  }
+  .lrow {
+    grid-template-columns: 30px 1fr;
+    gap: var(--s3);
+  }
+  .lrow-body {
+    grid-column: 2;
+  }
+  .phase-cmd {
+    grid-template-columns: 30px 1fr;
+  }
+  .phase-cmd .cmd {
+    grid-column: 1 / -1;
+  }
+  .runhead-nav {
+    display: none;
+  }
+  .prose > p:first-child::first-letter {
+    font-size: 2.6em;
+  }
+}
+
+/* ── Motion ───────────────────────────────────────────────
+   One authored moment. The token traverses the run model once when
+   the section is first seen; nothing else animates on scroll. */
+
+@keyframes token-travel {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(var(--travel, 0px));
+  }
+}
+.token {
+  position: absolute;
+  top: 4px;
+  left: 0;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--accent) 22%, transparent);
+  opacity: 0;
+  z-index: 2;
+}
+.model[data-lit='running'] .token {
+  opacity: 1;
+  animation: token-travel var(--dur, 2400ms) var(--ease) forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+  .token {
+    display: none;
+  }
+  /* Reduced motion still gets the information: every stage reads lit. */
+  .model .stage-dot {
+    border-color: var(--accent);
+  }
+}
+
+/* ── Print — the contract as a paper document ──────────────── */
+
+@media print {
+  :root,
+  :root[data-theme] {
+    color-scheme: light;
+    --bg: #ffffff;
+    --surface-1: #ffffff;
+    --surface-2: #ffffff;
+    --wash: #f2f2ee;
+    --line: #c9c9c4;
+    --line-strong: #8a8a84;
+    --ink: #000000;
+    --muted: #303336;
+    --faint: #4a4d51;
+    --accent: #1c2f96;
+    --accent-tint: #eceffc;
+    --go: #105934;
+    --caution: #6b4a07;
+    --danger: #8e2b20;
+    --press: none;
+    --press-strong: none;
+  }
+  body {
+    font-size: 10.5pt;
+  }
+  .wrap {
+    max-width: none;
+    padding-inline: 0;
+  }
+  .runhead,
+  .copy,
+  .theme-toggle,
+  .graph-hint,
+  .token {
+    display: none !important;
+  }
+  .band {
+    padding-block: 18pt;
+    break-inside: auto;
+  }
+  .graph,
+  .model-track,
+  .flightstrip {
+    overflow: visible;
+  }
+  /* Folded content is part of the document on paper. */
+  .fold {
+    border: 0;
+  }
+  .fold > summary {
+    padding-inline: 0;
+  }
+  .fold:not([open]) > *:not(summary) {
+    display: block !important;
+  }
+  .fold-body {
+    padding-inline: 0;
+  }
+  .decisions {
+    columns: 2;
+  }
+  .score-panel {
+    position: static;
+  }
+  .gates,
+  .flightstrip,
+  .model,
+  .runbar,
+  .close,
+  .lrow,
+  .decision,
+  .openq,
+  .crit,
+  .pnode {
+    break-inside: avoid;
+  }
+  .graph[data-focus] .pnode,
+  .ledger[data-focus] .lrow {
+    opacity: 1 !important;
+    filter: none !important;
+  }
+}
+
+    </style>
+  </head>
+  <body data-contract-status="Approved">
+    <div class="runhead" id="runhead" data-visible="false">
+      <div class="wrap runhead-inner">
+        <span class="runhead-name">Self-Compaction</span>
+        <nav class="runhead-nav" aria-label="Contract sections">
+          <a href="#readiness">Readiness</a>
+          <a href="#brief">Brief</a>
+          <a href="#scope">Scope</a>
+          <a href="#plan">Plan</a>
+          <a href="#run-model">Run model</a>
+          <a href="#done">Done when</a>
+          <a href="#decisions">Decisions</a>
+        </nav>
+        <button type="button" class="runhead-run" data-copy-text="/ideation:autopilot docs/ideation/self-compact/contract.md">copy run command</button>
+      </div>
+    </div>
+
+    <header class="band masthead" id="top">
+      <div class="wrap">
+        <div class="masthead-top">
+          <div>
+            <div class="masthead-slug">
+              <span class="masthead-mark" aria-hidden="true"></span>
+              <span class="kicker">contract · self-compact</span>
+            </div>
+            <h1>Self-Compaction</h1>
+          </div>
+          <div class="masthead-aside">
+            <span class="stamp is-go">Approved</span>
+            <div class="masthead-dates">
+              <span class="meta">drafted 2026-09-21</span>
+              <span class="meta">approved 2026-09-21 · User, MVP scope and express watched execution</span>
+              <span class="meta">express · one confirmation</span>
+              <span class="meta">branch ideation/self-compact</span>
+            </div>
+            <button type="button" class="theme-toggle" id="theme-toggle" data-mode="auto" aria-label="Colour theme: follow system">
+      <svg class="i-auto" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="5"/><path d="M8 3v10" /><path d="M8 3a5 5 0 010 10z" fill="currentColor" stroke="none"/></svg>
+      <svg class="i-light" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="3.1"/><path d="M8 1v1.6M8 13.4V15M15 8h-1.6M2.6 8H1M12.9 3.1l-1.1 1.1M4.2 11.8l-1.1 1.1M12.9 12.9l-1.1-1.1M4.2 4.2L3.1 3.1"/></svg>
+      <svg class="i-dark" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M13.4 9.8A5.8 5.8 0 016.2 2.6a5.8 5.8 0 107.2 7.2z"/></svg>
+            </button>
+          </div>
+        </div>
+        <p class="masthead-lede"><strong>3 build phases</strong> across 3 dependency waves, delivering 5 committed scope items. Completion is decided by <strong>12 of 12</strong> criteria a machine can check.</p>
+        <div class="flightstrip">
+          <div class="fs-cell">
+            <span class="kicker">gates</span>
+            <span class="fs-figure"><span class="num">5</span><span class="fs-of">/5</span></span>
+            <span class="fs-note">ready — the interview closed every gate</span>
+            <div class="meter" aria-hidden="true"><span class="on"></span><span class="on"></span><span class="on"></span><span class="on"></span><span class="on"></span></div>
+          </div>
+          <div class="fs-cell">
+            <span class="kicker">phases</span>
+            <span class="fs-figure"><span class="num">03</span></span>
+            <span class="fs-note">3 dependency waves · 3 expected to commit</span>
+          </div>
+          <div class="fs-cell">
+            <span class="kicker">checkable</span>
+            <span class="fs-figure"><span class="num">12</span><span class="fs-of">/12</span></span>
+            <span class="fs-note">every criterion runs unattended</span>
+            <div class="meter" aria-hidden="true"><span class="on"></span><span class="on"></span><span class="on"></span><span class="on"></span><span class="on"></span><span class="on"></span><span class="on"></span><span class="on"></span><span class="on"></span><span class="on"></span><span class="on"></span><span class="on"></span></div>
+          </div>
+          <div class="fs-cell">
+            <span class="kicker">scope</span>
+            <span class="fs-figure"><span class="num">05</span></span>
+            <span class="fs-note">5 MVP · 0 full · 0 stretch · 6 refused</span>
+          </div>
+          <div class="fs-cell">
+            <span class="kicker">risk</span>
+            <span class="fs-figure"><span class="num">1</span><span class="fs-of">high</span></span>
+            <span class="fs-note">of 3 phases · 1 high · 2 medium</span>
+            <div class="riskbar" aria-hidden="true"><i class="r-high" style="width:33.3%"></i><i class="r-medium" style="width:66.7%"></i></div>
+          </div>
+        </div>
+      </div>
+    </header>
+    <main>
+
+    <section class="band" id="readiness" aria-labelledby="readiness-h">
+      <div class="wrap">
+      <div class="sec-head">
+        <div>
+          <h2 id="readiness-h">Is this ready to hand over?</h2>
+          <p class="sec-sub">Every dimension the interview probes closed with evidence. Each cell below is what closed it.</p>
+        </div>
+        <span class="sec-count">5/5 ready</span>
+      </div>
+      <div class="gates">
+        <div class="gate">
+          <span class="gate-mark is-go" aria-hidden="true">✓</span>
+          <span class="gate-name">Problem Clarity <span class="sr-only">— ready</span></span>
+          <span class="gate-ev">self-compact.md identifies long-running autonomous Pi sessions losing useful context and spending unnecessarily on oversized prompts.</span>
+        </div>
+        <div class="gate">
+          <span class="gate-mark is-go" aria-hidden="true">✓</span>
+          <span class="gate-name">Goal Definition <span class="sr-only">— ready</span></span>
+          <span class="gate-ev">The brief's Definition of Done specifies note validation, autonomous continuation, three threshold levels, a 20-cell bar, four flags, prompt files, and human commands.</span>
+        </div>
+        <div class="gate">
+          <span class="gate-mark is-go" aria-hidden="true">✓</span>
+          <span class="gate-name">Success Criteria <span class="sr-only">— ready</span></span>
+          <span class="gate-ev">The checks below cover pure logic, actual Pi lifecycle integration, real-model continuation with exact file contents, visible widget output, packaging, and repository checks; verification programs are explicit phase deliverables.</span>
+        </div>
+        <div class="gate">
+          <span class="gate-mark is-go" aria-hidden="true">✓</span>
+          <span class="gate-name">Scope Boundaries <span class="sr-only">— ready</span></span>
+          <span class="gate-ev">All brief requirements are MVP; implementation and evidence stay in packages/self-compact, plans in this directory, with user-approved README/changeset/necessary lockfile exceptions and no Pi core or unrelated-extension changes.</span>
+        </div>
+        <div class="gate">
+          <span class="gate-mark is-go" aria-hidden="true">✓</span>
+          <span class="gate-name">Consistency <span class="sr-only">— ready</span></span>
+          <span class="gate-ev">Interview decisions settle token defaults versus percentage fixtures, undersized-model rejection, write-boundary exceptions, note-driven completion without crash-exactly-once promises, and successful /compact releasing pending handoffs.</span>
+        </div>
+      </div>
+
+      <div class="advice" data-few="true" style="margin-top: var(--s5)">
+        <div class="advice-verdict">
+          <span class="stamp is-caution">watch</span>
+          <span class="advice-mode">Stay at the desk</span>
+          <span class="advice-gloss">Something here needs a human at the failure gate. Run it, but do not leave the session — a green result would not mean what you want it to mean.</span>
+          <span class="meta">RUNMODE self-compact: watch  phases=3 cmd=12 judgment=0 risk=high</span>
+        </div>
+        <ul class="advice-reasons">
+          <li><span class="r-mark m-no" aria-hidden="true">✗</span><span><span class="sr-only">Against: </span>phase &quot;Durable self-compaction lifecycle&quot; is risk=high — be present for the failure gate</span></li>
+          <li><span class="r-mark m-warn" aria-hidden="true">!</span><span><span class="sr-only">Caveat: </span>express contract — no human reviewed these specs; phases dispatch --strict and fail closed</span></li>
+        </ul>
+      </div>
+      <div class="runbar" style="margin-top: var(--s5)">
+        <div>
+          <span class="kicker">start here</span>
+          <h3>Run the whole contract.</h3>
+          <p>Autopilot reads this plan, orders the phases, and dispatches each one through the loop below. It skips phases that already have a commit, so re-running after a fix is safe.</p>
+        </div>
+        <div class="cmd">
+            <span class="cmd-text" id="cmd-top">/ideation:autopilot docs/ideation/self-compact/contract.md</span>
+            <button type="button" class="copy" data-copy="cmd-top">copy</button>
+          </div>
+      </div>
+      </div>
+    </section>
+
+    <section class="band" id="brief" aria-labelledby="brief-h">
+      <div class="wrap">
+      <div class="sec-head">
+        <div>
+          <h2 id="brief-h">What is wrong, and what would fix it</h2>
+          <p class="sec-sub">The problem this contract exists to close, and the outcomes that would mean it closed.</p>
+        </div>
+      </div>
+      <div class="split">
+        <div class="prose">
+          <p>Long-running autonomous Pi agents accumulate context, increasing cost and reducing useful context quality. They need a deliberate checkpoint that preserves their exact next action and resumes work without another human message.</p>
+          <p>Pi already compacts conversations, but a reliable note-bearing self_compact tool must coordinate tool batches, idle-only compaction, durable handoff state, tool locking, custom summary instructions, and continuation. The extension must prove that these work in real Pi, not only in mocked event handlers.</p>
+        </div>
+        <div>
+          <div class="tier-hd">
+            <h3>Goals</h3>
+            <span class="hrule"></span>
+            <span class="sec-count">×5</span>
+          </div>
+          <ol class="goals">
+            <li>Ship @nicknisi/pi-self-compact as a standalone extension, loadable at packages/self-compact/extensions/self-compact/self-compact.ts, with no dependency on another extension or changes to Pi core.</li>
+            <li>Accept only nonblank notes of at most 24,000 characters, preserve the original note verbatim, compact once idle, restore the prior active-tool selection only after success, and resume unfinished work without another human prompt.</li>
+            <li>Retain the note and tool lock on cancellation or failure and through ordinary reload/resume; never routinely replay an already delivered handoff or restart completed work.</li>
+            <li>Provide soft, warning, and enforced context levels with validated token/percentage flags, editable prompt files, a 20-cell context widget, and /self-compact-info plus /self-compact-now while preserving built-in /compact.</li>
+            <li>Verify every Definition of Done item with package-local tests and durable evidence, including an actual model continuation writing result.txt containing exactly done.</li>
+          </ol>
+        </div>
+      </div>
+      </div>
+    </section>
+
+    <section class="band band-wash" id="scope" aria-labelledby="scope-h">
+      <div class="wrap">
+      <div class="sec-head">
+        <div>
+          <h2 id="scope-h">What is in, and what was refused</h2>
+          <p class="sec-sub">MVP nests inside Full nests inside Stretch — each ring contains the one before it. Select a ring to isolate its items.</p>
+        </div>
+        <span class="sec-count">5 committed · 6 refused</span>
+      </div>
+      <div class="scope">
+        <div>
+          <div class="nest">
+            <button type="button" class="nest-ring nest-stretch" data-tier="stretch" aria-pressed="false"><span class="nest-label">Stretch ×0</span></button>
+            <button type="button" class="nest-ring nest-full" data-tier="full" aria-pressed="false"><span class="nest-label">Full ×0</span></button>
+            <button type="button" class="nest-ring nest-mvp" data-tier="mvp" aria-pressed="false"><span class="nest-label">MVP ×5</span></button>
+          </div>
+          <p class="nest-caption">Cutting to the inner ring is always a legal move. Adding a ring is not — that is a new revision that supersedes this one.</p>
+        </div>
+        <div class="tiers" id="tiers">
+          <div class="tier-group" data-tier="mvp">
+            <div class="tier-hd">
+              <h3>MVP — must ship</h3>
+              <span class="hrule"></span>
+              <span class="sec-count">×5</span>
+            </div>
+            <ul class="items">
+              <li><strong>Note-only self_compact tool with durable session-branch state, idle scheduling, enforced tool lock, recovery, and autonomous continuation.</strong> <span class="why">— Core requested handoff; no useful minimum exists without safe failure handling.</span></li>
+              <li><strong>Four CLI flags and three context levels; 225k/250k/20k-buffer defaults, 90% hard cap, incompatible-setting rejection, and model-change revalidation.</strong> <span class="why">— Explicit threshold and launch requirements.</span></li>
+              <li><strong>Three package-local editable Markdown prompts and summary system-prompt override for extension, manual, and Pi automatic compaction.</strong> <span class="why">— Explicit prompt-engineering requirement; saved note remains a separate channel.</span></li>
+              <li><strong>20-cell cached/uncached context widget plus /self-compact-info and /self-compact-now; preserve built-in /compact.</strong> <span class="why">— Explicit visibility and human-control requirements; a widget avoids replacing other footers.</span></li>
+              <li><strong>Standalone package, package-local automated and real-model verification, README, approved root integration, and changeset.</strong> <span class="why">— The requested outcome is built and verified, not only a plan or mocked demonstration.</span></li>
+            </ul>
+          </div>
+
+
+        </div>
+      </div>
+
+      <div class="boundaries">
+        <div class="bound bound-out">
+          <h3>Out of scope — refused on purpose</h3>
+          <ul>
+            <li><span class="struck">Pi core patches, other-extension dependencies, and refactoring existing extensions.</span> — Standalone extension requirement and preservation of unrelated work.</li>
+            <li><span class="struck">Exactly-once external side effects across arbitrary process or filesystem crashes.</span> — User chose note-driven continuation and ordinary replay prevention rather than a transactional task system.</li>
+            <li><span class="struck">New structured task/completion schema, background retry scheduler, and cross-session orchestration.</span> — Keep the requested note-only interface and explicit retry; do not build a task runner.</li>
+            <li><span class="struck">Global prompt/config files, writes into the calling project's .pi directory, replacement footer, or unrelated build-tool upgrades.</span> — Package-local prompt ownership and strict deliverable boundary; reuse Pi widget and package-local dependencies.</li>
+            <li><span class="struck">Blocking human shell/slash commands or retroactively cancelling external effects already running before a lock.</span> — The lock gates agent tools, not the user's escape hatches or arbitrary extension code.</li>
+            <li><span class="struck">Guaranteed context/cost improvement percentages, compatibility before Pi 0.86.1, or automatic npm publication.</span> — The brief specifies operational behavior, not a benchmark, legacy support, or release deployment.</li>
+          </ul>
+        </div>
+        <div class="bound">
+          <h3>Future — someday, maybe</h3>
+          <p class="bound-empty">Nothing deferred.</p>
+        </div>
+      </div>
+      </div>
+    </section>
+
+    <section class="band" id="plan" aria-labelledby="plan-h">
+      <div class="wrap">
+      <div class="sec-head">
+        <div>
+          <h2 id="plan-h">What gets built, in what order</h2>
+          <p class="sec-sub">Sequential: prove lifecycle correctness first, add controls and presentation second, complete real-model acceptance and release integration last.. Columns are dependency waves — nothing in a column waits on anything else in it, but two phases naming the same file are still serialised, so a column is an upper bound on concurrency rather than a promise of it.</p>
+        </div>
+        <span class="sec-count">3 phases</span>
+      </div>
+      <div class="graph" id="graph" data-edges="[[0,1],[1,2]]">
+        <div class="graph-grid" aria-label="Phase dependency graph: 01 Durable self-compaction lifecycle (wave 1); 02 Threshold controls and context UI (wave 2); 03 Live acceptance and release integration (wave 3)" style="grid-template-columns: repeat(3, max-content)">
+          <svg class="graph-edges" aria-hidden="true"></svg>
+          <div class="wave-label" style="grid-column:1">wave 1</div>
+          <div class="wave-label" style="grid-column:2">wave 2</div>
+          <div class="wave-label" style="grid-column:3">wave 3</div>
+          <button type="button" class="pnode" data-phase="0" data-risk="high" aria-pressed="false"
+            style="grid-column:1; grid-row:2">
+            <span class="pnode-top">
+              <span class="pnode-n">01</span>
+            </span>
+            <span class="pnode-title">Durable self-compaction lifecycle</span>
+            <span class="pnode-foot">
+              <span class="chip">blocking</span>
+              <span class="chip chip-danger">high risk</span>
+            </span>
+          </button>
+          <button type="button" class="pnode" data-phase="1" data-risk="medium" aria-pressed="false"
+            style="grid-column:2; grid-row:2">
+            <span class="pnode-top">
+              <span class="pnode-n">02</span>
+            </span>
+            <span class="pnode-title">Threshold controls and context UI</span>
+            <span class="pnode-foot">
+              <span class="chip">blocking</span>
+              <span class="chip chip-caution">medium risk</span>
+            </span>
+          </button>
+          <button type="button" class="pnode" data-phase="2" data-risk="medium" aria-pressed="false"
+            style="grid-column:3; grid-row:2">
+            <span class="pnode-top">
+              <span class="pnode-n">03</span>
+            </span>
+            <span class="pnode-title">Live acceptance and release integration</span>
+            <span class="pnode-foot">
+              <span class="chip">blocking</span>
+              <span class="chip chip-caution">medium risk</span>
+            </span>
+          </button>
+        </div>
+      </div>
+      <div class="graph-hint" id="graph-hint" data-active="false">
+        <span>Select a phase to isolate it here and in the ledger below.</span>
+        <button type="button" class="graph-clear" id="graph-clear">show all</button>
+      </div>
+      <div class="ledger" id="ledger">
+        <div class="lrow" id="phase-0" data-phase="0">
+          <div class="lrow-n">01</div>
+          <div class="lrow-head">
+            <h3>Durable self-compaction lifecycle</h3>
+            <div class="lrow-tags">
+              <span class="chip">phase</span>
+              <span class="chip chip-caution">blocking</span>
+              <span class="chip chip-danger">high risk</span>
+              <span class="chip">wave 1</span>
+            </div>
+          </div>
+          <div class="lrow-body">
+            Capture the pre-build boundary baseline, then create the standalone package with &gt;=0.86.1 package-local test dependencies, required nested entry path, top-level index.ts re-export, and package-local build/typecheck scripts compatible with scripts/build.ts. Do not run pnpm install's repository-wide prepare emit; use --ignore-scripts and run only the package-local build. Implement note validation/persistence, safe mixed-batch locking, idle compaction, custom summary prompt replacement, exact-note continuation and failure/reload recovery. Build actual-Pi deterministic integration tests early, including print/JSON lifecycle and manual recovery. Existing root dependency versions stay untouched.
+            <div style="margin-top: var(--s2)">If this fails, 2 downstream phases are skipped, not attempted: Threshold controls and context UI, Live acceptance and release integration.</div>
+            <span class="spec">docs/ideation/self-compact/spec-phase-1.md</span>
+          </div>
+        </div>
+        <div class="lrow" id="phase-1" data-phase="1">
+          <div class="lrow-n">02</div>
+          <div class="lrow-head">
+            <h3>Threshold controls and context UI</h3>
+            <div class="lrow-tags">
+              <span class="chip">phase</span>
+              <span class="chip chip-caution">blocking</span>
+              <span class="chip chip-caution">medium risk</span>
+              <span class="chip">wave 2</span>
+            </div>
+          </div>
+          <div class="lrow-body">
+            Add validated four-flag configuration, model revalidation, soft/warning guidance and hard enforcement, all three editable prompt files, 20-cell widget, and both human commands. Verify exact bar strings and RPC widget output plus non-LLM info behavior. Cover all three launch configurations.
+            <div style="margin-top: var(--s2)">Waits for <strong>Durable self-compaction lifecycle</strong>.</div>
+            <div style="margin-top: var(--s2)">If this fails, 1 downstream phase is skipped, not attempted: Live acceptance and release integration.</div>
+            <span class="spec">docs/ideation/self-compact/spec-phase-2.md</span>
+          </div>
+        </div>
+        <div class="lrow" id="phase-2" data-phase="2">
+          <div class="lrow-n">03</div>
+          <div class="lrow-head">
+            <h3>Live acceptance and release integration</h3>
+            <div class="lrow-tags">
+              <span class="chip">phase</span>
+              <span class="chip chip-caution">blocking</span>
+              <span class="chip chip-caution">medium risk</span>
+              <span class="chip">wave 3</span>
+            </div>
+          </div>
+          <div class="lrow-body">
+            Write/run the package-local real-model RPC/print verification driver with explicit deadlines and sanitized evidence, assert fresh result.txt bytes and non-replay, inspect actual TUI behavior, finish README/package file inclusion, add root README/changeset and required lockfile updates, and run focused plus repository-wide checks. Requires configured Pi authentication; missing access is a blocker, not a successful skip. Never stage unrelated codemode/workflows edits.
+            <div style="margin-top: var(--s2)">Waits for <strong>Threshold controls and context UI</strong>.</div>
+            <span class="spec">docs/ideation/self-compact/spec-phase-3.md</span>
+          </div>
+        </div>
+      </div>
+      </div>
+    </section>
+
+    <section class="band band-wash" id="run-model" aria-labelledby="run-model-h">
+      <div class="wrap">
+      <div class="sec-head">
+        <div>
+          <h2 id="run-model-h">What actually happens when you run it</h2>
+          <p class="sec-sub">Every build phase goes through the same five stages. These are the real agents and the real gates — the points where the run can stop before anything is committed. Human gates in the plan above are not build phases: nothing is specced, built, or committed for them.</p>
+        </div>
+        <span class="sec-count">per build phase</span>
+      </div>
+      <div class="model" id="model">
+        <div class="model-track">
+          <div class="stages">
+            <span class="token" id="token" aria-hidden="true"></span>
+            <div class="stage" data-stage="0" data-reached="false">
+              <span class="stage-dot" aria-hidden="true"></span>
+              <span class="stage-name">Scout</span>
+              <span class="stage-agent">ideation:scout</span>
+              <span class="stage-what">Reads the codebase against the spec and scores five evidence gates before a line is written.</span>
+              <span class="stage-outs"><span class="chip chip-go">GO</span><span class="chip chip-caution">HOLD</span></span>
+              <span class="stage-exit"><span class="sr-only">Stops here when: </span>Under --strict a HOLD stops here — nothing is built.</span>
+            </div>
+            <div class="stage" data-stage="1" data-reached="false">
+              <span class="stage-dot" aria-hidden="true"></span>
+              <span class="stage-name">Build</span>
+              <span class="stage-agent">general-purpose</span>
+              <span class="stage-what">Implements the spec, then runs the validation the spec itself declares.</span>
+              <span class="stage-outs"><span class="chip chip-go">BUILT</span><span class="chip chip">NO-OP</span><span class="chip chip-danger">FAIL</span></span>
+              <span class="stage-exit"><span class="sr-only">Stops here when: </span>Failed validation stops here. An empty diff is a NO-OP and also stops here — review never runs.</span>
+            </div>
+            <div class="stage" data-stage="2" data-reached="false">
+              <span class="stage-dot" aria-hidden="true"></span>
+              <span class="stage-name">Review</span>
+              <span class="stage-agent">ideation:reviewer</span>
+              <span class="stage-what">Reads the diff back against the spec and returns findings counted by severity.</span>
+              <span class="stage-outs"><span class="chip chip-go">PASS</span><span class="chip chip-danger">FAIL</span></span>
+              <span class="stage-exit"><span class="sr-only">Stops here when: </span>An unavailable reviewer stops here under --strict; otherwise it commits as validation-only.</span>
+            </div>
+            <div class="stage" data-stage="3" data-reached="false">
+              <span class="stage-dot" aria-hidden="true"></span>
+              <span class="stage-name">Fix</span>
+              <span class="stage-agent">general-purpose</span>
+              <span class="stage-what">Applies or refutes every blocking finding, then hands back for another review.</span>
+              <span class="stage-outs"><span class="chip chip-go">FIXED</span><span class="chip chip-danger">FAIL</span></span>
+              <span class="stage-exit"><span class="sr-only">Stops here when: </span>Still FAIL on cycle 3 stops here — changes are left unstaged, not committed.</span>
+            </div>
+            <div class="stage" data-stage="4" data-reached="false">
+              <span class="stage-dot" aria-hidden="true"></span>
+              <span class="stage-name">Commit</span>
+              <span class="stage-agent">general-purpose</span>
+              <span class="stage-what">Stages only the files the builder named and writes the spec path into the commit body.</span>
+              <span class="stage-outs"><span class="chip chip-accent">COMMITTED</span><span class="chip chip-danger">FAILED</span></span>
+              <span class="stage-exit"><span class="sr-only">Stops here when: </span>If neither the builder nor the phase named a file, it refuses to commit blind rather than <code>git add -A</code>.</span>
+            </div>
+            <div class="loopback" aria-hidden="true">
+              <svg viewBox="0 0 200 26" preserveAspectRatio="none"><path vector-effect="non-scaling-stroke" d="M197 0 V17 Q197 24 190 24 H10 Q3 24 3 17 V0"/></svg>
+              <span class="loopback-label">review → fix → review · 3 cycles max, then it stops</span>
+            </div>
+          </div>
+        </div>
+        <div class="rules">
+          <div class="rule">
+            <h3>Waves, not a queue</h3>
+            <p>Phases are grouped into 3 waves from their declared prerequisites. A wave dispatches together; the next one waits for all of it. No phase here declares <code>files</code>, but autopilot derives them from each spec&rsquo;s File Changes tables before dispatch, so colliding phases can still be serialised. A phase whose spec has no readable File Changes section is treated as parallel-safe, and the engine logs a warning saying so.</p>
+          </div>
+          <div class="rule">
+            <h3>Failure strands, it does not retry</h3>
+            <p>A failed phase is not retried, and everything downstream of it is marked <code>SKIPPED</code> rather than attempted. Here that means <strong>Durable self-compaction lifecycle</strong> failing costs 2 more phases, and <strong>Threshold controls and context UI</strong> failing costs 1 more phase.</p>
+          </div>
+          <div class="rule">
+            <h3>Resume is a git question</h3>
+            <p>Re-running skips any phase whose spec path already appears in a commit body — which is why the commit stage writes it there. 3 build phases are expected to leave one.</p>
+          </div>
+          <div class="rule">
+            <h3>Strict: it fails closed</h3>
+            <p>This is an express contract — no human reviewed the specs — so phases dispatch <code>--strict</code>. A scout HOLD or an unavailable reviewer stops the phase instead of proceeding on an assumption.</p>
+          </div>
+        </div>
+      </div>
+      </div>
+    </section>
+
+    <section class="band" id="done" aria-labelledby="done-h">
+      <div class="wrap">
+      <div class="sec-head">
+        <div>
+          <h2 id="done-h">How you will know it worked</h2>
+          <p class="sec-sub">These are not aspirations — the ones with a command are executed by <code>verify.mjs</code>, and their result is what an unattended run is judged on.</p>
+        </div>
+        <span class="sec-count">12 of 12 mechanical</span>
+      </div>
+      <div class="score">
+        <div class="score-panel">
+          <span class="kicker">completion predicate</span>
+          <div class="score-figure"><span class="num">12</span><span class="of">/12</span></div>
+          <p class="score-label">Every criterion is machine-checkable. A green run means what it says.</p>
+          <div class="verify-line"><span class="vk">VERIFY</span> self-compact: commits=<span class="vg">3/3</span> pass=<span class="vg">12</span> fail=<span class="vg">0</span> judgment=0</div>
+          <p class="verify-cap">The line this contract is finished on, as <code>verify.mjs</code> will print it. Anything else is not done.</p>
+          <div class="cmd">
+            <span class="cmd-text" id="cmd-verify">node ${CLAUDE_PLUGIN_ROOT}/scripts/verify.mjs docs/ideation/self-compact/contract-data.json</span>
+            <button type="button" class="copy" data-copy="cmd-verify">copy</button>
+          </div>
+        </div>
+        <div>
+      <div class="crit-group">
+        <h3>Mechanically checked <span class="hrule"></span> <span class="sec-count">×12</span></h3>
+        <ul class="crits">
+          <li class="crit">
+            <span class="crit-n">01</span>
+            <span class="crit-text">The standalone published-file layout includes the required nested extension entry point, a top-level index.ts re-export, compiled dist export, and all three editable prompt files; loading requires Pi &gt;=0.86.1 and no other extension.<code class="crit-check">pnpm --filter @nicknisi/pi-self-compact build &amp;&amp; pnpm exec vitest run packages/self-compact/package.test.ts</code><span class="crit-expect">expect: Exits 0; package-local build uses the same compiler settings and top-level source roots as scripts/build.ts without running the repository-wide emit; tests validate compiled export, packed file inclusion, required peers, no extension dependencies, and standalone resource loading.</span></span>
+          </li>
+          <li class="crit">
+            <span class="crit-n">02</span>
+            <span class="crit-text">self_compact rejects blank/whitespace and 24,001-character notes without changing state, accepts exactly 24,000 characters, preserves whitespace verbatim, and persists the note before successful handoff.<code class="crit-check">pnpm exec vitest run packages/self-compact/lifecycle.test.ts -t 'note validation'</code><span class="crit-expect">expect: Exits 0 with positive boundary cases and failure assertions for invalid notes and persistence errors.</span></span>
+          </li>
+          <li class="crit">
+            <span class="crit-n">03</span>
+            <span class="crit-text">Actual Pi lifecycle tests prove idle-only self-compaction, clean tool-batch termination, one continuation per ordinary handoff, restored prior tools, and print/JSON process survival through continuation; mixed batches and queued messages cannot silently bypass a pending handoff lock.<code class="crit-check">pnpm exec vitest run packages/self-compact/integration.test.ts -t 'handoff lifecycle'</code><span class="crit-expect">expect: Exits 0 using actual Pi &gt;=0.86.1 with a deterministic provider; asserts event order, blocked sibling effects, continuation requests, and process completion, not merely a synthetic callback sequence.</span></span>
+          </li>
+          <li class="crit">
+            <span class="crit-n">04</span>
+            <span class="crit-text">Failed/cancelled compaction and reload preserve the exact note and prior-tool snapshot, remain locked, do not spin retries, and recover through /self-compact-now or successful built-in manual compaction; delivered handoffs are not replayed on ordinary reload.<code class="crit-check">pnpm exec vitest run packages/self-compact/integration.test.ts -t 'recovery'</code><span class="crit-expect">expect: Exits 0 with injected summary errors/abort, persistent session reload/resume, explicit retry with the unchanged note, manual compaction recovery, branch isolation, and duplicate-delivery assertions.</span></span>
+          </li>
+          <li class="crit">
+            <span class="crit-n">05</span>
+            <span class="crit-text">Flags parse whole tokens, k/m suffixes, percentages, and zero buffer; defaults resolve to 225k/250k/270k, 100k/200k/50k resolves to 100k/200k/250k, and 20%/50%/0 enforces at 50%. Enforce 0 &lt; soft &lt; warning &lt;= hard &lt;= 90% of the window, cap only warning+buffer, and reject malformed or incompatible settings including on model changes.<code class="crit-check">pnpm exec vitest run packages/self-compact/config.test.ts</code><span class="crit-expect">expect: Exits 0 with parsing, boundary, cap, 1M-model, zero-buffer, mixed-unit, invalid-default-on-small-model, and model-change cases.</span></span>
+          </li>
+          <li class="crit">
+            <span class="crit-n">06</span>
+            <span class="crit-text">Soft and warning messages include live usage and thresholds and leave ordinary tools available; hard crossing blocks every ordinary agent tool until a successful compaction. Notifications fire once per level per cycle without waking a completed idle task.<code class="crit-check">pnpm exec vitest run packages/self-compact/lifecycle.test.ts -t 'threshold enforcement'</code><span class="crit-expect">expect: Exits 0; executes captured tool gates at each boundary, verifies actual prompt content, normal-tool availability before hard, forced lock at hard, and no repeated idle wakeups.</span></span>
+          </li>
+          <li class="crit">
+            <span class="crit-n">07</span>
+            <span class="crit-text">The widget renders 20 five-percent cells, cached # / uncached = / free -, and marker priority | &gt; ! &gt; ~. At 40% used with half cached and explicit 20%/50%/10% settings it renders [###~====-!-|--------] 40%; a 1M window with 100k/200k/50k moves markers to 10%/20%/25%; zero buffer displays | at the overlap. Unknown usage is visibly unknown, not falsely zero.<code class="crit-check">pnpm exec vitest run packages/self-compact/bar.test.ts packages/self-compact/integration.test.ts -t 'context widget'</code><span class="crit-expect">expect: Exits 0 with exact uncolored strings and RPC widget output assertions; cached usage comes from the latest applicable assistant request, not cumulative session totals.</span></span>
+          </li>
+          <li class="crit">
+            <span class="crit-n">08</span>
+            <span class="crit-text">The package-local .pi/self-compact/USER_PROMPT_SOFT_SELF_COMPACT.md and USER_PROMPT_WARNING_SELF_COMPACT.md supply editable guidance with live values. USER_PROMPT_COMPACTION_MESSAGE.md replaces the summary system instruction; literal --compact-prompt wins independently of the saved note, including built-in /compact and split-turn summaries. Summary failure must not silently fall back to Pi's default prompt.<code class="crit-check">pnpm exec vitest run packages/self-compact/prompts.test.ts packages/self-compact/integration.test.ts -t 'prompt overrides'</code><span class="crit-expect">expect: Exits 0; captures actual summary-provider requests and checks override precedence, normal and split-turn requests, failure cancellation, and separate verbatim note delivery.</span></span>
+          </li>
+          <li class="crit">
+            <span class="crit-n">09</span>
+            <span class="crit-text">/self-compact-info displays settings, resolved thresholds, usage, state, cycle count, prompt sources, pending note, and last error without an LLM turn. /self-compact-now asks the model to use self_compact, reusing a pending note on retry, and the extension never registers or patches /compact.<code class="crit-check">pnpm exec vitest run packages/self-compact/integration.test.ts -t 'human commands'</code><span class="crit-expect">expect: Exits 0; checks command registration, info output with no provider request, fresh/retry prompts, and built-in manual compaction behavior.</span></span>
+          </li>
+          <li class="crit">
+            <span class="crit-n">10</span>
+            <span class="crit-text">A real configured model receives one initial task, calls self_compact, completes compaction, then writes packages/self-compact/result.txt with bytes exactly done without another human prompt. A completed-task case and ordinary reload do not rewrite the result or repeat work. All three launch variants load with expected resolved settings; model-window fixtures need not spend hundreds of thousands of real tokens.<code class="crit-check">node packages/self-compact/verify/live.mjs</code><span class="crit-expect">expect: Exits 0 only after fresh real-model assertions; records sanitized event/summary evidence under packages/self-compact/verify/results/. Requires installed Pi &gt;=0.86.1 and an authenticated provider, preferably the current PI_PROVIDER/PI_MODEL; missing credentials, timeouts, or skipped required checks exit nonzero. Uses reduced explicit thresholds for costly lifecycle checks and a &gt;=300k model for the default/token launch cases.</span></span>
+          </li>
+          <li class="crit">
+            <span class="crit-n">11</span>
+            <span class="crit-text">The new package passes focused tests and type/lint/format checks and has release metadata, root README integration, and a changeset.<code class="crit-check">pnpm exec vitest run packages/self-compact &amp;&amp; pnpm --filter @nicknisi/pi-self-compact typecheck &amp;&amp; pnpm exec oxlint packages/self-compact &amp;&amp; pnpm exec oxfmt --check packages/self-compact</code><span class="crit-expect">expect: Exits 0; package tests verify required release metadata and integration files. Also run repository-wide typecheck/lint/format:check during final verification and report any pre-existing unrelated failures separately without expanding scope.</span></span>
+          </li>
+          <li class="crit">
+            <span class="crit-n">12</span>
+            <span class="crit-text">All implementation/evidence writes obey the approved path boundary and preserve unrelated tracked and untracked work against a snapshot taken before implementation.<code class="crit-check">node packages/self-compact/verify/boundary.mjs check</code><span class="crit-expect">expect: Exits 0 only when changes outside packages/self-compact, docs/ideation/self-compact, root README.md, the generated self-compact changeset, and necessary pnpm-lock.yaml updates match the pre-build snapshot. Missing baseline fails. Store the baseline under packages/self-compact/verify/results; do not alter or restore unrelated files to make this pass.</span></span>
+          </li>
+        </ul>
+      </div>
+
+        </div>
+      </div>
+      </div>
+    </section>
+
+    <section class="band band-wash" id="decisions" aria-labelledby="decisions-h">
+      <div class="wrap">
+      <div class="sec-head">
+        <div>
+          <h2 id="decisions-h">What was considered and turned down</h2>
+          <p class="sec-sub">A rejected alternative is evidence, not an oversight. Before proposing one of these, read why it lost.</p>
+        </div>
+        <span class="sec-count">×10</span>
+      </div>
+      <ul class="decisions">
+        <li class="decision">
+          <h3>Use soft=225k, warning=250k, buffer=20k as defaults; the percentage bar is an explicitly configured fixture.</h3>
+          <p><span class="rejected">Instead of</span> Use 20%/50%/60% as the defaults.. User chose the brief's final token defaults in the interview.</p>
+        </li>
+        <li class="decision">
+          <h3>Allow only root README, .changeset entry, and necessary workspace lockfile changes outside the two project directories.</h3>
+          <p><span class="rejected">Instead of</span> Keep the strict boundary and stop at planning.. User authorized the minimum integration required by repository policy.</p>
+        </li>
+        <li class="decision">
+          <h3>Reject incompatible model-window settings with corrective guidance; cap only warning plus buffer at 90%.</h3>
+          <p><span class="rejected">Instead of</span> Scale default thresholds down automatically on small models.. User chose predictable, explicit thresholds over model-dependent default behavior.</p>
+        </li>
+        <li class="decision">
+          <h3>Honor free-text completion in the note and prevent routine handoff replay; keep the note-only tool schema.</h3>
+          <p><span class="rejected">Instead of</span> Add explicit structured completion state to the tool.. User chose ordinary replay protection and unfinished-work-only continuation without arbitrary-crash exactly-once guarantees.</p>
+        </li>
+        <li class="decision">
+          <h3>A successful built-in /compact discharges any pending note handoff.</h3>
+          <p><span class="rejected">Instead of</span> Keep manual compaction separate and require a second compaction through self_compact.. User chose the existing manual escape hatch as a valid recovery path.</p>
+        </li>
+        <li class="decision">
+          <h3>Include one print-mode and one JSON-mode lifecycle check, not a cross-mode test matrix.</h3>
+          <p>The scope critic requested explicit justification: headless process survival is necessary to the brief's long-running, no-human-in-the-loop agent use case, not an unrelated UI feature.</p>
+        </li>
+        <li class="decision">
+          <h3>Pause on failure/cancellation with the note and lock intact; retry via /self-compact-now without inventing a new note.</h3>
+          <p>Avoid unattended retry loops while preserving the requested recovery workflow.</p>
+        </li>
+        <li class="decision">
+          <h3>Use installed Pi &gt;=0.86.1 APIs and matching package-local development dependencies; leave the root 0.84.0 dependency pins unchanged.</h3>
+          <p>Research found required lifecycle APIs in 0.86.1 that cannot be assumed in the repository's pinned 0.84.0.</p>
+        </li>
+        <li class="decision">
+          <h3>Verify the path boundary with a pre-build snapshot and use a top-level re-export plus package-local build to satisfy the existing publish contract.</h3>
+          <p>The success-criteria critic noted tests cannot prove untouched unrelated work; the hidden-dependency critic identified scripts/build.ts's flat entry-point and dist requirements. Package-local emit avoids writing generated deliverables in unrelated packages.</p>
+        </li>
+        <li class="decision">
+          <h3>Use a widget and Pi's existing compaction implementation where its exported API permits replacing the summary system message.</h3>
+          <p>Avoid footer conflicts and preserve Pi's split-turn/file-tracking behavior without building a second compaction engine.</p>
+        </li>
+      </ul>
+      </div>
+    </section>
+
+
+    <section class="band" id="run" aria-labelledby="run-h">
+      <div class="wrap">
+      <div class="sec-head">
+        <div>
+          <h2 id="run-h">Run it</h2>
+          <p class="sec-sub">Three ways in, in descending order of how much you can walk away from.</p>
+        </div>
+      </div>
+      <div class="runbar">
+        <div>
+          <span class="kicker">recommended</span>
+          <h3>Autopilot.</h3>
+          <p>Dispatches every phase through the loop above, in dependency order, gating on failure. Already-committed phases are skipped, so re-running after a fix picks up where it stopped.</p>
+        </div>
+        <div class="cmd">
+            <span class="cmd-text" id="cmd-autopilot">/ideation:autopilot docs/ideation/self-compact/contract.md</span>
+            <button type="button" class="copy" data-copy="cmd-autopilot">copy</button>
+          </div>
+      </div>
+
+      <details class="fold">
+        <summary>Unattended, with a stop condition (/goal)</summary>
+        <div class="fold-body">
+          <p>A durability wrapper around the same autopilot run: Claude re-checks this condition before it is allowed to stop, so a failed phase gets repaired and re-run instead of ending the session. The done-when is deliberately disjunctive — two identical failing VERIFY lines release the run, because a contract whose checks have rotted must not trap it forever.</p>
+          <div class="cmd cmd-block">
+            <span class="cmd-text" id="cmd-goal">/goal Drive the Self-Compaction contract (self-compact) to completion with /ideation:autopilot.
+
+1. Run `/ideation:autopilot docs/ideation/self-compact/contract.md`. All commits belong on branch ideation/self-compact — switch to it before any run.
+2. It dispatches a BACKGROUND workflow. Wait for the completion notification — never start a second autopilot run while one is in flight.
+3. Then run the ideation plugin's `scripts/verify.mjs` against `docs/ideation/self-compact/contract-data.json` and leave its VERIFY line in the conversation. Resolve the plugin's install directory first — `${CLAUDE_PLUGIN_ROOT}/scripts/verify.mjs` is a placeholder, not a shell variable, and bash will not expand it. That line is the only evidence this goal is judged on.
+4. If anything failed, fix the spec or the implementation and go back to step 1. Autopilot skips phases that already have commits.
+
+Done when the most recent VERIFY line reads fail=0 and commits=3/3 — or when two consecutive VERIFY lines are identical and still failing, in which case name the failing checks and stop, because a contract whose checks have rotted must not trap the run.</span>
+            <button type="button" class="copy" data-copy="cmd-goal">copy</button>
+          </div>
+        </div>
+      </details>
+
+      <details class="fold">
+        <summary>One phase at a time (3)</summary>
+        <div class="fold-body">
+          <p>No orchestration, no failure gating, no resume — you are the scheduler. Start with <strong>Durable self-compaction lifecycle</strong>.</p>
+          <div class="phase-cmds">
+            <div class="phase-cmd">
+              <span class="n">01</span>
+              <span class="t">Durable self-compaction lifecycle</span>
+              <div class="cmd">
+            <span class="cmd-text" id="cmd-1">/ideation:execute-spec docs/ideation/self-compact/spec-phase-1.md</span>
+            <button type="button" class="copy" data-copy="cmd-1">copy</button>
+          </div>
+            </div>
+            <div class="phase-cmd">
+              <span class="n">02</span>
+              <span class="t">Threshold controls and context UI</span>
+              <div class="cmd">
+            <span class="cmd-text" id="cmd-2">/ideation:execute-spec docs/ideation/self-compact/spec-phase-2.md</span>
+            <button type="button" class="copy" data-copy="cmd-2">copy</button>
+          </div>
+            </div>
+            <div class="phase-cmd">
+              <span class="n">03</span>
+              <span class="t">Live acceptance and release integration</span>
+              <div class="cmd">
+            <span class="cmd-text" id="cmd-3">/ideation:execute-spec docs/ideation/self-compact/spec-phase-3.md</span>
+            <button type="button" class="copy" data-copy="cmd-3">copy</button>
+          </div>
+            </div>
+          </div>
+        </div>
+      </details>
+      </div>
+    </section>
+
+    <section class="band" id="close" aria-labelledby="close-h">
+      <div class="wrap">
+        <div class="close">
+          <div>
+            <span class="kicker">the commitment</span>
+            <h2 id="close-h">This plan is what was agreed.</h2>
+            <p>3 phases · Sequential: prove lifecycle correctness first, add controls and presentation second, complete real-model acceptance and release integration last.. Scope changes mean a new revision that supersedes this document — not silent drift. Express run — approved in one confirmation after the interview, so the review lives in the branch diff rather than in a per-artifact sign-off.</p>
+          </div>
+          <div class="close-meta">
+            <span class="stamp is-go">approved</span>
+            <span class="meta">2026-09-21 · User, MVP scope and express watched execution</span>
+          </div>
+        </div>
+        <p class="colophon">Generated by <code>ideation:contract-gen</code> from <code>docs/ideation/self-compact/contract-data.json</code>. That JSON is the source of truth; this page and <code>docs/ideation/self-compact/contract.md</code> are both rendered from it, so edit the data and re-render rather than editing either output.</p>
+      </div>
+    </section>
+    </main>
+    <script>
+(function () {
+  'use strict';
+  var reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* ---- copy ------------------------------------------------------------ */
+  function flash(btn, label) {
+    var prior = btn.dataset.label || btn.textContent;
+    btn.dataset.label = prior;
+    btn.textContent = label;
+    btn.dataset.state = 'done';
+    setTimeout(function () {
+      btn.textContent = prior;
+      btn.removeAttribute('data-state');
+    }, 1800);
+  }
+  function wireCopy(btn, getText) {
+    btn.setAttribute('aria-live', 'polite');
+    btn.addEventListener('click', function () {
+      var text = getText();
+      if (text == null) return;
+      /* file:// or a denied permission: point at the manual path rather than
+         failing silently — and select the text first, so "press ⌘C" is true.
+         navigator.clipboard is absent entirely outside a secure context, which
+         throws synchronously before any rejection handler runs, so the guard
+         has to come before the call and not only after it. */
+      var manual = function () {
+        var t = btn.dataset.copy ? document.getElementById(btn.dataset.copy) : null;
+        if (t && window.getSelection && document.createRange) {
+          var range = document.createRange();
+          range.selectNodeContents(t);
+          var sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+        flash(btn, 'press ' + (navigator.platform.indexOf('Mac') === 0 ? '⌘C' : 'Ctrl+C'));
+      };
+      if (!navigator.clipboard || !navigator.clipboard.writeText) { manual(); return; }
+      navigator.clipboard.writeText(text).then(
+        function () { flash(btn, 'copied'); },
+        manual
+      );
+    });
+  }
+  document.querySelectorAll('.copy[data-copy]').forEach(function (btn) {
+    wireCopy(btn, function () {
+      var t = document.getElementById(btn.dataset.copy);
+      return t ? t.textContent.trim() : null;
+    });
+  });
+  document.querySelectorAll('[data-copy-text]').forEach(function (btn) {
+    wireCopy(btn, function () { return btn.dataset.copyText; });
+  });
+
+  /* ---- theme (auto -> light -> dark) ----------------------------------- */
+  var themeBtn = document.getElementById('theme-toggle');
+  if (themeBtn) {
+    var KEY = 'ideation-contract-theme';
+    var root = document.documentElement;
+    var LABEL = {
+      auto: 'Colour theme: follow system',
+      light: 'Colour theme: light',
+      dark: 'Colour theme: dark'
+    };
+    var apply = function (mode) {
+      if (mode === 'auto') delete root.dataset.theme;
+      else root.dataset.theme = mode;
+      themeBtn.dataset.mode = mode;
+      themeBtn.setAttribute('aria-label', LABEL[mode]);
+      themeBtn.title = LABEL[mode];
+      try {
+        if (mode === 'auto') localStorage.removeItem(KEY);
+        else localStorage.setItem(KEY, mode);
+      } catch (e) {}
+    };
+    apply(root.dataset.theme || 'auto');
+    themeBtn.addEventListener('click', function () {
+      var order = ['auto', 'light', 'dark'];
+      apply(order[(order.indexOf(root.dataset.theme || 'auto') + 1) % 3]);
+    });
+  }
+
+  /* ---- running head + scrollspy ---------------------------------------- */
+  var runhead = document.getElementById('runhead');
+  var masthead = document.querySelector('.masthead');
+  if (runhead && masthead && 'IntersectionObserver' in window) {
+    new IntersectionObserver(function (es) {
+      runhead.dataset.visible = String(!es[0].isIntersecting);
+    }, { rootMargin: '-60px 0px 0px 0px' }).observe(masthead);
+
+    var navLinks = {};
+    runhead.querySelectorAll('.runhead-nav a').forEach(function (a) {
+      navLinks[a.getAttribute('href').slice(1)] = a;
+    });
+    /* One observer over every section; the topmost intersecting one wins, so
+       the marker never flickers between two bands sharing the viewport. */
+    var visible = {};
+    var spy = new IntersectionObserver(function (es) {
+      es.forEach(function (e) { visible[e.target.id] = e.isIntersecting; });
+      var order = Object.keys(navLinks);
+      var current = order.filter(function (id) { return visible[id]; })[0];
+      order.forEach(function (id) {
+        if (current === id) navLinks[id].setAttribute('aria-current', 'true');
+        else navLinks[id].removeAttribute('aria-current');
+      });
+    }, { rootMargin: '-70px 0px -55% 0px' });
+    Object.keys(navLinks).forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) spy.observe(el);
+    });
+  }
+
+  /* ---- phase graph: edges measured from real geometry ------------------ */
+  var graph = document.getElementById('graph');
+  var ledger = document.getElementById('ledger');
+  if (graph) {
+    var grid = graph.querySelector('.graph-grid');
+    var svg = graph.querySelector('.graph-edges');
+    var nodes = Array.prototype.slice.call(grid.querySelectorAll('.pnode'));
+    var edges = [];
+    try { edges = JSON.parse(graph.dataset.edges || '[]'); } catch (e) {}
+    var byIndex = {};
+    nodes.forEach(function (n) { byIndex[n.dataset.phase] = n; });
+
+    var draw = function () {
+      if (!edges.length) return;
+      var gb = grid.getBoundingClientRect();
+      svg.setAttribute('viewBox', '0 0 ' + gb.width + ' ' + gb.height);
+      var box = function (i) {
+        var el = byIndex[i];
+        if (!el) return null;
+        var r = el.getBoundingClientRect();
+        return {
+          l: r.left - gb.left, r: r.right - gb.left,
+          cy: r.top - gb.top + r.height / 2
+        };
+      };
+      var focus = graph.dataset.focus;
+      /* Built with DOM calls rather than innerHTML: every value here is
+         geometry, but a renderer that cannot inject markup cannot regress
+         into one that can. */
+      var NS = 'http://www.w3.org/2000/svg';
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+      var defs = document.createElementNS(NS, 'defs');
+      var marker = document.createElementNS(NS, 'marker');
+      marker.setAttribute('id', 'ah');
+      marker.setAttribute('viewBox', '0 0 10 10');
+      marker.setAttribute('refX', '9');
+      marker.setAttribute('refY', '5');
+      marker.setAttribute('markerWidth', '6');
+      marker.setAttribute('markerHeight', '6');
+      marker.setAttribute('orient', 'auto');
+      var head = document.createElementNS(NS, 'path');
+      head.setAttribute('d', 'M0 0 L10 5 L0 10 z');
+      head.setAttribute('fill', 'context-stroke');
+      marker.appendChild(head);
+      defs.appendChild(marker);
+      svg.appendChild(defs);
+      edges.forEach(function (e) {
+        var a = box(e[0]), b = box(e[1]);
+        if (!a || !b) return;
+        var x1 = a.r, x2 = b.l - 7, y1 = a.cy, y2 = b.cy;
+        var mid = x1 + (x2 - x1) / 2;
+        var d = Math.abs(y1 - y2) < 0.5
+          ? 'M' + x1 + ' ' + y1 + ' H' + x2
+          : 'M' + x1 + ' ' + y1 + ' H' + mid + ' V' + y2 + ' H' + x2;
+        var p = document.createElementNS(NS, 'path');
+        p.setAttribute('d', d);
+        p.setAttribute('marker-end', 'url(#ah)');
+        if (focus !== undefined && (String(e[0]) === focus || String(e[1]) === focus)) {
+          p.setAttribute('class', 'e-hot');
+        }
+        svg.appendChild(p);
+      });
+    };
+
+    /* Fonts land after first paint and change node heights. */
+    draw();
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(draw);
+    addEventListener('resize', draw);
+    addEventListener('beforeprint', draw);
+    graph.addEventListener('scroll', draw);
+
+    /* ---- focus: one phase isolated across graph and ledger ------------- */
+    var hint = document.getElementById('graph-hint');
+    var rows = ledger ? Array.prototype.slice.call(ledger.querySelectorAll('.lrow')) : [];
+    var clearFocus = function () {
+      delete graph.dataset.focus;
+      if (ledger) delete ledger.dataset.focus;
+      nodes.forEach(function (n) { n.setAttribute('aria-pressed', 'false'); });
+      rows.forEach(function (r) { r.dataset.hot = 'false'; });
+      if (hint) hint.dataset.active = 'false';
+      draw();
+    };
+    var setFocus = function (i, scroll) {
+      if (graph.dataset.focus === String(i)) return clearFocus();
+      graph.dataset.focus = String(i);
+      if (ledger) ledger.dataset.focus = String(i);
+      nodes.forEach(function (n) {
+        n.setAttribute('aria-pressed', String(n.dataset.phase === String(i)));
+      });
+      rows.forEach(function (r) { r.dataset.hot = String(r.dataset.phase === String(i)); });
+      if (hint) hint.dataset.active = 'true';
+      draw();
+      if (scroll) {
+        var row = document.getElementById('phase-' + i);
+        if (row) row.scrollIntoView({ block: 'nearest', behavior: reduce ? 'auto' : 'smooth' });
+      }
+    };
+    nodes.forEach(function (n) {
+      n.addEventListener('click', function () { setFocus(n.dataset.phase, true); });
+    });
+    var clearBtn = document.getElementById('graph-clear');
+    if (clearBtn) clearBtn.addEventListener('click', clearFocus);
+    addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && graph.dataset.focus !== undefined) clearFocus();
+    });
+  }
+
+  /* ---- scope rings ------------------------------------------------------ */
+  var tiers = document.getElementById('tiers');
+  if (tiers) {
+    var rings = Array.prototype.slice.call(document.querySelectorAll('.nest-ring'));
+    rings.forEach(function (ring) {
+      ring.addEventListener('click', function () {
+        var t = ring.dataset.tier;
+        var on = tiers.dataset.tier !== t;
+        if (on) tiers.dataset.tier = t; else delete tiers.dataset.tier;
+        rings.forEach(function (r) {
+          r.setAttribute('aria-pressed', String(on && r.dataset.tier === t));
+        });
+      });
+    });
+  }
+
+  /* ---- the one authored moment: the run model's token ------------------ */
+  var model = document.getElementById('model');
+  var token = document.getElementById('token');
+  if (model && token && 'IntersectionObserver' in window) {
+    var stages = Array.prototype.slice.call(model.querySelectorAll('.stage'));
+    var light = function (animate) {
+      var dots = stages.map(function (s) { return s.querySelector('.stage-dot'); });
+      var wrap = model.querySelector('.stages');
+      var wb = wrap.getBoundingClientRect();
+      var first = dots[0].getBoundingClientRect();
+      var last = dots[dots.length - 1].getBoundingClientRect();
+      token.style.left = (first.left - wb.left + first.width / 2 - 5.5) + 'px';
+      token.style.setProperty('--travel', (last.left - first.left) + 'px');
+      if (!animate) {
+        stages.forEach(function (s) { s.dataset.reached = 'true'; });
+        model.dataset.lit = 'done';
+        return;
+      }
+      var dur = 420 * (stages.length - 1);
+      token.style.setProperty('--dur', dur + 'ms');
+      model.dataset.lit = 'running';
+      stages.forEach(function (s, i) {
+        setTimeout(function () { s.dataset.reached = 'true'; }, (dur / (stages.length - 1)) * i);
+      });
+      setTimeout(function () { model.dataset.lit = 'done'; }, dur + 260);
+    };
+    var io = new IntersectionObserver(function (es) {
+      if (!es[0].isIntersecting) return;
+      io.disconnect();
+      light(!reduce);
+    }, { threshold: 0.3 });
+    io.observe(model);
+  }
+})();
+</script>
+  </body>
+</html>
