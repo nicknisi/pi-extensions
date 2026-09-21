@@ -1,5 +1,5 @@
 {
-  "name": "@nicknisi/pi-self-compact",
+  "name": "@nicknisi/pi-checkpoint",
   "version": "0.1.0",
   "description": "Durable self-compaction: a note-bearing self_compact tool that checkpoints a long-running agent and resumes its exact next action",
   "keywords": [
@@ -7,12 +7,12 @@
     "pi-coding-agent",
     "pi-package"
   ],
-  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/self-compact#readme",
+  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/checkpoint#readme",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nicknisi/pi-extensions.git",
-    "directory": "packages/self-compact"
+    "directory": "packages/checkpoint"
   },
   "files": [
     "dist",

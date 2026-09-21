@@ -33,6 +33,10 @@ const PROMPT_FILES = [
 ];
 
 describe('manifest', () => {
+  it('uses the checkpoint package name', () => {
+    expect(pkg.name).toBe('@nicknisi/pi-checkpoint');
+  });
+
   it('registers the extension from source, not from dist', () => {
     const entries = pkg.pi?.extensions ?? [];
     expect(entries).toEqual(['./extensions/self-compact/self-compact.ts']);
@@ -145,7 +149,7 @@ describe('standalone loading through the real Pi resource loader', () => {
 describe('release integration', () => {
   it('has a root README table row linking to this package', () => {
     const readme = readFileSync(join(REPO_ROOT, 'README.md'), 'utf8');
-    expect(readme).toMatch(/\[self-compact\]\(packages\/self-compact\/?\)/);
+    expect(readme).toMatch(/\[checkpoint\]\(packages\/checkpoint\/?\)/);
   });
 
   it('has a package README documenting requirements and flags', () => {

@@ -1,4 +1,4 @@
-# @nicknisi/pi-self-compact
+# @nicknisi/pi-checkpoint
 
 Durable self-compaction for long-running autonomous Pi sessions. Adds a single
 `self_compact` tool that lets the agent checkpoint itself: it saves the exact
@@ -6,6 +6,9 @@ next action as a verbatim note, compacts the conversation once the current tool
 batch is idle, then resumes from the note automatically — without another human
 prompt. Threshold controls, an editable summary instruction, and a context
 widget make the behavior observable and tunable.
+
+Checkpoint retains the `self_compact` tool, `/self-compact-*` commands, and
+`self-compact` resource and event names; the package name does not change them.
 
 ## Requirements
 
@@ -18,13 +21,13 @@ widget make the behavior observable and tunable.
 ## Install
 
 ```bash
-pi install /path/to/pi-extensions/packages/self-compact
+pi install /path/to/pi-extensions/packages/checkpoint
 ```
 
 Or load a single source file directly for one session:
 
 ```bash
-pi -e /abs/path/packages/self-compact/extensions/self-compact/self-compact.ts
+pi -e /abs/path/packages/checkpoint/extensions/self-compact/self-compact.ts
 ```
 
 ## What it adds
@@ -35,7 +38,7 @@ pi -e /abs/path/packages/self-compact/extensions/self-compact/self-compact.ts
 - **Commands:** `/self-compact-info` (thresholds, usage, handoff state — never
   calls the model) and `/self-compact-now` (asks the agent to checkpoint now;
   retries a pending note verbatim).
-- **Context display:** when `@nicknisi/pi-statusline` is loaded, self-compact
+- **Context display:** when `@nicknisi/pi-statusline` is loaded, Checkpoint
   colors its existing context bar and hides the separate widget. Without that
   extension, a 20-cell context widget remains above the editor (legend below).
   No other extension is required.
@@ -111,7 +114,7 @@ delivered separately as a continuation.
 ## Context bar legend
 
 With `@nicknisi/pi-statusline`, the existing footer meter keeps its size, fill,
-labels, and **remaining-context** meaning. Self-compact supplies its color:
+labels, and **remaining-context** meaning. Checkpoint supplies its color:
 green below soft, blue/accent at soft, amber at warning, red at hard or on a
 failed handoff, and dim while usage is unknown. No threshold ticks or additional
 footer row are added. Theme colors may differ from these descriptions.
@@ -178,14 +181,14 @@ before exit.
 All checks run from the repository root.
 
 ```bash
-pnpm --filter @nicknisi/pi-self-compact build       # package-local build
-pnpm exec vitest run packages/self-compact          # full suite (unit + real-Pi fixture + CLI survival)
-pnpm --filter @nicknisi/pi-self-compact typecheck   # package typecheck
-pnpm exec oxlint packages/self-compact              # lint
-pnpm exec oxfmt --check packages/self-compact       # format check
-node packages/self-compact/verify/live.mjs          # deterministic self-test + bounded real-model acceptance
-node packages/self-compact/verify/live.mjs --self-test  # self-test only (no model spend)
-node packages/self-compact/verify/boundary.mjs check    # approved-path write boundary
+pnpm --filter @nicknisi/pi-checkpoint build       # package-local build
+pnpm exec vitest run packages/checkpoint         # full suite (unit + real-Pi fixture + CLI survival)
+pnpm --filter @nicknisi/pi-checkpoint typecheck   # package typecheck
+pnpm exec oxlint packages/checkpoint             # lint
+pnpm exec oxfmt --check packages/checkpoint      # format check
+node packages/checkpoint/verify/live.mjs         # deterministic self-test + bounded real-model acceptance
+node packages/checkpoint/verify/live.mjs --self-test  # self-test only (no model spend)
+node packages/checkpoint/verify/boundary.mjs check    # approved-path write boundary
 ```
 
 The live driver launches a real Pi process with only this extension, drives one

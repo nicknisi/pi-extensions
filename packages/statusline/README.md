@@ -15,7 +15,7 @@ pi install /Users/nicknisi/Developer/pi-extensions/packages/statusline
   - Session cost (`$X.XX`), summed from `AssistantMessage.usage.cost.total` across the current branch. Hidden until cost > $0.001.
   - Lines changed (`+N/-M`), summed from `linesAdded`/`linesRemoved` in toolResult `details` (i.e. the edit tool). Hidden when zero.
   - Anthropic usage limits (Anthropic models only): remaining-% bars for the 5-hour and 7-day OAuth usage windows, with time-until-reset (`↻3h20m`).
-  - Remaining context: a bar that stretches to fill available terminal width (clamped 5–20 cols), plus `N% ctx (tokens used)`. With self-compact loaded, its thresholds control the bar color without changing the fill, width, or labels.
+  - Remaining context: a bar that stretches to fill available terminal width (clamped 5–20 cols), plus `N% ctx (tokens used)`. With Checkpoint loaded, its thresholds control the bar color without changing the fill, width, or labels.
   - Git branch (right-aligned), with a hyperlinked `#PR` number when `gh` finds an open PR for the branch.
 - **Tmux status files** — JSON state files at `~/.cache/pi-status/<pane>.status` for external consumers (tmux sidebars, fleet monitors).
 
@@ -33,9 +33,9 @@ There are no slash commands, tools, keybindings, widgets, or custom message/entr
 | `session_shutdown`      | Removes the pane's status file                                                                |
 | `thinking_level_select` | Triggers a footer re-render so the new level shows immediately                                |
 
-## Self-compact integration
+## Checkpoint integration
 
-When `@nicknisi/pi-self-compact` is loaded, this same context bar uses its policy colors:
+When `@nicknisi/pi-checkpoint` is loaded, this same context bar uses its policy colors:
 
 - Green (`success`): below the soft notice threshold.
 - Blue (`accent`, theme-dependent): soft notice.
@@ -43,7 +43,7 @@ When `@nicknisi/pi-self-compact` is loaded, this same context bar uses its polic
 - Red (`error`): hard cutoff, invalid settings, or a failed handoff.
 - Dim: context usage is temporarily unknown.
 
-The bar still shows **remaining model context**, not a compaction budget. Model, cost, usage limits, branch, and all other footer segments are unchanged. Self-compact hides its separate above-editor widget while this footer owns the meter. Either extension can still run alone; removing self-compact restores the original remaining-capacity colors.
+The bar still shows **remaining model context**, not a compaction budget. Model, cost, usage limits, branch, and all other footer segments are unchanged. Checkpoint hides its separate above-editor widget while this footer owns the meter. Either extension can still run alone; removing Checkpoint restores the original remaining-capacity colors.
 
 The optional integration uses Pi's event bus, not a package dependency: `self-compact:context-color` publishes a theme color (or `undefined` on shutdown), `statusline:context-bar` announces whether the footer is active, and `statusline:request-context-bar` handles late discovery. Subscriptions are removed on shutdown and footer disposal releases the widget fallback.
 

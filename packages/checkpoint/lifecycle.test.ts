@@ -576,10 +576,10 @@ describe('boundary helper', () => {
     execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo });
     execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repo });
     mkdirSync(join(repo, 'other'), { recursive: true });
-    mkdirSync(join(repo, 'packages', 'self-compact'), { recursive: true });
+    mkdirSync(join(repo, 'packages', 'checkpoint'), { recursive: true });
     writeFileSync(join(repo, 'other', 'keep.txt'), 'unrelated\n');
     writeFileSync(join(repo, 'dirty.txt'), 'pre-existing dirty\n');
-    writeFileSync(join(repo, 'packages', 'self-compact', 'a.txt'), 'owned\n');
+    writeFileSync(join(repo, 'packages', 'checkpoint', 'a.txt'), 'owned\n');
     execFileSync('git', ['add', '.'], { cwd: repo });
     execFileSync('git', ['commit', '-qm', 'init'], { cwd: repo });
   });
@@ -629,8 +629,8 @@ describe('boundary helper', () => {
 
   it('ignores changes inside the approved package path', () => {
     run('capture');
-    writeFileSync(join(repo, 'packages', 'self-compact', 'a.txt'), 'edited freely\n');
-    writeFileSync(join(repo, 'packages', 'self-compact', 'b.txt'), 'new owned file\n');
+    writeFileSync(join(repo, 'packages', 'checkpoint', 'a.txt'), 'edited freely\n');
+    writeFileSync(join(repo, 'packages', 'checkpoint', 'b.txt'), 'new owned file\n');
     expect(run('check')).toBe(0);
   });
 

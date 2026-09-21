@@ -12,9 +12,9 @@
  * driver's own assertion/timeout logic rejects wrong behavior.
  *
  * Usage:
- *   node packages/self-compact/verify/live.mjs            # self-test + live
- *   node packages/self-compact/verify/live.mjs --self-test  # deterministic self-test only (no spend)
- *   node packages/self-compact/verify/live.mjs --live-only   # skip self-test (assumes it already ran)
+ *   node packages/checkpoint/verify/live.mjs            # self-test + live
+ *   node packages/checkpoint/verify/live.mjs --self-test  # deterministic self-test only (no spend)
+ *   node packages/checkpoint/verify/live.mjs --live-only   # skip self-test (assumes it already ran)
  *
  * Provider/model: prefers SELF_COMPACT_LIVE_PROVIDER/MODEL, else PI_PROVIDER/
  * PI_MODEL. Auth is resolved by Pi itself; this script never reads or prints

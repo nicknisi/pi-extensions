@@ -154,7 +154,7 @@ importers:
 
   packages/save-md: {}
 
-  packages/self-compact:
+  packages/checkpoint:
     dependencies:
       typebox:
         specifier: ^1.1.0

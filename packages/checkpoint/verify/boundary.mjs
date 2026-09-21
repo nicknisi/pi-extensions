@@ -13,8 +13,8 @@
  * reported rather than restored. A missing baseline is a failure.
  *
  * Usage:
- *   node packages/self-compact/verify/boundary.mjs capture
- *   node packages/self-compact/verify/boundary.mjs check
+ *   node packages/checkpoint/verify/boundary.mjs capture
+ *   node packages/checkpoint/verify/boundary.mjs check
  */
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -35,7 +35,7 @@ function repoRoot() {
 
 /** Paths that this project is allowed to create or modify. */
 function isAllowlisted(path) {
-  if (path.startsWith('packages/self-compact/')) return true;
+  if (path.startsWith('packages/checkpoint/')) return true;
   if (path.startsWith('docs/ideation/self-compact/')) return true;
   if (path === 'README.md') return true;
   if (path === 'pnpm-lock.yaml') return true;
@@ -89,7 +89,7 @@ function capture() {
 function check() {
   const root = repoRoot();
   if (!existsSync(BASELINE)) {
-    console.error('boundary: missing baseline. Run `node packages/self-compact/verify/boundary.mjs capture` first.');
+    console.error('boundary: missing baseline. Run `node packages/checkpoint/verify/boundary.mjs capture` first.');
     process.exit(1);
   }
   const baseline = JSON.parse(readFileSync(BASELINE, 'utf8')).files ?? {};
