@@ -7,7 +7,9 @@ import { uuidv7 } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ExtensionContext, SessionEntry, ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import extension, {
+  INFO_COMMAND,
   MAX_NOTE_LENGTH,
+  NOW_COMMAND,
   STATE_ENTRY,
   TOOL_NAME,
   readHandoffState,
@@ -17,6 +19,15 @@ import extension, {
 
 const BOUNDARY = join(dirname(fileURLToPath(import.meta.url)), 'verify', 'boundary.mjs');
 
+type EventResult = unknown;
+type EventHandler = (event: unknown, ctx: ExtensionContext) => Promise<EventResult> | EventResult;
+type CommandHandler = (args: string, ctx: ExtensionContext) => Promise<void>;
+
+interface SentMessage {
+  customType?: string | undefined;
+  content: unknown;
+}
+
 interface Harness {
   call(note: unknown): Promise<unknown>;
   entries: SessionEntry[];
@@ -24,19 +35,53 @@ interface Harness {
   active(): string[];
   state(): HandoffState | undefined;
   setAppendThrow(value: boolean): void;
+  ctx: ExtensionContext;
+  fire(event: string, payload?: unknown): Promise<EventResult[]>;
+  runCommand(name: string, args?: string): Promise<void>;
+  setFlag(name: string, value: string): void;
+  setUsage(tokens: number | null): void;
+  widget(): string[] | undefined;
+  sent(): SentMessage[];
+  notes(): Array<{ message: string; type: string }>;
 }
 
-function makeHarness(initialActive = ['read', 'bash', 'edit', 'write', TOOL_NAME]): Harness {
+interface HarnessOptions {
+  initialActive?: string[];
+  contextWindow?: number;
+  flags?: Record<string, string>;
+}
+
+function makeHarness(options: HarnessOptions | string[] = {}): Harness {
+  const opts: HarnessOptions = Array.isArray(options) ? { initialActive: options } : options;
+  const initialActive = opts.initialActive ?? ['read', 'bash', 'edit', 'write', TOOL_NAME];
+  const contextWindow = opts.contextWindow ?? 1_000_000;
+
   const entries: SessionEntry[] = [];
   const appended: Array<{ type: string; data: unknown }> = [];
   let active = [...initialActive];
   let appendThrows = false;
   const tools = new Map<string, ToolDefinition>();
+  const handlers = new Map<string, EventHandler[]>();
+  const commands = new Map<string, CommandHandler>();
+  const flags = new Map<string, string>();
+  const sentMessages: SentMessage[] = [];
+  const notifications: Array<{ message: string; type: string }> = [];
+  let widgetContent: string[] | undefined;
+  let usageTokens: number | null = null;
 
   const pi = {
     registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool),
-    on: () => () => {},
-    registerCommand: () => {},
+    on: (event: string, handler: EventHandler) => {
+      const list = handlers.get(event) ?? [];
+      list.push(handler);
+      handlers.set(event, list);
+      return () => {};
+    },
+    registerCommand: (name: string, o: { handler: CommandHandler }) => commands.set(name, o.handler),
+    registerFlag: (name: string, o: { default?: string }) => {
+      if (o.default !== undefined && !flags.has(name)) flags.set(name, o.default);
+    },
+    getFlag: (name: string) => flags.get(name),
     appendEntry: (type: string, data: unknown) => {
       if (appendThrows) throw new Error('simulated persistence failure (disk full)');
       appended.push({ type, data });
@@ -54,19 +99,37 @@ function makeHarness(initialActive = ['read', 'bash', 'edit', 'write', TOOL_NAME
     setActiveTools: (names: string[]) => {
       active = [...names];
     },
-    sendMessage: () => {},
+    sendMessage: (message: { customType?: string; content: unknown }) => {
+      sentMessages.push({ customType: message.customType, content: message.content });
+    },
   } as unknown as ExtensionAPI;
 
+  // Seed explicit flag overrides (applied after registerFlag defaults below).
+  const overrides = opts.flags ?? {};
+
   extension(pi);
+  for (const [name, value] of Object.entries(overrides)) flags.set(name, value);
 
   const ctx = {
+    hasUI: true,
+    model: { contextWindow },
     sessionManager: {
       getBranch: () => entries,
       getSessionId: () => 'session-1',
       getSessionFile: () => undefined,
     },
     isIdle: () => true,
-    ui: { notify: () => {} },
+    getContextUsage: () => ({
+      tokens: usageTokens,
+      contextWindow,
+      percent: usageTokens === null ? null : (usageTokens / contextWindow) * 100,
+    }),
+    ui: {
+      notify: (message: string, type = 'info') => notifications.push({ message, type }),
+      setWidget: (_key: string, content: string[] | undefined) => {
+        widgetContent = content;
+      },
+    },
   } as unknown as ExtensionContext;
 
   const tool = tools.get(TOOL_NAME);
@@ -81,6 +144,25 @@ function makeHarness(initialActive = ['read', 'bash', 'edit', 'write', TOOL_NAME
     setAppendThrow: (value: boolean) => {
       appendThrows = value;
     },
+    ctx,
+    fire: async (event: string, payload: unknown = { type: event }) => {
+      const list = handlers.get(event) ?? [];
+      const results: EventResult[] = [];
+      for (const handler of list) results.push(await handler(payload, ctx));
+      return results;
+    },
+    runCommand: async (name: string, args = '') => {
+      const handler = commands.get(name);
+      if (!handler) throw new Error(`command ${name} not registered`);
+      await handler(args, ctx);
+    },
+    setFlag: (name: string, value: string) => flags.set(name, value),
+    setUsage: (tokens: number | null) => {
+      usageTokens = tokens;
+    },
+    widget: () => widgetContent,
+    sent: () => sentMessages,
+    notes: () => notifications,
   };
 }
 
@@ -176,6 +258,127 @@ describe('handoff reservation', () => {
     // Locked now; a retry must keep the original (unlocked) snapshot.
     await h.call('checkpoint');
     expect(h.state()?.originalActiveTools).toEqual(['read', 'bash']);
+  });
+});
+
+describe('threshold enforcement', () => {
+  it('injects soft guidance once per cycle and not again at the same level', async () => {
+    const h = makeHarness({ contextWindow: 1_000_000 });
+    await h.fire('session_start');
+    h.setUsage(100000);
+    await h.fire('agent_settled');
+    expect(h.sent()).toHaveLength(0);
+    h.setUsage(230000); // >= soft 225k
+    await h.fire('agent_settled');
+    expect(h.sent().filter((m) => m.customType === 'self-compact:guidance-soft')).toHaveLength(1);
+    await h.fire('agent_settled');
+    expect(h.sent().filter((m) => m.customType === 'self-compact:guidance-soft')).toHaveLength(1);
+  });
+
+  it('escalates to a stronger warning when usage crosses the warning threshold', async () => {
+    const h = makeHarness({ contextWindow: 1_000_000 });
+    await h.fire('session_start');
+    h.setUsage(230000);
+    await h.fire('turn_end');
+    h.setUsage(255000); // >= warning 250k
+    await h.fire('turn_end');
+    expect(h.sent().some((m) => m.customType === 'self-compact:guidance-warning')).toBe(true);
+  });
+
+  it('keeps ordinary tools executable below the hard cutoff', async () => {
+    const h = makeHarness({ contextWindow: 1_000_000 });
+    await h.fire('session_start');
+    h.setUsage(255000); // warning, below hard 270k
+    await h.fire('turn_end');
+    const [result] = await h.fire('tool_call', { type: 'tool_call', toolName: 'bash', toolCallId: 't1' });
+    expect(result).toBeUndefined();
+  });
+
+  it('gates ordinary tools at the tool_call boundary once past the hard cutoff', async () => {
+    const h = makeHarness({ contextWindow: 1_000_000 });
+    await h.fire('session_start');
+    h.setUsage(300000); // >= hard 270k
+    const [blocked] = await h.fire('tool_call', { type: 'tool_call', toolName: 'bash', toolCallId: 't1' });
+    expect((blocked as { block?: boolean }).block).toBe(true);
+    expect(h.active()).toEqual([TOOL_NAME]);
+    const [allowed] = await h.fire('tool_call', { type: 'tool_call', toolName: TOOL_NAME, toolCallId: 't2' });
+    expect(allowed).toBeUndefined();
+  });
+
+  it('sends only the strongest guidance on a direct jump to hard (no soft/warning cascade)', async () => {
+    const h = makeHarness({ contextWindow: 1_000_000 });
+    await h.fire('session_start');
+    h.setUsage(320000); // straight past soft/warning to hard
+    await h.fire('agent_settled');
+    expect(h.sent().some((m) => m.customType === 'self-compact:guidance-soft')).toBe(false);
+    expect(h.sent().some((m) => m.customType === 'self-compact:guidance-warning')).toBe(false);
+    expect(h.active()).toEqual([TOOL_NAME]);
+  });
+
+  it('shows unknown usage as ?% and neither enforces nor announces on a null measurement', async () => {
+    const h = makeHarness({ contextWindow: 1_000_000 });
+    await h.fire('session_start');
+    h.setUsage(null);
+    await h.fire('agent_settled');
+    expect(h.widget()?.[0]).toContain('?%');
+    expect(h.sent()).toHaveLength(0);
+    expect(h.active()).toContain('bash');
+  });
+
+  it('fails closed at the execution gate when thresholds cannot fit the model window', async () => {
+    const h = makeHarness({ contextWindow: 200000 }); // 225k/250k defaults impossible here
+    await h.fire('session_start');
+    expect(h.notes().some((n) => n.type === 'error')).toBe(true);
+    const [blocked] = await h.fire('tool_call', { type: 'tool_call', toolName: 'bash', toolCallId: 't1' });
+    expect((blocked as { block?: boolean }).block).toBe(true);
+    const [allowed] = await h.fire('tool_call', { type: 'tool_call', toolName: TOOL_NAME, toolCallId: 't2' });
+    expect(allowed).toBeUndefined();
+  });
+
+  it('re-resolves on model selection and keeps failing closed on an incompatible window', async () => {
+    const h = makeHarness({ contextWindow: 200000 });
+    await h.fire('session_start');
+    await h.fire('model_select', { type: 'model_select' });
+    const [blocked] = await h.fire('tool_call', { type: 'tool_call', toolName: 'bash', toolCallId: 't1' });
+    expect((blocked as { block?: boolean }).block).toBe(true);
+  });
+
+  it('delivers guidance without triggering a turn, so a finished task does not restart', async () => {
+    const h = makeHarness({ contextWindow: 1_000_000 });
+    await h.fire('session_start');
+    h.setUsage(230000);
+    await h.fire('agent_settled');
+    expect(h.sent()).toHaveLength(1); // queued for the next real turn, not a new turn
+  });
+});
+
+describe('human commands', () => {
+  it('/self-compact-info reports resolved thresholds without sending a model message', async () => {
+    const h = makeHarness({ contextWindow: 1_000_000 });
+    await h.fire('session_start');
+    await h.runCommand(INFO_COMMAND);
+    expect(h.sent()).toHaveLength(0);
+    const info = h.notes().find((n) => n.message.startsWith('self-compact info:'));
+    expect(info).toBeDefined();
+    expect(info?.message).toContain('resolved:');
+  });
+
+  it('/self-compact-now includes a pending note verbatim for retry', async () => {
+    const h = makeHarness({ contextWindow: 1_000_000 });
+    await h.fire('session_start');
+    await h.call('EXACT NEXT ACTION: run the failing test');
+    await h.runCommand(NOW_COMMAND);
+    const req = h.sent().find((m) => m.customType === 'self-compact:manual-request');
+    expect(req).toBeDefined();
+    expect(String(req?.content)).toContain('EXACT NEXT ACTION: run the failing test');
+  });
+
+  it('/self-compact-now on a fresh session asks the model to write a note and compact', async () => {
+    const h = makeHarness({ contextWindow: 1_000_000 });
+    await h.fire('session_start');
+    await h.runCommand(NOW_COMMAND);
+    const req = h.sent().find((m) => m.customType === 'self-compact:manual-request');
+    expect(String(req?.content)).toMatch(/note_to_self/);
   });
 });
 

@@ -29,6 +29,56 @@ import { fileURLToPath } from 'node:url';
 /** Name of the editable default summary instruction file, under `.pi/self-compact/`. */
 export const COMPACTION_MESSAGE_FILE = 'USER_PROMPT_COMPACTION_MESSAGE.md';
 
+/** Editable soft heads-up guidance template. */
+export const SOFT_SELF_COMPACT_FILE = 'USER_PROMPT_SOFT_SELF_COMPACT.md';
+
+/** Editable stern warning guidance template. */
+export const WARNING_SELF_COMPACT_FILE = 'USER_PROMPT_WARNING_SELF_COMPACT.md';
+
+export type GuidanceLevel = 'soft' | 'warning';
+
+/** Interpolation vocabulary shared by the soft/warning guidance templates. */
+export interface GuidanceValues {
+  tokens: number;
+  percent: number;
+  context_window: number;
+  soft_tokens: number;
+  warning_tokens: number;
+  hard_tokens: number;
+  hard_percent: number;
+}
+
+/** Replace `{{token}}` placeholders with the supplied values; unknown tokens are left intact. */
+export function interpolateGuidance(template: string, values: GuidanceValues): string {
+  return template.replace(/\{\{(\w+)\}\}/g, (match, key: string) => {
+    if (Object.prototype.hasOwnProperty.call(values, key)) {
+      return String(values[key as keyof GuidanceValues]);
+    }
+    return match;
+  });
+}
+
+/** Read an editable guidance template, per use (no caching). */
+export function loadGuidanceTemplate(level: GuidanceLevel, fromDir?: string): string {
+  const fileName = level === 'soft' ? SOFT_SELF_COMPACT_FILE : WARNING_SELF_COMPACT_FILE;
+  const file = path.join(packageResourceDir(fromDir), fileName);
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`self-compact: cannot read guidance template ${fileName}: ${message}`);
+  }
+}
+
+/** Load and interpolate a guidance template for delivery. */
+export function renderGuidance(
+  level: GuidanceLevel,
+  values: GuidanceValues,
+  loadTemplate: (level: GuidanceLevel) => string = (l) => loadGuidanceTemplate(l),
+): string {
+  return interpolateGuidance(loadTemplate(level), values);
+}
+
 /** The `compact()` preparation payload, as delivered by `session_before_compact`. */
 export type CompactionPreparation = Parameters<typeof compact>[0];
 

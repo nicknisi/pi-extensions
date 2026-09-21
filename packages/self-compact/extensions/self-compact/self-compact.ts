@@ -23,17 +23,56 @@ import { uuidv7 } from '@earendil-works/pi-ai';
 import {
   defineTool,
   type ExtensionAPI,
+  type ExtensionCommandContext,
   type ExtensionContext,
   type SessionEntry,
 } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
-import { loadDefaultCompactionInstruction, runSelfCompaction } from './prompts.js';
+import {
+  DEFAULT_AT,
+  DEFAULT_BUFFER,
+  DEFAULT_SOFT_AT,
+  FLAG_AT,
+  FLAG_BUFFER,
+  FLAG_PROMPT,
+  FLAG_SOFT_AT,
+  resolveThresholds,
+  tokensToPercent,
+  type ConfigResult,
+  type FlagInputs,
+} from './config.js';
+import { contextBarLine, latestApplicableCacheRead } from './bar.js';
+import {
+  loadDefaultCompactionInstruction,
+  renderGuidance,
+  runSelfCompaction,
+  type GuidanceLevel,
+  type GuidanceValues,
+} from './prompts.js';
 
 export const TOOL_NAME = 'self_compact';
 export const STATE_ENTRY = 'self-compact:state';
 export const DELIVERY_ENTRY = 'self-compact:delivered';
+export const NOTIFY_ENTRY = 'self-compact:notify';
+export const HARD_ENTRY = 'self-compact:hard';
 export const CONTINUATION_MESSAGE_TYPE = 'self-compact:continuation';
+export const WIDGET_KEY = 'self-compact';
+export const INFO_COMMAND = 'self-compact-info';
+export const NOW_COMMAND = 'self-compact-now';
 export const MAX_NOTE_LENGTH = 24000;
+
+export type ThresholdLevel = 'none' | 'soft' | 'warning' | 'hard';
+const LEVEL_RANK: Record<ThresholdLevel, number> = { none: 0, soft: 1, warning: 2, hard: 3 };
+
+interface NotifyState {
+  level: 'soft' | 'warning' | 'hard';
+  cycle: number;
+}
+
+interface HardEntryState {
+  active: boolean;
+  originalActiveTools: string[];
+}
 
 /**
  * Safety cap for how long `agent_settled` blocks awaiting a continuation turn.
@@ -105,6 +144,41 @@ export function readDeliveredCycleIds(entries: SessionEntry[]): Set<string> {
   return ids;
 }
 
+/** Latest persisted guidance-notification state on this branch. */
+export function readNotifyState(entries: SessionEntry[]): NotifyState | undefined {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry && isCustomEntry(entry, NOTIFY_ENTRY)) {
+      const data = entry.data as { level?: unknown; cycle?: unknown } | undefined;
+      if (
+        data &&
+        (data.level === 'soft' || data.level === 'warning' || data.level === 'hard') &&
+        typeof data.cycle === 'number'
+      ) {
+        return { level: data.level, cycle: data.cycle };
+      }
+    }
+  }
+  return undefined;
+}
+
+/** Latest persisted hard-enforcement snapshot on this branch. */
+export function readHardState(entries: SessionEntry[]): HardEntryState | undefined {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry && isCustomEntry(entry, HARD_ENTRY)) {
+      const data = entry.data as { active?: unknown; originalActiveTools?: unknown } | undefined;
+      if (data && typeof data.active === 'boolean' && Array.isArray(data.originalActiveTools)) {
+        return {
+          active: data.active,
+          originalActiveTools: data.originalActiveTools.filter((n): n is string => typeof n === 'string'),
+        };
+      }
+    }
+  }
+  return undefined;
+}
+
 interface AssistantToolCall {
   name: string;
   arguments: Record<string, unknown>;
@@ -141,9 +215,78 @@ export default function (pi: ExtensionAPI) {
   let lastReservedMessageId: string | undefined;
   let disposed = false;
   let sessionId: string | undefined;
+  // Resolved threshold configuration for the current model, or an error when the
+  // flags cannot fit the window. Fail-closed enforcement reads this.
+  let config: ConfigResult | undefined;
+  // Hard-enforcement visibility state, mirrored durably in HARD_ENTRY.
+  let hardActive = false;
+  let hardOriginalTools: string[] | undefined;
   // Timers scheduling a post-reconciliation delivery, cleared on shutdown so a
   // late callback cannot touch a replaced session.
   const reconcileTimers = new Set<ReturnType<typeof setTimeout>>();
+
+  function flagString(name: string): string {
+    const value = pi.getFlag(name);
+    return typeof value === 'string' ? value : '';
+  }
+
+  function flagOptional(name: string): string | undefined {
+    const value = pi.getFlag(name);
+    return typeof value === 'string' ? value : undefined;
+  }
+
+  /** Resolve flags against the current model window; notify on an invalid ordering. */
+  /** Compute (without side effects) the threshold config for the current model. */
+  function computeConfig(ctx: ExtensionContext): ConfigResult {
+    const window = ctx.model?.contextWindow;
+    if (typeof window !== 'number') {
+      return { ok: false, error: 'self-compact: no model selected; cannot resolve thresholds' };
+    }
+    const inputs: FlagInputs = {
+      softAt: flagString(FLAG_SOFT_AT),
+      at: flagString(FLAG_AT),
+      buffer: flagString(FLAG_BUFFER),
+      compactPrompt: flagOptional(FLAG_PROMPT),
+    };
+    return resolveThresholds(inputs, window);
+  }
+
+  /** Re-resolve flags against the current model window; notify on an invalid ordering. */
+  function resolveConfig(ctx: ExtensionContext): void {
+    config = computeConfig(ctx);
+    if (!config.ok) ctx.ui.notify(config.error, 'error');
+  }
+
+  /**
+   * Resolve lazily the first time the config is needed. `session_start` does not
+   * fire on a fresh SDK `createAgentSession`, so the gates, widget, and commands
+   * must be able to resolve on their own first use.
+   */
+  function ensureConfig(ctx: ExtensionContext): void {
+    if (config === undefined) resolveConfig(ctx);
+  }
+
+  function persistHard(state: HardEntryState): void {
+    try {
+      pi.appendEntry(HARD_ENTRY, state);
+    } catch {
+      // Best effort: in-memory state still enforces via the tool_call gate.
+    }
+  }
+
+  function persistNotify(state: NotifyState): void {
+    try {
+      pi.appendEntry(NOTIFY_ENTRY, state);
+    } catch {
+      // Best effort: at worst a level is re-announced after a reload.
+    }
+  }
+
+  /** Snapshot of ordinary active tools, preferring a pre-hard snapshot when locked. */
+  function activeToolsSnapshot(): string[] {
+    if (hardActive && hardOriginalTools) return [...hardOriginalTools];
+    return pi.getActiveTools().filter((name) => name !== TOOL_NAME);
+  }
 
   function branch(ctx: ExtensionContext): SessionEntry[] {
     try {
@@ -215,7 +358,7 @@ export default function (pi: ExtensionAPI) {
       return validation;
     }
 
-    const active = pi.getActiveTools().filter((name) => name !== TOOL_NAME);
+    const active = activeToolsSnapshot();
     const state: HandoffState = {
       cycleId: uuidv7(),
       phase: 'pending',
@@ -225,8 +368,35 @@ export default function (pi: ExtensionAPI) {
       ...(sessionId !== undefined ? { sessionId } : {}),
     };
     persist(state);
+    // The handoff now owns tool restoration; drop the standalone hard snapshot.
+    clearHard();
     lockTools();
     return validation;
+  }
+
+  /** Restrict tools to self_compact at the hard crossing, snapshotting the prior selection. */
+  function enterHard(): void {
+    if (hardActive) return;
+    hardOriginalTools = pi.getActiveTools().filter((name) => name !== TOOL_NAME);
+    hardActive = true;
+    persistHard({ active: true, originalActiveTools: hardOriginalTools });
+    lockTools();
+  }
+
+  /** Restore the pre-hard tool selection when usage drops below the hard cutoff. */
+  function exitHard(): void {
+    if (!hardActive) return;
+    const restore = hardOriginalTools ?? [];
+    clearHard();
+    const registered = registeredToolNames();
+    pi.setActiveTools(restore.filter((name) => registered.has(name)));
+  }
+
+  function clearHard(): void {
+    const wasActive = hardActive || hardOriginalTools !== undefined;
+    hardActive = false;
+    hardOriginalTools = undefined;
+    if (wasActive) persistHard({ active: false, originalActiveTools: [] });
   }
 
   /**
@@ -240,6 +410,9 @@ export default function (pi: ExtensionAPI) {
     if (delivered.has(state.cycleId) || state.phase === 'delivered') return false;
 
     restoreTools(state);
+    // Successful compaction ends hard enforcement and resets guidance tracking
+    // (the completedCycles bump makes prior NOTIFY_ENTRY stale for the new cycle).
+    clearHard();
 
     const continuation = [
       state.note,
@@ -420,6 +593,226 @@ export default function (pi: ExtensionAPI) {
     // 'compacting' is in-flight; 'failed'/'delivered' require explicit action.
   }
 
+  /** Current measured context tokens, or null when unknown (e.g. post-compaction). */
+  function measuredTokens(ctx: ExtensionContext): number | null {
+    try {
+      const usage = ctx.getContextUsage();
+      return usage && typeof usage.tokens === 'number' ? usage.tokens : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Refresh the above-editor context widget. Clears/no-ops without UI. */
+  function updateWidget(ctx: ExtensionContext): void {
+    if (!ctx.hasUI) return;
+    ensureConfig(ctx);
+    if (!config || !config.ok) {
+      ctx.ui.setWidget(WIDGET_KEY, ['self-compact: thresholds not configured (see notice)'], {
+        placement: 'aboveEditor',
+      });
+      return;
+    }
+    const t = config.thresholds;
+    const tokens = measuredTokens(ctx);
+    // Cached tokens describe the current prompt only, bounded by measured usage.
+    let cachedTokens: number | null = null;
+    if (tokens !== null) {
+      const cacheRead = latestApplicableCacheRead(branch(ctx));
+      cachedTokens = cacheRead === null ? null : Math.min(cacheRead, tokens);
+    }
+    const line = contextBarLine(
+      { tokens, cachedTokens },
+      {
+        softTokens: t.softTokens,
+        warningTokens: t.warningTokens,
+        hardTokens: t.hardTokens,
+        contextWindow: t.contextWindow,
+      },
+    );
+    ctx.ui.setWidget(WIDGET_KEY, [line], { placement: 'aboveEditor' });
+  }
+
+  function currentLevel(tokens: number): ThresholdLevel {
+    if (!config || !config.ok) return 'none';
+    const t = config.thresholds;
+    if (tokens >= t.hardTokens) return 'hard';
+    if (tokens >= t.warningTokens) return 'warning';
+    if (tokens >= t.softTokens) return 'soft';
+    return 'none';
+  }
+
+  function guidanceValues(tokens: number): GuidanceValues | undefined {
+    if (!config || !config.ok) return undefined;
+    const t = config.thresholds;
+    return {
+      tokens,
+      percent: tokensToPercent(tokens, t.contextWindow),
+      context_window: t.contextWindow,
+      soft_tokens: t.softTokens,
+      warning_tokens: t.warningTokens,
+      hard_tokens: t.hardTokens,
+      hard_percent: tokensToPercent(t.hardTokens, t.contextWindow),
+    };
+  }
+
+  /** Inject soft/warning guidance without ever starting a turn just to show it. */
+  function deliverGuidance(ctx: ExtensionContext, level: GuidanceLevel, tokens: number): void {
+    if (disposed) return;
+    const values = guidanceValues(tokens);
+    if (!values) return;
+    let content: string;
+    try {
+      content = renderGuidance(level, values);
+    } catch (error) {
+      ctx.ui.notify(error instanceof Error ? error.message : String(error), 'error');
+      return;
+    }
+    const idle = safeIsIdle(ctx);
+    pi.sendMessage(
+      { customType: `self-compact:guidance-${level}`, content, display: true },
+      { triggerTurn: false, deliverAs: idle ? 'nextTurn' : 'followUp' },
+    );
+  }
+
+  /**
+   * Evaluate current usage at a request/turn/tool boundary: refresh the widget,
+   * enforce or release the hard cutoff, and emit at most the strongest new
+   * guidance level once per compaction cycle. Unknown usage waits for a real
+   * measurement; it never fabricates a zero or a lock.
+   */
+  function evaluateThresholds(ctx: ExtensionContext): void {
+    ensureConfig(ctx);
+    updateWidget(ctx);
+    if (!config || !config.ok) return;
+
+    const handoff = currentState(ctx);
+    const handoffLocked = handoff ? isLockedPhase(handoff.phase) : false;
+    if (handoffLocked) return; // the handoff lock owns tool state during a cycle
+
+    const tokens = measuredTokens(ctx);
+    if (tokens === null) return; // unknown: wait for a valid measurement
+
+    const level = currentLevel(tokens);
+
+    if (level === 'hard') enterHard();
+    else exitHard();
+
+    if (level === 'none') return;
+    const cycle = handoff?.completedCycles ?? 0;
+    const last = readNotifyState(branch(ctx));
+    const notifiedRank = last && last.cycle === cycle ? LEVEL_RANK[last.level] : 0;
+    if (LEVEL_RANK[level] <= notifiedRank) return; // already announced this level (or stronger)
+    persistNotify({ level, cycle });
+    // Hard enforcement is delivered through the tool_call gate; soft/warning are
+    // advisory model-facing messages. A direct jump to hard therefore emits no
+    // soft/warning cascade.
+    if (level === 'soft' || level === 'warning') deliverGuidance(ctx, level, tokens);
+  }
+
+  pi.registerFlag(FLAG_SOFT_AT, {
+    type: 'string',
+    default: DEFAULT_SOFT_AT,
+    description: 'Optional heads-up threshold: tokens (e.g. 225k) or a window percentage (e.g. 60%).',
+  });
+  pi.registerFlag(FLAG_AT, {
+    type: 'string',
+    default: DEFAULT_AT,
+    description: 'Warning threshold at which to save a note and self-compact.',
+  });
+  pi.registerFlag(FLAG_BUFFER, {
+    type: 'string',
+    default: DEFAULT_BUFFER,
+    description: 'Additional tokens or percentage points past --compact-at before ordinary tools are paused.',
+  });
+  pi.registerFlag(FLAG_PROMPT, {
+    type: 'string',
+    description: 'Literal summary system instruction that replaces the editable default for every compaction.',
+  });
+
+  /** Build the human-readable diagnostics for /self-compact-info. */
+  function buildInfoReport(ctx: ExtensionContext): string {
+    ensureConfig(ctx);
+    const lines: string[] = ['self-compact info:'];
+    lines.push(
+      `  flags: --compact-soft-at=${flagString(FLAG_SOFT_AT)} --compact-at=${flagString(FLAG_AT)} --compact-buffer=${flagString(FLAG_BUFFER)}`,
+    );
+    const promptFlag = flagOptional(FLAG_PROMPT);
+    lines.push(
+      `  --compact-prompt: ${promptFlag === undefined ? '(unset; using default file)' : 'literal override set'}`,
+    );
+    const window = ctx.model?.contextWindow;
+    lines.push(`  model window: ${typeof window === 'number' ? window : 'unknown'}`);
+    if (config && config.ok) {
+      const t = config.thresholds;
+      lines.push(
+        `  resolved: soft=${t.softTokens} (${tokensToPercent(t.softTokens, t.contextWindow)}%), ` +
+          `warning=${t.warningTokens} (${tokensToPercent(t.warningTokens, t.contextWindow)}%), ` +
+          `hard=${t.hardTokens} (${tokensToPercent(t.hardTokens, t.contextWindow)}%), max=${t.cap}`,
+      );
+    } else {
+      lines.push(`  resolved: INVALID — ${config?.error ?? 'not resolved yet'}`);
+    }
+    const tokens = measuredTokens(ctx);
+    const cacheRead = latestApplicableCacheRead(branch(ctx));
+    lines.push(
+      `  usage: ${tokens === null ? 'unknown' : `${tokens} tokens`}, cacheRead: ${cacheRead === null ? 'unknown' : cacheRead}`,
+    );
+    const state = currentState(ctx);
+    lines.push(`  handoff: ${state ? `${state.phase} (cycle ${state.cycleId})` : 'none'}`);
+    lines.push(`  completed cycles: ${state?.completedCycles ?? 0}`);
+    lines.push(`  hard enforced: ${hardActive}`);
+    if (state?.lastError) lines.push(`  last error: ${state.lastError}`);
+    if (state?.note !== undefined) {
+      const note = state.note;
+      const shown = note.length > 500 ? `${note.slice(0, 500)}… (${note.length} chars total)` : note;
+      lines.push(`  pending note: ${shown}`);
+    }
+    return lines.join('\n');
+  }
+
+  pi.registerCommand(INFO_COMMAND, {
+    description: 'Show self-compaction thresholds, usage, and handoff state (does not call the model).',
+    handler: async (_args: string, ctx: ExtensionCommandContext) => {
+      ctx.ui.notify(buildInfoReport(ctx), 'info');
+    },
+  });
+
+  pi.registerCommand(NOW_COMMAND, {
+    description: 'Ask the agent to checkpoint and self-compact now (retries a pending note verbatim).',
+    handler: async (_args: string, ctx: ExtensionCommandContext) => {
+      ensureConfig(ctx);
+      if (!config || !config.ok) {
+        ctx.ui.notify(config?.error ?? 'self-compact: thresholds not configured', 'error');
+        return;
+      }
+      const state = currentState(ctx);
+      if (state && (state.phase === 'compacting' || state.phase === 'ready-to-deliver')) {
+        ctx.ui.notify('self-compact: a compaction is already in progress.', 'info');
+        return;
+      }
+      let content: string;
+      if (state && (state.phase === 'pending' || state.phase === 'failed')) {
+        content = [
+          'Retry the pending self-compaction now. Call self_compact as your only action, passing exactly this saved note_to_self verbatim:',
+          '',
+          state.note,
+        ].join('\n');
+      } else {
+        content =
+          'Finish or safely pause your current step, write a precise note_to_self with the exact next action to resume, then call self_compact as your only action.';
+      }
+      const idle = safeIsIdle(ctx);
+      // Idle: start a fresh turn asking the model to checkpoint. Busy: queue a
+      // follow-up so we never launch a concurrent compaction or duplicate cycle.
+      pi.sendMessage(
+        { customType: 'self-compact:manual-request', content, display: true },
+        idle ? { triggerTurn: true } : { triggerTurn: false, deliverAs: 'followUp' },
+      );
+      ctx.ui.notify('self-compact: requested a checkpoint.', 'info');
+    },
+  });
+
   pi.registerTool(
     defineTool({
       name: TOOL_NAME,
@@ -473,6 +866,29 @@ export default function (pi: ExtensionAPI) {
         terminate: true,
       };
     }
+
+    // Fail-closed and hard-cutoff execution gates. self_compact itself is always
+    // allowed so the agent can still checkpoint out of an over-budget state.
+    if (event.toolName !== TOOL_NAME) {
+      ensureConfig(ctx);
+      if (config && !config.ok) {
+        return { block: true, reason: config.error, terminate: true };
+      }
+      if (config && config.ok) {
+        const tokens = measuredTokens(ctx);
+        if (tokens !== null && tokens >= config.thresholds.hardTokens) {
+          // Restrict the visible tool selection too, snapshotting the original.
+          enterHard();
+          return {
+            block: true,
+            reason:
+              `Context has reached the hard cutoff (${tokens} tokens, limit ${config.thresholds.hardTokens}). ` +
+              'Ordinary tools are paused: call self_compact with a precise note_to_self as your only action.',
+            terminate: true,
+          };
+        }
+      }
+    }
     return undefined;
   });
 
@@ -480,17 +896,44 @@ export default function (pi: ExtensionAPI) {
     disposed = false;
     busy = false;
     lastReservedMessageId = undefined;
+    hardActive = false;
+    hardOriginalTools = undefined;
     sessionId = ctx.sessionManager.getSessionId();
 
+    resolveConfig(ctx);
+
     const state = currentState(ctx);
-    if (!state) return;
-    if (isLockedPhase(state.phase)) {
+    const handoffLocked = state ? isLockedPhase(state.phase) : false;
+    if (handoffLocked) {
       lockTools();
+    } else {
+      // Reconstruct a hard-enforcement lock left on the branch by a prior run.
+      const hard = readHardState(branch(ctx));
+      if (hard?.active) {
+        hardActive = true;
+        hardOriginalTools = hard.originalActiveTools;
+        lockTools();
+      }
     }
+    updateWidget(ctx);
     // ready-to-deliver / pending resume once the agent is idle (agent_settled).
   });
 
+  pi.on('model_select', async (_event, ctx) => {
+    resolveConfig(ctx);
+    evaluateThresholds(ctx);
+  });
+
+  pi.on('turn_end', async (_event, ctx) => {
+    evaluateThresholds(ctx);
+  });
+
+  pi.on('tool_result', async (_event, ctx) => {
+    updateWidget(ctx);
+  });
+
   pi.on('agent_settled', async (_event, ctx) => {
+    evaluateThresholds(ctx);
     await coordinate(ctx);
   });
 
@@ -523,6 +966,12 @@ export default function (pi: ExtensionAPI) {
         env: auth.env,
         customInstructions: event.customInstructions,
         signal: event.signal,
+        // Thread the --compact-prompt literal through every compaction path
+        // (self-requested, manual /compact, and automatic). A literal always
+        // wins over the default file and is never treated as a filename.
+        ...(config && config.ok && config.compactPromptOverride !== undefined
+          ? { compactPromptOverride: config.compactPromptOverride }
+          : {}),
         loadDefault: () => loadDefaultCompactionInstruction(),
       });
       return {
@@ -558,6 +1007,9 @@ export default function (pi: ExtensionAPI) {
   // must not silently discharge it and bypass that gate. 'compacting' is our
   // own in-flight cycle (delivered by compactThenDeliver, not here).
   pi.on('session_compact', async (_event, ctx) => {
+    // A completed compaction (any path) means usage is being reclaimed: refresh
+    // the widget so a stale pre-compaction bar does not linger.
+    updateWidget(ctx);
     const state = currentState(ctx);
     if (!state) return;
     if (state.phase === 'pending') {
@@ -577,11 +1029,12 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on('session_shutdown', async (_event, _ctx) => {
+  pi.on('session_shutdown', async (_event, ctx) => {
     disposed = true;
     busy = false;
     lastReservedMessageId = undefined;
     for (const timer of reconcileTimers) clearTimeout(timer);
     reconcileTimers.clear();
+    if (ctx.hasUI) ctx.ui.setWidget(WIDGET_KEY, undefined);
   });
 }

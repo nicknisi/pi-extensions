@@ -10,10 +10,14 @@ import { describe, expect, it } from 'vitest';
 import {
   applyLeadingSystemInstruction,
   buildSummaryStreamFn,
+  interpolateGuidance,
   leadingSystemInstruction,
+  loadGuidanceTemplate,
+  renderGuidance,
   resolveCompactionInstruction,
   runSelfCompaction,
   type CompactionPreparation,
+  type GuidanceValues,
   type StreamSimpleFn,
 } from './extensions/self-compact/prompts.js';
 
@@ -125,6 +129,61 @@ describe('prompt overrides', () => {
     const ctx = transcript('to be replaced');
     fn(fauxModel(), ctx, undefined);
     expect(leadingSystemInstruction(seen!)).toBe('INSTRUCTION');
+  });
+});
+
+describe('guidance prompts', () => {
+  const values: GuidanceValues = {
+    tokens: 250000,
+    percent: 25,
+    context_window: 1_000_000,
+    soft_tokens: 225000,
+    warning_tokens: 250000,
+    hard_tokens: 270000,
+    hard_percent: 27,
+  };
+
+  it('interpolates the documented vocabulary and leaves unknown tokens intact', () => {
+    const out = interpolateGuidance(
+      '{{tokens}}/{{context_window}} = {{percent}}%, hard {{hard_tokens}} ({{hard_percent}}%) {{unknown}}',
+      values,
+    );
+    expect(out).toBe('250000/1000000 = 25%, hard 270000 (27%) {{unknown}}');
+  });
+
+  it('loads the soft template and states that the guidance is optional', () => {
+    const template = loadGuidanceTemplate('soft');
+    expect(template.toLowerCase()).toContain('optional');
+    expect(template).toContain('{{tokens}}');
+  });
+
+  it('loads the warning template and names the hard cutoff', () => {
+    const template = loadGuidanceTemplate('warning');
+    expect(template.toLowerCase()).toContain('compact');
+    expect(template).toContain('{{hard_tokens}}');
+  });
+
+  it('renders a soft heads-up with live values and no leftover placeholders', () => {
+    const rendered = renderGuidance('soft', values);
+    expect(rendered).toContain('250000');
+    expect(rendered).toContain('270000');
+    expect(rendered).not.toMatch(/\{\{\w+\}\}/);
+  });
+
+  it('describes the useful note contents in both templates', () => {
+    for (const level of ['soft', 'warning'] as const) {
+      const rendered = renderGuidance(level, values);
+      expect(rendered.toLowerCase()).toContain('note_to_self');
+      expect(rendered.toLowerCase()).toContain('next unfinished action');
+    }
+  });
+
+  it('propagates a template load failure to the caller so compaction guidance never silently vanishes', () => {
+    expect(() =>
+      renderGuidance('soft', values, () => {
+        throw new Error('self-compact: cannot read guidance template USER_PROMPT_SOFT_SELF_COMPACT.md');
+      }),
+    ).toThrow(/cannot read guidance template/);
   });
 });
 
