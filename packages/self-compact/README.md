@@ -9,9 +9,9 @@ widget make the behavior observable and tunable.
 
 ## Requirements
 
-- **Pi >= 0.86.1.** The extension depends on the `session_before_compact`
-  summary-override hook, `setWidget`, and the split-turn `compact()` export
-  introduced in 0.86. Older runtimes are unsupported.
+- **Pi >= 0.86.1.** The extension uses the lifecycle, terminating-tool,
+  summary-override, widget, and compactor APIs verified against this version.
+  Older runtimes are unsupported.
 - **No other extensions.** This package uses only the public extension API and
   has no dependency on any other extension or on `@nicknisi/pi-shared`.
 
@@ -109,10 +109,11 @@ delivered separately as a continuation.
 ## Context bar legend
 
 The widget renders 20 cells inside brackets (each cell = 5% of the window),
-followed by the used percentage:
+followed by the used percentage. With explicit 20%/50%/10% thresholds,
+40% usage and half the used context cached:
 
 ```
-[####====~=====!=====|] 55%
+[###~====-!-|--------] 40%
 ```
 
 - `#` cached (prompt-cache) tokens, `=` remaining used tokens, `-` free.
@@ -136,9 +137,10 @@ compaction.
 - **Explicit retry.** `/self-compact-now` (or the agent calling `self_compact`
   again with the same note) re-arms the same cycle with the unchanged note.
   There is no automatic retry scheduler.
-- **Manual `/compact`.** A successful native `/compact` (or Pi's automatic
-  threshold/overflow compaction) discharges a pending handoff and delivers the
-  continuation once idle. The command is not reimplemented.
+- **Manual `/compact`.** A successful native `/compact` discharges a pending
+  or failed handoff and delivers the continuation once idle. Pi's automatic
+  compaction can discharge a pending handoff but does not retry a failed one.
+  The command is not reimplemented.
 - **Reload/resume.** Handoff state lives in branch-local custom entries, so an
   ordinary reload reconstructs a pending/failed handoff without replaying a
   delivered one and without starting a turn on its own. Branch navigation
@@ -177,13 +179,15 @@ node packages/self-compact/verify/boundary.mjs check    # approved-path write bo
 
 The live driver launches a real Pi process with only this extension, drives one
 autonomous checkpoint-and-continue cycle, and asserts the exact `done` output,
-one handoff cycle, no duplicate write, and no replay on reload. It fails closed
+no duplicate write, and no replay on reload. It checks all three CLI launch
+configurations and then a second handoff whose note says the task is complete;
+that continuation must not rewrite the result. It fails closed
 on missing credentials, an unsupported runtime/model, a timeout, or a skipped
 required scenario. Fresh evidence is written to `verify/results/live.json`; see
 `verify/RESULTS.md` for the recorded outcomes.
 
 ## Dependencies
 
-- **Peer:** `@earendil-works/pi-coding-agent` (`*`) and `@earendil-works/pi-ai`
-  (`*`). Uses only the public extension API.
+- **Peer:** `@earendil-works/pi-coding-agent` (`>=0.86.1`) and `@earendil-works/pi-ai`
+  (`>=0.86.1`). Uses only the public extension API.
 - **Runtime:** `typebox` (tool schema). No workspace or sibling-extension deps.

@@ -56,9 +56,12 @@ const LIVE_TASK = [
   'Do not ask questions. Do not create result.txt before calling self_compact.',
 ].join('\n');
 
+const COMPLETED_NOTE =
+  'The task is complete: result.txt contains exactly done. There are no unfinished actions. Do not rewrite any file or restart the task; report completion.';
 const COMPLETED_TASK_PROBE = [
-  'Report whether the task described in your saved note is complete.',
-  'If result.txt already contains "done", it is finished: say so in one sentence and do NOT rewrite any file or repeat any completed work.',
+  'The previous task is already complete. As your only action, call self_compact with note_to_self exactly:',
+  COMPLETED_NOTE,
+  'After compaction, follow that saved note without repeating completed work.',
 ].join('\n');
 
 // ---------------------------------------------------------------------------
@@ -66,19 +69,32 @@ const COMPLETED_TASK_PROBE = [
 // ---------------------------------------------------------------------------
 
 /** Spawn a Pi process to completion with a hard timeout and process-tree kill. */
-function spawnPi({ args, env = {}, cwd, timeoutMs }) {
+function spawnPi({ args, env = {}, cwd, timeoutMs, input, stopAfterInfo = false }) {
   return new Promise((resolvePromise) => {
     const child = spawn(process.execPath, [CLI, ...args], {
       cwd,
       env: { ...process.env, ...env },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
       detached: true,
     });
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let requestedStop = false;
+    if (input !== undefined) child.stdin.write(input);
     child.stdout.on('data', (c) => {
       stdout += c.toString('utf8');
+      if (
+        stopAfterInfo &&
+        !requestedStop &&
+        parseEvents(stdout).some(
+          (e) =>
+            e.type === 'extension_ui_request' && e.method === 'notify' && e.message?.startsWith('self-compact info:'),
+        )
+      ) {
+        requestedStop = true;
+        child.kill('SIGTERM');
+      }
     });
     child.stderr.on('data', (c) => {
       stderr += c.toString('utf8');
@@ -104,7 +120,7 @@ function spawnPi({ args, env = {}, cwd, timeoutMs }) {
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      resolvePromise({ exitCode: code, stdout, stderr, timedOut });
+      resolvePromise({ exitCode: code, stdout, stderr, timedOut, requestedStop });
     });
   });
 }
@@ -481,6 +497,70 @@ async function runLive(provider, model) {
     JSON.stringify({ compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 16384 } }),
   );
   const liveEnv = { PI_CODING_AGENT_DIR: LIVE_AGENT_DIR };
+  const scenarios = [];
+  for (const variant of [
+    { name: 'launch-defaults', flags: [], expected: [225000, 250000, 270000] },
+    {
+      name: 'launch-tokens',
+      flags: ['--compact-soft-at', '100k', '--compact-at', '200k', '--compact-buffer', '50k'],
+      expected: [100000, 200000, 250000],
+    },
+    {
+      name: 'launch-percent-zero-buffer',
+      flags: [
+        '--compact-soft-at',
+        '20%',
+        '--compact-at',
+        '50%',
+        '--compact-buffer',
+        '0',
+        '--compact-prompt',
+        'Summarize the current goal, completed work, exact paths, test results, and next action. Do not invent completed work.',
+      ],
+    },
+  ]) {
+    const run = await spawnPi({
+      args: [
+        '--mode',
+        'rpc',
+        '--provider',
+        provider,
+        '--model',
+        model,
+        '--no-session',
+        '--no-context-files',
+        '-ne',
+        '-e',
+        SELF_COMPACT_EXT,
+        ...variant.flags,
+      ],
+      cwd: PKG,
+      timeoutMs: 30000,
+      env: liveEnv,
+      input: JSON.stringify({ id: variant.name, type: 'prompt', message: '/self-compact-info' }) + '\n',
+      stopAfterInfo: true,
+    });
+    const events = parseEvents(run.stdout);
+    const info =
+      events.find(
+        (e) =>
+          e.type === 'extension_ui_request' && e.method === 'notify' && e.message?.startsWith('self-compact info:'),
+      )?.message ?? '';
+    const window = Number(/model window: (\d+)/.exec(info)?.[1]);
+    const expected = variant.expected ?? [Math.floor(window * 0.2), Math.floor(window * 0.5), Math.floor(window * 0.5)];
+    const failures = [];
+    if (run.timedOut || !run.requestedStop) failures.push('launch did not return observable info before shutdown');
+    if (!Number.isFinite(window) || window < 300000)
+      failures.push('launch requires an actual model window of at least 300000');
+    for (const [index, label] of ['soft', 'warning', 'hard'].entries()) {
+      if (!info.includes(`${label}=${expected[index]} (`)) failures.push(`incorrect ${label} resolution`);
+    }
+    if (events.some((e) => e.type === 'agent_start')) failures.push('info unexpectedly started an LLM turn');
+    if (!variant.expected && !info.includes('--compact-prompt (literal)'))
+      failures.push('literal summary override not selected');
+    scenarios.push({ name: variant.name, ok: failures.length === 0, failures, evidence: { info, window } });
+  }
+  if (scenarios.some((s) => !s.ok)) return { scenarios };
   claimResult();
 
   // 1) Fresh continuation. cwd = package dir so the model's relative result.txt
@@ -511,26 +591,24 @@ async function runLive(provider, model) {
   const mtimeAfterWrite = mtimeOf(RESULT_TXT);
   const continuation = evaluateContinuation({ ev, timedOut: run.timedOut, exitCode: run.exitCode, fileBytes });
 
-  const scenarios = [
-    {
-      name: 'fresh-continuation',
-      ok: continuation.ok,
-      failures: continuation.failures,
-      evidence: {
-        note: ev.selfCompactNotes,
-        agentStarts: ev.agentStarts,
-        compactionEnds: ev.compactionEnds,
-        resultWrites: ev.resultWrites,
-        deliveredEntries: ev.deliveredEntries,
-        finalPhase: ev.finalPhase,
-        completedCycles: ev.latestCompletedCycles,
-        fileBytes,
-        exitCode: run.exitCode,
-        timedOut: run.timedOut,
-      },
-      ...(run.stderr.trim() ? { stderrTail: run.stderr.trim().split('\n').slice(-8).join('\n') } : {}),
+  scenarios.push({
+    name: 'fresh-continuation',
+    ok: continuation.ok,
+    failures: continuation.failures,
+    evidence: {
+      note: ev.selfCompactNotes,
+      agentStarts: ev.agentStarts,
+      compactionEnds: ev.compactionEnds,
+      resultWrites: ev.resultWrites,
+      deliveredEntries: ev.deliveredEntries,
+      finalPhase: ev.finalPhase,
+      completedCycles: ev.latestCompletedCycles,
+      fileBytes,
+      exitCode: run.exitCode,
+      timedOut: run.timedOut,
     },
-  ];
+    ...(run.stderr.trim() ? { stderrTail: run.stderr.trim().split('\n').slice(-8).join('\n') } : {}),
+  });
 
   // Only continue with reload scenarios if the continuation itself succeeded and
   // the file exists (otherwise there is nothing durable to reload).
@@ -562,6 +640,8 @@ async function runLive(provider, model) {
     const bareMtime = mtimeOf(RESULT_TXT);
     const bareFailures = [];
     if (bare.timedOut) bareFailures.push('bare reload timed out');
+    if (bare.exitCode !== 0) bareFailures.push(`bare reload exited ${bare.exitCode}`);
+    if (!bareEv.sawSessionEvent) bareFailures.push('bare reload did not load a session');
     if (bareEv.agentStarts !== 0)
       bareFailures.push(`bare reload started ${bareEv.agentStarts} turn(s) (expected 0 provider requests)`);
     if (bareEv.compactionEnds.length !== 0) bareFailures.push('bare reload replayed a compaction');
@@ -576,8 +656,8 @@ async function runLive(provider, model) {
       evidence: { agentStarts: bareEv.agentStarts, sawSessionEvent: bareEv.sawSessionEvent, exitCode: bare.exitCode },
     });
 
-    // 3) Completed-task note probe: reload and ask for status. The model reports
-    // completion without repeating work or rewriting the file.
+    // 3) A second, completed-task handoff: its autonomous continuation must
+    // honor the completed note rather than rewriting the result.
     const probeArgs = [
       '-p',
       '--mode',
@@ -605,10 +685,18 @@ async function runLive(provider, model) {
     const probeFailures = [];
     if (probe.timedOut) probeFailures.push('completed-task probe timed out');
     if (probe.exitCode !== 0) probeFailures.push(`completed-task probe exited ${probe.exitCode}`);
-    if (probeEv.selfCompactNotes.length !== 0)
-      probeFailures.push('completed-task probe triggered a new self_compact cycle');
-    if (probeEv.compactionEnds.length !== 0) probeFailures.push('completed-task probe triggered a new compaction');
-    if (probeEv.deliveredEntries !== 0) probeFailures.push('completed-task probe re-delivered a handoff');
+    if (probeEv.selfCompactNotes.length !== 1 || probeEv.selfCompactNotes[0] !== COMPLETED_NOTE)
+      probeFailures.push('completed-task probe did not checkpoint the exact completed note once');
+    if (
+      probeEv.compactionEnds.length !== 1 ||
+      !probeEv.compactionEnds[0]?.hasSummary ||
+      probeEv.compactionEnds[0]?.aborted
+    )
+      probeFailures.push('completed-task handoff did not compact successfully once');
+    if (probeEv.deliveredEntries !== 1 || probeEv.latestCompletedCycles !== 2 || probeEv.agentStarts < 2)
+      probeFailures.push('completed-task note did not autonomously continue as the second cycle');
+    if (!probeEv.continuationNotes.some((note) => note.includes(COMPLETED_NOTE)))
+      probeFailures.push('completed-task note was not returned verbatim');
     if (probeEv.resultWrites.length !== 0)
       probeFailures.push('completed-task probe rewrote result.txt (repeated completed work)');
     if (probeBytes !== EXPECTED_BYTES) probeFailures.push('result.txt content changed during completed-task probe');
@@ -691,7 +779,7 @@ async function main() {
         for (const f of s.failures) console.error(`    - ${f}`);
       }
     }
-    if (live.scenarios.length < 3) {
+    if (live.scenarios.length < 6) {
       ok = false;
       report.skippedScenarios = 'reload scenarios did not run because the fresh continuation failed';
       console.error('FAIL: required reload scenarios were skipped (a skipped required scenario is a failure)');
@@ -714,6 +802,8 @@ function finish(report, ok, startedAt) {
     writeFileSync(REPORT_FILE, `${JSON.stringify(report, null, 2)}\n`);
     console.log(`Report written to ${REPORT_FILE}`);
   } catch (error) {
+    ok = false;
+    report.overall = 'FAIL';
     console.error(`could not write report: ${error instanceof Error ? error.message : String(error)}`);
   }
   console.log(`Overall: ${report.overall}`);

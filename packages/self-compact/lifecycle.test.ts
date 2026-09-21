@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { uuidv7 } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ExtensionContext, SessionEntry, ToolDefinition } from '@earendil-works/pi-coding-agent';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import extension, {
   INFO_COMMAND,
   MAX_NOTE_LENGTH,
@@ -26,6 +26,7 @@ type CommandHandler = (args: string, ctx: ExtensionContext) => Promise<void>;
 interface SentMessage {
   customType?: string | undefined;
   content: unknown;
+  options: { triggerTurn?: boolean; deliverAs?: string } | undefined;
 }
 
 interface Harness {
@@ -99,8 +100,8 @@ function makeHarness(options: HarnessOptions | string[] = {}): Harness {
     setActiveTools: (names: string[]) => {
       active = [...names];
     },
-    sendMessage: (message: { customType?: string; content: unknown }) => {
-      sentMessages.push({ customType: message.customType, content: message.content });
+    sendMessage: (message: { customType?: string; content: unknown }, options?: SentMessage['options']) => {
+      sentMessages.push({ customType: message.customType, content: message.content, options });
     },
   } as unknown as ExtensionAPI;
 
@@ -248,7 +249,7 @@ describe('handoff reservation', () => {
   it('captures the prior active-tool selection once and locks to self_compact', async () => {
     const h = makeHarness(['read', 'bash', 'edit', 'write', TOOL_NAME]);
     await h.call('checkpoint');
-    expect(h.state()?.originalActiveTools).toEqual(['read', 'bash', 'edit', 'write']);
+    expect(h.state()?.originalActiveTools).toEqual(['read', 'bash', 'edit', 'write', TOOL_NAME]);
     expect(h.active()).toEqual([TOOL_NAME]);
   });
 
@@ -257,7 +258,7 @@ describe('handoff reservation', () => {
     await h.call('checkpoint');
     // Locked now; a retry must keep the original (unlocked) snapshot.
     await h.call('checkpoint');
-    expect(h.state()?.originalActiveTools).toEqual(['read', 'bash']);
+    expect(h.state()?.originalActiveTools).toEqual(['read', 'bash', TOOL_NAME]);
   });
 });
 
@@ -305,6 +306,23 @@ describe('threshold enforcement', () => {
     expect(allowed).toBeUndefined();
   });
 
+  it('keeps hard enforcement latched until native compaction succeeds', async () => {
+    const h = makeHarness();
+    await h.fire('session_start');
+    h.setUsage(300000);
+    await h.fire('turn_end');
+    h.setUsage(100000);
+    await h.fire('turn_end');
+    const [blocked] = await h.fire('tool_call', { toolName: 'bash' });
+    expect(blocked).toMatchObject({ block: true });
+    expect(h.active()).toEqual([TOOL_NAME]);
+    await h.fire('session_compact', { reason: 'manual' });
+    expect(h.active()).toContain('bash');
+    expect(h.active()).toContain(TOOL_NAME);
+    const [allowed] = await h.fire('tool_call', { toolName: 'bash' });
+    expect(allowed).toBeUndefined();
+  });
+
   it('sends only the strongest guidance on a direct jump to hard (no soft/warning cascade)', async () => {
     const h = makeHarness({ contextWindow: 1_000_000 });
     await h.fire('session_start');
@@ -349,6 +367,113 @@ describe('threshold enforcement', () => {
     h.setUsage(230000);
     await h.fire('agent_settled');
     expect(h.sent()).toHaveLength(1); // queued for the next real turn, not a new turn
+    expect(h.sent()[0]?.options).toEqual({ triggerTurn: false, deliverAs: 'nextTurn' });
+  });
+
+  it('steers ongoing work at warning instead of waiting for the task to finish', async () => {
+    const h = makeHarness();
+    await h.fire('session_start');
+    h.ctx.isIdle = () => false;
+    h.setUsage(255000);
+    await h.fire('turn_end');
+    expect(h.sent()[0]?.options).toEqual({ triggerTurn: false, deliverAs: 'steer' });
+  });
+
+  it('lets the model answer a hard-cutoff tool rejection with self_compact', async () => {
+    const h = makeHarness();
+    await h.fire('session_start');
+    h.setUsage(300000);
+    const [blocked] = await h.fire('tool_call', { toolName: 'bash' });
+    expect(blocked).toMatchObject({ block: true });
+    expect((blocked as { terminate?: boolean }).terminate).not.toBe(true);
+  });
+});
+
+describe('handoff lifecycle continuation waiting', () => {
+  it('keeps the settled handler alive beyond 30 seconds until the continuation finishes', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = makeHarness();
+      await h.call('Continue a long-running task');
+      h.entries.push({
+        type: 'custom',
+        customType: STATE_ENTRY,
+        data: { ...h.state(), phase: 'ready-to-deliver' },
+        id: 'ready',
+        parentId: null,
+        timestamp: new Date().toISOString(),
+      } as SessionEntry);
+      let idleChecks = 0;
+      let completed = false;
+      h.ctx.isIdle = () => ++idleChecks === 1 || completed;
+      let returned = false;
+      const running = h.fire('agent_settled').then(() => {
+        returned = true;
+      });
+      await vi.advanceTimersByTimeAsync(31000);
+      expect(returned).toBe(false);
+      completed = true;
+      await vi.advanceTimersByTimeAsync(100);
+      await running;
+      expect(h.active()).toContain(TOOL_NAME);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('recovery across tree branches', () => {
+  it('releases an abandoned branch hard lock and restores it only when returning to that branch', async () => {
+    const h = makeHarness(['read', 'bash', TOOL_NAME]);
+    await h.fire('session_start');
+    h.setUsage(300000);
+    await h.fire('turn_end');
+    const lockedBranch = [...h.entries];
+    expect(h.active()).toEqual([TOOL_NAME]);
+    await h.fire('session_before_tree');
+    h.entries.splice(0);
+    h.setUsage(100000);
+    await h.fire('session_tree');
+    expect(h.active()).toEqual(['read', 'bash', TOOL_NAME]);
+    expect((await h.fire('tool_call', { toolName: 'bash' }))[0]).toBeUndefined();
+    await h.fire('session_before_tree');
+    h.entries.push(...lockedBranch);
+    await h.fire('session_tree');
+    expect(h.active()).toEqual([TOOL_NAME]);
+    expect((await h.fire('tool_call', { toolName: 'bash' }))[0]).toMatchObject({ block: true });
+  });
+
+  it('restores ordinary tools when leaving a pending handoff branch', async () => {
+    const h = makeHarness(['read', TOOL_NAME]);
+    await h.fire('session_start');
+    await h.call('branch-specific unfinished action');
+    await h.fire('session_before_tree');
+    h.entries.splice(0);
+    await h.fire('session_tree');
+    expect(h.active()).toEqual(['read', TOOL_NAME]);
+    expect(h.state()).toBeUndefined();
+  });
+});
+
+describe('recovery after interrupted compaction', () => {
+  it('makes a persisted in-flight handoff retryable on reload', async () => {
+    const h = makeHarness();
+    await h.call('saved unfinished action');
+    h.entries.push({
+      type: 'custom',
+      customType: STATE_ENTRY,
+      data: { ...h.state(), phase: 'compacting' },
+      id: 'interrupted',
+      parentId: null,
+      timestamp: new Date().toISOString(),
+    } as SessionEntry);
+    await h.fire('session_start');
+    expect(h.state()?.phase).toBe('failed');
+    expect(h.active()).toEqual([TOOL_NAME]);
+    await h.runCommand(NOW_COMMAND);
+    expect(String(h.sent()[0]?.content)).toContain('saved unfinished action');
+    await h.call('saved unfinished action');
+    expect(h.state()?.phase).toBe('pending');
   });
 });
 

@@ -48,9 +48,9 @@ describe('manifest', () => {
     expect(main?.types).toBe('./dist/index.d.ts');
   });
 
-  it('declares the pi runtime as a wildcard peer and pulls in no other extension', () => {
-    expect(pkg.peerDependencies?.['@earendil-works/pi-coding-agent']).toBe('*');
-    expect(pkg.peerDependencies?.['@earendil-works/pi-ai']).toBe('*');
+  it('declares the minimum supported Pi runtime and pulls in no other extension', () => {
+    expect(pkg.peerDependencies?.['@earendil-works/pi-coding-agent']).toBe('>=0.86.1');
+    expect(pkg.peerDependencies?.['@earendil-works/pi-ai']).toBe('>=0.86.1');
     const deps = { ...pkg.dependencies };
     // No dependency on sibling extensions or the workspace-shared library.
     for (const name of Object.keys(deps)) {

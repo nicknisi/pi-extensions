@@ -1,88 +1,88 @@
-# Self-Compaction — Phase 3 Verification Results
+# Self-Compaction verification
 
-Actual recorded outcomes for the live acceptance and release-integration phase.
-Machine-local evidence (`result.txt`, `verify/results/`, session files) is
-git-ignored and regenerated on each run; the tracked/released package excludes
-all of it via the `files` allowlist.
+Verified on 2026-09-21 against package-local Pi 0.86.1.
+Live provider/model: `anthropic/claude-opus-4-8`, selected with
+`SELF_COMPACT_LIVE_PROVIDER` and `SELF_COMPACT_LIVE_MODEL`; Pi resolves authentication.
+No credentials are stored in evidence.
 
-## Environment
+## Automated checks
 
-- Runtime: package-local Pi bundle CLI `0.86.1` (meets the `>=0.86.1` gate; the
-  PATH `pi` is older and is deliberately not used).
-- Live provider/model: `anthropic/claude-opus-4-8` (from `PI_PROVIDER`/`PI_MODEL`;
-  auth resolved by Pi, never printed or copied).
+| Check                                        | Actual result                                                     |
+| -------------------------------------------- | ----------------------------------------------------------------- |
+| Package-local build                          | Exit 0                                                            |
+| `pnpm exec vitest run packages/self-compact` | 137 tests passed across 6 files                                   |
+| Package-local typecheck                      | Exit 0                                                            |
+| Package-local oxlint                         | Exit 0                                                            |
+| Package-local oxfmt check                    | Exit 0                                                            |
+| Repository typecheck                         | Exit 0                                                            |
+| Repository lint                              | Exit 0                                                            |
+| Repository format:check                      | Exit 1: the same 31 pre-existing unrelated `.pi/artifacts/` files |
+| Boundary verifier                            | Exit 0: 261 unrelated files unchanged                             |
+| `git diff --check`                           | Exit 0                                                            |
 
-## Validation commands and outcomes
+Tests exercise real Pi sessions and CLI subprocesses, plus focused pure-function
+and handler assertions. Final integration corrections added regression coverage
+for repeated checkpoints inside continuation, manual recovery after summary
+failure and cancellation, interrupted-compaction reload, ordinary-tool restoration
+including `self_compact`, long-running continuation beyond 30 seconds, warning
+steering, hard-cutoff recovery, and locks across native tree navigation.
 
-| Command                                                | Exit | Notes                                                                                                          |
-| ------------------------------------------------------ | ---- | -------------------------------------------------------------------------------------------------------------- |
-| `pnpm --filter @nicknisi/pi-self-compact build`        | 0    | tsgo package-local build                                                                                       |
-| `pnpm exec vitest run packages/self-compact`           | 0    | 126 tests passed (config, bar, prompts, lifecycle, integration, package, boundary)                             |
-| `pnpm --filter @nicknisi/pi-self-compact typecheck`    | 0    | tsgo `--noEmit`                                                                                                |
-| `pnpm exec oxlint packages/self-compact`               | 0    | no findings                                                                                                    |
-| `pnpm exec oxfmt --check packages/self-compact`        | 0    | clean after package-local format                                                                               |
-| `node packages/self-compact/verify/live.mjs`           | 0    | self-test + bounded real-model acceptance, all PASS                                                            |
-| `node packages/self-compact/verify/boundary.mjs check` | 0    | 261 unrelated files unchanged                                                                                  |
-| `pnpm typecheck` (repo-wide, read-only)                | 0    | —                                                                                                              |
-| `pnpm lint` (repo-wide, read-only)                     | 0    | —                                                                                                              |
-| `pnpm format:check` (repo-wide, read-only)             | 1    | **Pre-existing baseline:** 31 unrelated `.pi/artifacts/` files only. Not fixed (mutating counterpart not run). |
+The independent follow-up review passed after fixing the tree-navigation lock
+leak it identified. The CLI survival harness was also included after final
+inspection found it had been omitted from the engine's phase commits.
 
-## Live driver
+## Real-model acceptance
 
-`node packages/self-compact/verify/live.mjs` first runs an offline deterministic
-self-test that proves the driver's own assertions reject wrong behavior, then
-runs the bounded real-model acceptance. Fresh evidence is written to
-`verify/results/live.json` on each run; a stale file cannot satisfy acceptance.
+Command:
 
-### Deterministic self-test (offline, no spend) — all correct
+```sh
+SELF_COMPACT_LIVE_PROVIDER=anthropic SELF_COMPACT_LIVE_MODEL=claude-opus-4-8 \
+  node packages/self-compact/verify/live.mjs
+```
 
-| Case                    | Expected | Actual | Correct |
-| ----------------------- | -------- | ------ | ------- |
-| positive-control        | ok       | ok     | yes     |
-| never-writes            | fail     | fail   | yes     |
-| writes-done-newline     | fail     | fail   | yes     |
-| rewrites-file           | fail     | fail   | yes     |
-| never-settles (timeout) | fail     | fail   | yes     |
+All six scenarios passed:
 
-### Live acceptance (real model) — overall PASS
+1. Default CLI launch resolves soft 225k, warning 250k, hard 270k.
+2. Explicit token launch resolves 100k, 200k, 250k.
+3. Percentage/zero-buffer launch resolves 20%, 50%, 50% and selects the literal summary override.
+4. Fresh handoff makes one real `self_compact` call, compacts successfully,
+   returns its verbatim note, autonomously continues, and writes `result.txt`
+   exactly once with bytes `done`, without a second user prompt.
+5. Bare session reload starts no agent turn, does not replay the handoff,
+   exits successfully, and leaves result bytes and mtime unchanged.
+6. A second handoff explicitly says the task is complete. It compacts and
+   autonomously continues with that exact note, without rewriting the file.
 
-- **fresh-continuation — PASS.** One valid note-bearing `self_compact` call, one
-  successful compaction (`compaction_end` not aborted, summary present), the note
-  delivered verbatim as a continuation, an autonomous continuation turn
-  (`agent_start` count 2, no second human prompt), exactly one `write` tool call
-  to `result.txt`, one delivered handoff cycle (`completedCycles === 1`), and
-  `result.txt` bytes exactly `done` (4 bytes, no trailing newline).
-- **reload-no-replay — PASS.** A bare reload (`--continue`, no prompt) started
-  zero turns / provider requests, replayed no compaction or handoff, and left
-  `result.txt` byte- and mtime-identical.
-- **completed-task-note — PASS.** A status probe on the reloaded session made no
-  new `self_compact` call, no new compaction, and zero writes to `result.txt`
-  (no repeated completed work); the file content and mtime were unchanged.
+The driver's deterministic self-tests first reject no-write, trailing-newline,
+duplicate-write, and timeout outcomes while accepting the positive control.
+Launch configuration checks use real CLI RPC diagnostics without model turns;
+expensive token counts are not fabricated or sent solely to fill the window.
 
-Ownership: the driver refuses to overwrite a pre-existing `result.txt` of unclear
-ownership, removing only its own prior owned result (tracked via
-`verify/results/result-owner.json`) before a fresh continuation.
+Fresh sanitized evidence: `verify/results/live.json`.
+The driver refuses to overwrite an unowned `result.txt`.
 
-## UI verification
+## Actual terminal UI
 
-The 20-cell context widget and `/self-compact-info` (no model turn) are asserted
-at the RPC level in `integration.test.ts` (`context widget`, `human commands`)
-against a capturing RPC UI, with the exact 20-cell bar strings pinned in
-`bar.test.ts`. A screenshot (`verify/results/ui.png`) is not captured in this
-headless environment; the durable, checkable UI evidence is the RPC widget
-assertion plus the exact renderer strings. This is the recorded UI limitation.
+A dedicated Terminal session loaded only the extension, using the explicit
+20%/50%/zero-buffer configuration on a 1,000,000-token model. Checked UI tools
+confirmed the visible `[---~-----|----------] 0%` widget above the editor and
+coexisting native footer. `/self-compact-info` displayed flags, exact resolved
+thresholds, all prompt paths, usage, handoff state, and cycle count without an
+LLM turn. `wait_for` returned `Condition appeared.` for the resolved values.
 
-## Boundary and release hygiene
+Sanitized state IDs, tool outcomes, and decisive UI excerpts are recorded in
+`verify/results/ui-evidence.md`. No screenshot is retained because the terminal
+window title contained unrelated environment metadata. The scratch session and
+window were closed after verification. Exact 40%-half-cached rendering is covered
+by deterministic tests rather than a costly synthetic live prompt.
 
-- `boundary.mjs check` confirms no unrelated tracked/untracked file changed.
-- `packages/codemode/index.ts` and `packages/workflows/index.ts` remain
-  byte-identical and unstaged.
-- The npm `files` allowlist packs only `dist`, `index.ts`, `extensions`, and
-  `.pi/self-compact` (plus `README.md`/`package.json`): no `verify/` evidence,
-  no `result.txt`, no sessions, no logs, no credentials.
-- A changeset (`.changeset/self-compact.md`, minor bump for
-  `@nicknisi/pi-self-compact` only) is present for release.
+## Release and preservation
 
-## Remaining blockers
-
-None. No required check was skipped.
+- The manifest requires Pi peers >=0.86.1 and loads the requested nested source entry.
+- Packed files include the compiled export, source helpers, and all three editable prompts.
+- Root README integration and `.changeset/self-compact.md` are present.
+- User edits in `packages/codemode/index.ts` and `packages/workflows/index.ts`
+  remain unchanged and are not part of project commits.
+- Machine-local evidence and session files remain under this package's ignored
+  `verify/results/` directory; result.txt is local evidence, not published code.
+- Only the original unrelated repository formatting failures remain.

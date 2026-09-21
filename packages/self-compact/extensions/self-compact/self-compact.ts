@@ -43,7 +43,11 @@ import {
 } from './config.js';
 import { contextBarLine, latestApplicableCacheRead } from './bar.js';
 import {
+  COMPACTION_MESSAGE_FILE,
+  SOFT_SELF_COMPACT_FILE,
+  WARNING_SELF_COMPACT_FILE,
   loadDefaultCompactionInstruction,
+  packageResourceDir,
   renderGuidance,
   runSelfCompaction,
   type GuidanceLevel,
@@ -65,7 +69,7 @@ export type ThresholdLevel = 'none' | 'soft' | 'warning' | 'hard';
 const LEVEL_RANK: Record<ThresholdLevel, number> = { none: 0, soft: 1, warning: 2, hard: 3 };
 
 interface NotifyState {
-  level: 'soft' | 'warning' | 'hard';
+  level: ThresholdLevel;
   cycle: number;
 }
 
@@ -73,13 +77,6 @@ interface HardEntryState {
   active: boolean;
   originalActiveTools: string[];
 }
-
-/**
- * Safety cap for how long `agent_settled` blocks awaiting a continuation turn.
- * In normal operation the continuation settles in milliseconds; the cap only
- * prevents a pathological hang from wedging the handler forever.
- */
-export const CONTINUATION_IDLE_TIMEOUT_MS = 30000;
 
 export type HandoffPhase = 'pending' | 'compacting' | 'failed' | 'ready-to-deliver' | 'delivered';
 
@@ -152,7 +149,7 @@ export function readNotifyState(entries: SessionEntry[]): NotifyState | undefine
       const data = entry.data as { level?: unknown; cycle?: unknown } | undefined;
       if (
         data &&
-        (data.level === 'soft' || data.level === 'warning' || data.level === 'hard') &&
+        (data.level === 'none' || data.level === 'soft' || data.level === 'warning' || data.level === 'hard') &&
         typeof data.cycle === 'number'
       ) {
         return { level: data.level, cycle: data.cycle };
@@ -221,6 +218,7 @@ export default function (pi: ExtensionAPI) {
   // Hard-enforcement visibility state, mirrored durably in HARD_ENTRY.
   let hardActive = false;
   let hardOriginalTools: string[] | undefined;
+  let toolsBeforeTree: string[] | undefined;
   // Timers scheduling a post-reconciliation delivery, cleared on shutdown so a
   // late callback cannot touch a replaced session.
   const reconcileTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -285,7 +283,7 @@ export default function (pi: ExtensionAPI) {
   /** Snapshot of ordinary active tools, preferring a pre-hard snapshot when locked. */
   function activeToolsSnapshot(): string[] {
     if (hardActive && hardOriginalTools) return [...hardOriginalTools];
-    return pi.getActiveTools().filter((name) => name !== TOOL_NAME);
+    return [...pi.getActiveTools()];
   }
 
   function branch(ctx: ExtensionContext): SessionEntry[] {
@@ -377,13 +375,13 @@ export default function (pi: ExtensionAPI) {
   /** Restrict tools to self_compact at the hard crossing, snapshotting the prior selection. */
   function enterHard(): void {
     if (hardActive) return;
-    hardOriginalTools = pi.getActiveTools().filter((name) => name !== TOOL_NAME);
+    hardOriginalTools = [...pi.getActiveTools()];
     hardActive = true;
     persistHard({ active: true, originalActiveTools: hardOriginalTools });
     lockTools();
   }
 
-  /** Restore the pre-hard tool selection when usage drops below the hard cutoff. */
+  /** Restore the pre-hard tool selection after successful native compaction. */
   function exitHard(): void {
     if (!hardActive) return;
     const restore = hardOriginalTools ?? [];
@@ -413,6 +411,7 @@ export default function (pi: ExtensionAPI) {
     // Successful compaction ends hard enforcement and resets guidance tracking
     // (the completedCycles bump makes prior NOTIFY_ENTRY stale for the new cycle).
     clearHard();
+    updateWidget(ctx);
 
     const continuation = [
       state.note,
@@ -456,6 +455,9 @@ export default function (pi: ExtensionAPI) {
       busy = false;
       lastReservedMessageId = undefined;
     }
+    // A continuation may itself checkpoint. Its re-entrant settled handler ran
+    // under busy, so drive that new pending cycle once the outer turn is idle.
+    if (!disposed) await coordinate(ctx);
   }
 
   /**
@@ -465,8 +467,9 @@ export default function (pi: ExtensionAPI) {
    * `waitForIdle` (unavailable on the settled ctx and prone to deadlock).
    */
   async function waitForContinuationIdle(ctx: ExtensionContext): Promise<void> {
-    const deadline = Date.now() + CONTINUATION_IDLE_TIMEOUT_MS;
-    while (!disposed && Date.now() < deadline) {
+    // A valid continuation can run for minutes. Returning on an arbitrary
+    // deadline lets print mode dispose an otherwise healthy active task.
+    while (!disposed) {
       let idle: boolean;
       try {
         idle = ctx.isIdle();
@@ -671,7 +674,7 @@ export default function (pi: ExtensionAPI) {
     const idle = safeIsIdle(ctx);
     pi.sendMessage(
       { customType: `self-compact:guidance-${level}`, content, display: true },
-      { triggerTurn: false, deliverAs: idle ? 'nextTurn' : 'followUp' },
+      { triggerTurn: false, deliverAs: idle ? 'nextTurn' : 'steer' },
     );
   }
 
@@ -696,7 +699,6 @@ export default function (pi: ExtensionAPI) {
     const level = currentLevel(tokens);
 
     if (level === 'hard') enterHard();
-    else exitHard();
 
     if (level === 'none') return;
     const cycle = handoff?.completedCycles ?? 0;
@@ -741,6 +743,12 @@ export default function (pi: ExtensionAPI) {
     lines.push(
       `  --compact-prompt: ${promptFlag === undefined ? '(unset; using default file)' : 'literal override set'}`,
     );
+    const promptDir = packageResourceDir();
+    lines.push(
+      `  summary prompt: ${promptFlag === undefined ? `${promptDir}/${COMPACTION_MESSAGE_FILE}` : '--compact-prompt (literal)'}`,
+    );
+    lines.push(`  soft prompt: ${promptDir}/${SOFT_SELF_COMPACT_FILE}`);
+    lines.push(`  warning prompt: ${promptDir}/${WARNING_SELF_COMPACT_FILE}`);
     const window = ctx.model?.contextWindow;
     lines.push(`  model window: ${typeof window === 'number' ? window : 'unknown'}`);
     if (config && config.ok) {
@@ -766,7 +774,7 @@ export default function (pi: ExtensionAPI) {
     if (state?.note !== undefined) {
       const note = state.note;
       const shown = note.length > 500 ? `${note.slice(0, 500)}… (${note.length} chars total)` : note;
-      lines.push(`  pending note: ${shown}`);
+      lines.push(`  ${state.phase === 'delivered' ? 'delivered' : 'pending'} note: ${shown}`);
     }
     return lines.join('\n');
   }
@@ -876,7 +884,7 @@ export default function (pi: ExtensionAPI) {
       }
       if (config && config.ok) {
         const tokens = measuredTokens(ctx);
-        if (tokens !== null && tokens >= config.thresholds.hardTokens) {
+        if (hardActive || (tokens !== null && tokens >= config.thresholds.hardTokens)) {
           // Restrict the visible tool selection too, snapshotting the original.
           enterHard();
           return {
@@ -884,7 +892,6 @@ export default function (pi: ExtensionAPI) {
             reason:
               `Context has reached the hard cutoff (${tokens} tokens, limit ${config.thresholds.hardTokens}). ` +
               'Ordinary tools are paused: call self_compact with a precise note_to_self as your only action.',
-            terminate: true,
           };
         }
       }
@@ -892,7 +899,9 @@ export default function (pi: ExtensionAPI) {
     return undefined;
   });
 
-  pi.on('session_start', async (_event, ctx) => {
+  function restoreBranchState(ctx: ExtensionContext): void {
+    for (const timer of reconcileTimers) clearTimeout(timer);
+    reconcileTimers.clear();
     disposed = false;
     busy = false;
     lastReservedMessageId = undefined;
@@ -905,6 +914,9 @@ export default function (pi: ExtensionAPI) {
     const state = currentState(ctx);
     const handoffLocked = state ? isLockedPhase(state.phase) : false;
     if (handoffLocked) {
+      if (state?.phase === 'compacting') {
+        persist({ ...state, phase: 'failed', lastError: 'Compaction was interrupted; retry the saved handoff.' });
+      }
       lockTools();
     } else {
       // Reconstruct a hard-enforcement lock left on the branch by a prior run.
@@ -917,6 +929,20 @@ export default function (pi: ExtensionAPI) {
     }
     updateWidget(ctx);
     // ready-to-deliver / pending resume once the agent is idle (agent_settled).
+  }
+
+  pi.on('session_start', async (_event, ctx) => restoreBranchState(ctx));
+  pi.on('session_before_tree', async (_event, ctx) => {
+    const state = currentState(ctx);
+    toolsBeforeTree = state && isLockedPhase(state.phase) ? [...state.originalActiveTools] : activeToolsSnapshot();
+  });
+  pi.on('session_tree', async (_event, ctx) => {
+    if (toolsBeforeTree) {
+      const registered = registeredToolNames();
+      pi.setActiveTools(toolsBeforeTree.filter((name) => registered.has(name)));
+      toolsBeforeTree = undefined;
+    }
+    restoreBranchState(ctx);
   });
 
   pi.on('model_select', async (_event, ctx) => {
@@ -944,19 +970,14 @@ export default function (pi: ExtensionAPI) {
     const model = ctx.model;
     if (!model) return { cancel: true };
 
-    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-    if (!auth.ok) {
-      ctx.ui.notify(`self-compact: cannot compact without provider auth: ${auth.error}`, 'error');
-      return { cancel: true };
-    }
-
-    const headers: Record<string, string> | undefined = auth.headers
-      ? Object.fromEntries(
-          Object.entries(auth.headers).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
-        )
-      : undefined;
-
     try {
+      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+      if (!auth.ok) throw new Error(`self-compact: cannot compact without provider auth: ${auth.error}`);
+      const headers: Record<string, string> | undefined = auth.headers
+        ? Object.fromEntries(
+            Object.entries(auth.headers).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+          )
+        : undefined;
       const result = await runSelfCompaction({
         preparation: event.preparation,
         model,
@@ -974,14 +995,7 @@ export default function (pi: ExtensionAPI) {
           : {}),
         loadDefault: () => loadDefaultCompactionInstruction(),
       });
-      return {
-        compaction: {
-          summary: result.summary,
-          firstKeptEntryId: result.firstKeptEntryId,
-          tokensBefore: result.tokensBefore,
-          ...(result.usage !== undefined ? { usage: result.usage } : {}),
-        },
-      };
+      return { compaction: result };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       // Record the failure authoritatively here (before returning cancel) so the
@@ -1002,17 +1016,17 @@ export default function (pi: ExtensionAPI) {
   // threshold/overflow compaction satisfied, marking it ready so delivery
   // happens once idle.
   //
-  // Scoped to the 'pending' phase only: a 'failed' cycle stays locked and
-  // requires explicit retry (spec §5), so an unrelated successful compaction
-  // must not silently discharge it and bypass that gate. 'compacting' is our
-  // own in-flight cycle (delivered by compactThenDeliver, not here).
-  pi.on('session_compact', async (_event, ctx) => {
+  // A failed cycle needs explicit recovery: either retry self_compact or use
+  // native /compact. Automatic compaction must not retry a failed handoff.
+  pi.on('session_compact', async (event, ctx) => {
     // A completed compaction (any path) means usage is being reclaimed: refresh
     // the widget so a stale pre-compaction bar does not linger.
-    updateWidget(ctx);
     const state = currentState(ctx);
+    persistNotify({ level: 'none', cycle: state?.completedCycles ?? 0 });
+    if (!state || !isLockedPhase(state.phase)) exitHard();
+    updateWidget(ctx);
     if (!state) return;
-    if (state.phase === 'pending') {
+    if (state.phase === 'pending' || (state.phase === 'failed' && event.reason === 'manual')) {
       try {
         persist({ ...state, phase: 'ready-to-deliver' });
       } catch {
