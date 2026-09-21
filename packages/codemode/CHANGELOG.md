@@ -1,5 +1,11 @@
 # @nicknisi/pi-codemode
 
+## 0.4.1
+
+### Patch Changes
+
+- 5110593: Consolidate orchestration guidance into tool descriptions instead of duplicating it in global prompt guidelines. Clarify output contracts, parallel callbacks, shared-tree serialization, and workflow agent return values without changing execution behavior.
+
 ## 0.4.0
 
 ### Minor Changes

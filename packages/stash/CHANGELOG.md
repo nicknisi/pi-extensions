@@ -1,5 +1,11 @@
 # @nicknisi/pi-stash
 
+## 0.1.5
+
+### Patch Changes
+
+- 5110593: Use Ctrl-S for stash and restore, leaving Ctrl-Shift-S available for pi-web-access. Document how to move Pi's built-in save and session-sort shortcuts in keybindings.json.
+
 ## 0.1.4
 
 ### Patch Changes
