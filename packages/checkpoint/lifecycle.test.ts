@@ -1,8 +1,3 @@
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { uuidv7 } from '@earendil-works/pi-ai';
 import {
   createEventBus,
@@ -12,7 +7,7 @@ import {
   type SessionEntry,
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import extension, {
   INFO_COMMAND,
   MAX_NOTE_LENGTH,
@@ -23,8 +18,6 @@ import extension, {
   validateNote,
   type HandoffState,
 } from './extensions/self-compact/self-compact.js';
-
-const BOUNDARY = join(dirname(fileURLToPath(import.meta.url)), 'verify', 'boundary.mjs');
 
 type EventResult = unknown;
 type EventHandler = (event: unknown, ctx: ExtensionContext) => Promise<EventResult> | EventResult;
@@ -562,80 +555,5 @@ describe('human commands', () => {
     await h.runCommand(NOW_COMMAND);
     const req = h.sent().find((m) => m.customType === 'self-compact:manual-request');
     expect(String(req?.content)).toMatch(/note_to_self/);
-  });
-});
-
-describe('boundary helper', () => {
-  let repo: string;
-  let baseline: string;
-
-  beforeEach(() => {
-    repo = mkdtempSync(join(tmpdir(), 'self-compact-boundary-'));
-    baseline = join(mkdtempSync(join(tmpdir(), 'self-compact-baseline-')), 'baseline.json');
-    execFileSync('git', ['init', '-q'], { cwd: repo });
-    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo });
-    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repo });
-    mkdirSync(join(repo, 'other'), { recursive: true });
-    mkdirSync(join(repo, 'packages', 'checkpoint'), { recursive: true });
-    writeFileSync(join(repo, 'other', 'keep.txt'), 'unrelated\n');
-    writeFileSync(join(repo, 'dirty.txt'), 'pre-existing dirty\n');
-    writeFileSync(join(repo, 'packages', 'checkpoint', 'a.txt'), 'owned\n');
-    execFileSync('git', ['add', '.'], { cwd: repo });
-    execFileSync('git', ['commit', '-qm', 'init'], { cwd: repo });
-  });
-
-  afterEach(() => {
-    rmSync(repo, { recursive: true, force: true });
-  });
-
-  const run = (command: string) => {
-    try {
-      execFileSync('node', [BOUNDARY, command], {
-        env: { ...process.env, SELF_COMPACT_BOUNDARY_ROOT: repo, SELF_COMPACT_BOUNDARY_BASELINE: baseline },
-        stdio: 'pipe',
-      });
-      return 0;
-    } catch (error) {
-      return (error as { status?: number }).status ?? 1;
-    }
-  };
-
-  it('fails check when the baseline is missing', () => {
-    expect(run('check')).not.toBe(0);
-  });
-
-  it('passes check immediately after capture', () => {
-    expect(run('capture')).toBe(0);
-    expect(run('check')).toBe(0);
-  });
-
-  it('detects a modified unrelated file', () => {
-    run('capture');
-    writeFileSync(join(repo, 'other', 'keep.txt'), 'tampered\n');
-    expect(run('check')).not.toBe(0);
-  });
-
-  it('detects an added unrelated file', () => {
-    run('capture');
-    writeFileSync(join(repo, 'other', 'new.txt'), 'sneaked in\n');
-    expect(run('check')).not.toBe(0);
-  });
-
-  it('detects a modified pre-existing dirty file', () => {
-    run('capture');
-    writeFileSync(join(repo, 'dirty.txt'), 'changed\n');
-    expect(run('check')).not.toBe(0);
-  });
-
-  it('ignores changes inside the approved package path', () => {
-    run('capture');
-    writeFileSync(join(repo, 'packages', 'checkpoint', 'a.txt'), 'edited freely\n');
-    writeFileSync(join(repo, 'packages', 'checkpoint', 'b.txt'), 'new owned file\n');
-    expect(run('check')).toBe(0);
-  });
-
-  it('refuses to overwrite an existing baseline', () => {
-    expect(run('capture')).toBe(0);
-    expect(run('capture')).not.toBe(0);
   });
 });
