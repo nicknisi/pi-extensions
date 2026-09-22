@@ -46,6 +46,8 @@ importers:
         specifier: workspace:*
         version: link:../shared
 
+  packages/artifact-host: {}
+
   packages/artifacts:
     dependencies:
       diff2html:

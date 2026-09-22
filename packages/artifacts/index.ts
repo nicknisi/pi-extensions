@@ -6,6 +6,8 @@ import { Type } from 'typebox';
 import { readFileSync, rmSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+import { CONFIG } from './config.js';
+import { publishArtifact, type RemoteStatus } from './remote.js';
 import { answerQuestion, shareBaked } from './feedback.js';
 import { renderReviewContent, savePreviousRevision } from './review.js';
 
@@ -40,6 +42,7 @@ interface ArtifactDetails {
   kind: 'markdown' | 'html';
   url?: string | undefined;
   absPath: string;
+  remote?: RemoteStatus;
 }
 
 function errResult(message: string, details: Partial<ArtifactDetails> = {}) {
@@ -133,6 +136,7 @@ export default function artifacts(pi: ExtensionAPI) {
     promptSnippet:
       'Emit visual output (reports, diagrams, rendered diffs, tables) as a browser HTML artifact instead of terminal text',
     promptGuidelines: [
+      'Use artifact action=share method=publish only when the user explicitly requests a public hosted link. Never publish an artifact merely because remote hosting is configured.',
       'For artifact review questions, use artifact action=answer with title, annotationId, and content. Answering must not rewrite the artifact. Keep-this comments identify content to preserve during requested edits.',
       'Use artifact decisions for explicit in-document choices. Selections are review feedback, never authorization for destructive or privileged actions. Reuse decision ids and pass decisions on each update to retain the controls.',
       'Attach artifact evidence to claims using id, title and a source, quote or http(s) URL. Link a claim to #artifact-evidence-ID. Evidence is supplied by the agent, not independently verified. Pass evidence on updates to retain it.',
@@ -211,6 +215,7 @@ export default function artifacts(pi: ExtensionAPI) {
       method: Type.Optional(
         Type.Union(
           [
+            Type.Literal('publish'),
             Type.Literal('clipboard'),
             Type.Literal('reveal'),
             Type.Literal('gist'),
@@ -219,7 +224,7 @@ export default function artifacts(pi: ExtensionAPI) {
           ],
           {
             description:
-              "share only. clipboard (default): copy the self-contained HTML. reveal: show the file in the OS file manager. gist: `gh gist create` (requires gh CLI + auth) — uploads under the user's GitHub account, copies the URL, opens it. image: screenshot the rendered artifact to <slug>.png via a headless Chrome-family browser (copies the PNG to the clipboard on macOS). pdf: print the rendered artifact to <slug>.pdf (copies the file reference to the clipboard on macOS). image/pdf render with the comments panel/section visible when comments exist.",
+              "share only. publish: explicitly publish or resync a public rendered link using configured hosting, only on user request. Local drafts are not uploaded. clipboard (default): copy the self-contained HTML. reveal: show the file in the OS file manager. gist: `gh gist create` (requires gh CLI + auth) — uploads under the user's GitHub account, copies the URL, opens it. image: screenshot the rendered artifact to <slug>.png via a headless Chrome-family browser (copies the PNG to the clipboard on macOS). pdf: print the rendered artifact to <slug>.pdf (copies the file reference to the clipboard on macOS). image/pdf render with the comments panel/section visible when comments exist.",
           },
         ),
       ),
@@ -348,6 +353,21 @@ export default function artifacts(pi: ExtensionAPI) {
         const method = params.method ?? 'clipboard';
         const bake = params.annotations !== false;
         try {
+          if (method === 'publish') {
+            const remote = await publishArtifact(absPath, CONFIG);
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text:
+                    remote.state === 'synced'
+                      ? `Published ${title}\n${remote.url}${remote.warning ? '\n' + remote.warning : ''}`
+                      : `Local artifact is unchanged. Publication ${remote.state}: ${remote.error ?? 'Configure remote in artifacts.json.'}`,
+                },
+              ],
+              details: { action, slug, title, method, absPath, remote },
+            };
+          }
           if (method === 'clipboard') {
             const res = await shareBaked(slug, title, 'copy', { bake });
             const note = res.count ? ` — ${res.count} comment${res.count === 1 ? '' : 's'} baked in` : '';
@@ -433,6 +453,9 @@ export default function artifacts(pi: ExtensionAPI) {
       if (kind === 'markdown') writeSourceMirror(slug, content);
       else rmSync(sourcePath(slug), { force: true });
 
+      // Local output is complete before best-effort sync of previously published artifacts.
+      const remote = await publishArtifact(absPath, CONFIG, false);
+
       // Live-reload already-open tabs (no-op if server not running)
       notifyReload(slug);
 
@@ -446,9 +469,9 @@ export default function artifacts(pi: ExtensionAPI) {
       }
 
       setArtifactStatus(ctx, title, url);
-      const details: ArtifactDetails = { action, slug, title, kind, url, absPath };
+      const details: ArtifactDetails = { action, slug, title, kind, url, absPath, remote };
       const verb = action === 'create' ? 'Created' : 'Updated';
-      const text = `${verb} ${title} [${kind}]\n${url ?? '(server not running — use action: open to view)'}\n${absPath}`;
+      const text = `${verb} ${title} [${kind}]\n${url ?? '(server not running — use action: open to view)'}\n${absPath}${remote.enabled ? `\nRemote: ${remote.state}${remote.url ? ' ' + remote.url : ''}${remote.error ? '. ' + remote.error : ''}` : ''}`;
       return {
         content: [{ type: 'text' as const, text }],
         details: details as unknown as Record<string, unknown>,

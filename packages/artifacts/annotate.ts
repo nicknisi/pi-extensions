@@ -55,7 +55,7 @@ export function annotateSnippet(
 }
 [data-artifact-annotate] *, [data-artifact-annotate] *::before, [data-artifact-annotate] *::after { box-sizing: border-box; }
 [data-artifact-annotate] [hidden] { display: none !important; }
-[data-artifact-annotate] textarea, [data-artifact-annotate] .comment, [data-artifact-annotate] .reply, [data-artifact-annotate] .feedback { user-select: text; }
+[data-artifact-annotate] input, [data-artifact-annotate] textarea, [data-artifact-annotate] .comment, [data-artifact-annotate] .reply, [data-artifact-annotate] .feedback { user-select: text; }
 [data-artifact-annotate] button, [data-artifact-annotate] textarea { font: inherit; }
 [data-artifact-annotate] :is(button, a, summary):focus-visible { outline: 2px solid var(--aa-accent); outline-offset: 3px; }
 [data-artifact-annotate] button:disabled { opacity: .45; cursor: default; }
@@ -855,22 +855,65 @@ body.aa-review-layout { padding-right: 400px; }
   popTextarea.addEventListener("keydown", function (e) {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); addPending(); }
   });
+  var remoteStatus = null, publishing = false;
+  function renderPublication(status) {
+    remoteStatus = status;
+    var area = shareMenu.querySelector('[data-publication]');
+    if (!area) return;
+    area.innerHTML = '';
+    var label = document.createElement('p'); label.setAttribute('role', 'status');
+    label.textContent = status.error || status.warning || (!status.enabled ? 'Set up remote in artifacts.json to publish a link.' : status.state === 'synced' ? 'Public link is synchronized.' : status.state === 'unsynced' ? 'Public copy is not synchronized. Retry with current local content.' : 'Not published. Anyone with the link can view it.');
+    area.appendChild(label);
+    if (status.url) {
+      var link = document.createElement('input'); link.readOnly = true; link.value = status.url; link.setAttribute('aria-label', 'Public artifact URL'); link.style.width = '100%';
+      link.addEventListener('click', function () { link.select(); }); area.appendChild(link);
+      var copy = document.createElement('button'); copy.textContent = 'Copy link'; copy.setAttribute('data-remote-copy', ''); area.appendChild(copy);
+    }
+    if (status.enabled) { var publish = document.createElement('button'); publish.textContent = publishing ? 'Publishing…' : status.url ? 'Sync now / retry' : 'Publish link'; publish.disabled = publishing; publish.setAttribute('data-share', 'publish'); area.appendChild(publish); }
+    if (status.viewerUrl) { var view = document.createElement('button'); view.textContent = 'View private (sign in)'; view.setAttribute('data-share', 'view'); area.appendChild(view); }
+  }
+  function refreshPublication() {
+    return fetch('/api/publication?slug=' + encodeURIComponent(SLUG)).then(function (r) { if (!r.ok) throw new Error(); return r.json(); }).then(renderPublication).catch(function () { renderPublication({ enabled:false, error:'Could not read publication status. Reopen Share to retry.' }); });
+  }
   if (shareBtn && shareMenu) {
+    shareBtn.setAttribute('aria-controls', shareMenu.id);
+    shareBtn.setAttribute('aria-expanded', 'false');
     shareBtn.addEventListener("click", function (e) {
       e.stopPropagation();
-      if (shareMenu.style.display === "block") { shareMenu.style.display = "none"; return; }
+      if (shareMenu.style.display === "block") { shareMenu.style.display = "none"; shareBtn.setAttribute('aria-expanded', 'false'); return; }
       var n = state.annotations.length;
       var withN = n ? " — with " + n + (n === 1 ? " comment" : " comments") : "";
       shareMenu.innerHTML =
         '<button data-share="image">Copy image' + withN + '</button>' +
         '<button data-share="pdf">Copy PDF' + withN + '</button>' +
         '<button data-share="copy">Copy file' + withN + '</button>' +
-        '<button data-share="gist">Create gist link</button>';
+        '<button data-share="gist">Create gist link</button>' +
+        '<section data-publication aria-label="Hosted publishing"><p role="status">Loading publication status…</p></section>';
       shareMenu.style.display = "block";
+      shareBtn.setAttribute('aria-expanded', 'true');
+      shareMenu.querySelector('button').focus();
+      refreshPublication();
     });
     shareMenu.addEventListener("click", function (e) {
+      e.stopPropagation();
+      if (e.target.hasAttribute('data-remote-copy')) {
+        Promise.resolve().then(function () { return navigator.clipboard.writeText(remoteStatus.url); }).then(function () { showToast('Link copied'); }).catch(function () { var input = shareMenu.querySelector('input'); input.focus(); input.select(); showToast('Copy unavailable. Select and copy the visible URL.'); }); return;
+      }
       var m = e.target.getAttribute("data-share");
       if (!m) return;
+      if (m === 'view') {
+        fetch('/api/share', { method:'POST', headers:{ 'Content-Type':'application/json' }, body:JSON.stringify({ slug:SLUG, method:'view' }) }).then(function (r) { if (!r.ok) throw new Error(); return r.json(); }).then(function (b) {
+          var area = shareMenu.querySelector('[data-publication]'), input = document.createElement('input'); input.readOnly = true; input.value = b.url; input.setAttribute('aria-label', 'One-time viewing sign-in URL'); input.style.width = '100%'; input.addEventListener('click', function () { input.select(); }); area.appendChild(input);
+          var link = document.createElement('a'); link.href = b.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.textContent = 'Open read-only sign-in (expires in 60 seconds)'; area.appendChild(link);
+          window.open(b.url, '_blank', 'noopener,noreferrer'); input.focus(); input.select();
+        }).catch(function () { showToast('Could not create viewing sign-in. Check host configuration and retry.'); }); return;
+      }
+      if (m === 'publish') {
+        if (publishing) return;
+        publishing = true; renderPublication(remoteStatus);
+        fetch('/api/share', { method:'POST', headers:{ 'Content-Type':'application/json' }, body:JSON.stringify({ slug:SLUG, method:'publish' }) }).then(function (r) { if (!r.ok) throw new Error(); return r.json(); }).then(function (b) { remoteStatus = b.remote; }).catch(function () { remoteStatus = { enabled:true, state:'unsynced', error:'Publishing failed. Retry with current local content.' }; }).finally(function () { publishing = false; renderPublication(remoteStatus); var control = shareMenu.querySelector('[data-share="publish"]'); if (control) control.focus(); });
+        return;
+      }
       shareMenu.style.display = "none";
       persist().then(function () {
         if (state.saveError) throw new Error("save failed");
@@ -887,12 +930,12 @@ body.aa-review-layout { padding-right: 400px; }
         })
         .catch(function () { showToast("Share failed — server unreachable"); });
     });
-    document.addEventListener("click", function () { shareMenu.style.display = "none"; });
+    document.addEventListener("click", function () { shareMenu.style.display = "none"; shareBtn.setAttribute('aria-expanded', 'false'); });
   }
 
   document.addEventListener("keydown", function (e) {
     if (e.key !== "Escape") return;
-    if (shareMenu && shareMenu.style.display === "block") { shareMenu.style.display = "none"; return; }
+    if (shareMenu && shareMenu.style.display === "block") { shareMenu.style.display = "none"; shareBtn.setAttribute('aria-expanded', 'false'); shareBtn.focus(); return; }
     if (state.pinning) { setPinning(false); return; }
     if (state.editing != null) { state.editing = null; render(); return; }
     if (state.mode === "annotate") setMode("off");
