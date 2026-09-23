@@ -103,6 +103,28 @@ export default function artifacts(pi: ExtensionAPI) {
     stopServer();
   });
 
+  // Artifacts belong in the user's own browser (via `open` → OS default, real profile), not the
+  // throwaway CDP browser that pi-computer-use's launch_browser/navigate_browser spin up.
+  pi.on('tool_call', (event) => {
+    if (event.toolName !== 'launch_browser' && event.toolName !== 'navigate_browser') return undefined;
+    const port = runningPort();
+    const raw = event.input.url;
+    if (port === null || typeof raw !== 'string') return undefined;
+    let target: URL;
+    try {
+      target = new URL(raw);
+    } catch {
+      return undefined;
+    }
+    const local = target.hostname === '127.0.0.1' || target.hostname === 'localhost';
+    if (!local || target.port !== String(port)) return undefined;
+    return {
+      block: true,
+      reason:
+        "Artifacts open in the user's own browser, not the managed test browser. Use artifact action=open to show it there; don't launch or navigate a test browser to artifact URLs.",
+    };
+  });
+
   // ─── /artifacts command — pick an artifact to open (falls back to the index page) ──
   pi.registerCommand('artifacts', {
     description: 'Pick a generated artifact to open in the browser (starts the localhost server if not running)',
@@ -136,6 +158,7 @@ export default function artifacts(pi: ExtensionAPI) {
       'For artifact review questions, use artifact action=answer with title, annotationId, and content. Answering must not rewrite the artifact. Keep-this comments identify content to preserve during requested edits.',
       'Use artifact decisions for explicit in-document choices. Selections are review feedback, never authorization for destructive or privileged actions. Reuse decision ids and pass decisions on each update to retain the controls.',
       'Attach artifact evidence to claims using id, title and a source, quote or http(s) URL. Link a claim to #artifact-evidence-ID. Evidence is supplied by the agent, not independently verified. Pass evidence on updates to retain it.',
+      "Artifacts open in the user's default browser automatically. Never use launch_browser or navigate_browser on artifact URLs; use artifact action=open instead.",
       'For stable visual comments in artifact HTML, give images, diagrams and tables a unique id or data-artifact-anchor. Existing general, keep, question and element comments persist across updates.',
     ],
     parameters: Type.Object({
