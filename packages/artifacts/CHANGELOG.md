@@ -1,5 +1,11 @@
 # @nicknisi/pi-artifacts
 
+## 1.4.1
+
+### Patch Changes
+
+- d95de12: Block `launch_browser`/`navigate_browser` calls aimed at the artifact server so artifacts stay in the user's default browser and profile instead of a managed test browser.
+
 ## 1.4.0
 
 ### Minor Changes
