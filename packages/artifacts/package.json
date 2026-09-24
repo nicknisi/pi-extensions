@@ -19,6 +19,8 @@
     "index.ts",
     "annotate.ts",
     "config.ts",
+    "contract.ts",
+    "service.ts",
     "feedback.ts",
     "review.ts",
     "reader.ts",
@@ -34,6 +36,10 @@
   ],
   "type": "module",
   "exports": {
+    "./contract": {
+      "types": "./dist/contract.d.ts",
+      "default": "./dist/contract.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"

@@ -53,8 +53,8 @@ export function writeArtifact(slug: string, html: string): string {
 }
 
 /** Absolute path to a slug's annotations sidecar (<slug>.annotations.json). */
-export function annotationsPath(slug: string): string {
-  return join(artifactDir(), `${slug}.annotations.json`);
+export function annotationsPath(slug: string, cwd = process.cwd()): string {
+  return join(cwd, ARTIFACT_DIR, `${slug}.annotations.json`);
 }
 
 /** Absolute path to a slug's raw markdown source mirror (<slug>.md). */
