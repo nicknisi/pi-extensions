@@ -7,17 +7,10 @@ import { readFileSync, rmSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { answerQuestion, shareBaked } from './feedback.js';
+import { provideArtifacts } from './service.js';
 import { renderReviewContent, savePreviousRevision } from './review.js';
 
-import {
-  artifactUrl,
-  isRunning,
-  notifyAnnotations,
-  notifyReload,
-  runningPort,
-  setFeedbackSender,
-  stopServer,
-} from './server.js';
+import { artifactUrl, isRunning, notifyAnnotations, notifyReload, runningPort, stopServer } from './server.js';
 import type { FeedbackSender } from './server.js';
 import {
   slugify,
@@ -95,11 +88,16 @@ export default function artifacts(pi: ExtensionAPI) {
     pi.sendUserMessage(markdown, { deliverAs: 'followUp' });
     return true;
   };
-  setFeedbackSender(sender); // factory time — first session
-  pi.on('session_start', () => setFeedbackSender(sender)); // re-register across session replacement
+  // Discovery registrations are available regardless of extension load order.
+  // The provider starts no server or long-lived resources until publish/open.
+  let provider: ReturnType<typeof provideArtifacts> | undefined = provideArtifacts(pi.events, sender);
+  pi.on('session_start', () => {
+    provider ??= provideArtifacts(pi.events, sender);
+  });
 
   pi.on('session_shutdown', () => {
-    setFeedbackSender(null);
+    provider?.dispose();
+    provider = undefined;
     stopServer();
   });
 

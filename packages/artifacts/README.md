@@ -19,6 +19,31 @@ pi install /Users/nicknisi/Developer/pi-extensions/packages/artifacts
 - **Browser UI** — styled artifact pages plus an index page at `/`; live reload via an `/events` SSE endpoint. Every served artifact page carries a **Share** button (in the Markdown header, bottom-right on HTML artifacts): _Copy image_ renders a PNG with the comments panel open (when comments exist), _Copy PDF_ prints to a selectable-text PDF with a Review comments section, _Copy file_ puts the self-contained HTML on your clipboard (comments baked in), _Create gist link_ uploads via `gh` and copies the URL — no agent round-trip needed. No TUI widgets, overlays, keybindings, or custom message/entry types: tool results use pi's default rendering (the tool returns structured `details` — `action`, `slug`, `title`, `kind`, `url`, `absPath` — and a text summary containing the clickable localhost URL).
 - **Annotation layer** — every served artifact page carries an inert comment layer (see [Annotations](#annotations)): select text, comment, and send the comments back to the running agent as a follow-up message.
 
+## Optional extension service
+
+Other extensions can use artifacts without model calls or a mandatory dependency. After `session_start`, emit `plugin-services:v1:discover:nicknisi.artifacts` on the **injected `pi.events`** with `{ offer }`. Offers arrive synchronously as `{ id: 'nicknisi.artifacts', apiMajor: 1, api }`. Optional request `id`/`apiMajor` filters must match. No registry, RPC, additional server, or helper dependency is needed. Missing/incompatible offers should fall back to the consumer's own local HTML file.
+
+`contract.ts` (also exported as `@nicknisi/pi-artifacts/contract`) contains side-effect-free metadata, types, `isArtifactsAPI` and `isArtifactsOffer`. The API has flat, own callable methods:
+
+```ts
+publish({ title: string, html: string, open?: boolean })
+  // Promise<{ slug: string, url: string, absPath: string }>
+answer({ slug: string, annotationId: string, content: string })
+  // Promise<{ ok: true }>
+subscribe({ slug: string, onFeedback })
+  // Promise<() => void>
+// onFeedback({ slug, markdown, annotationIds: string[] }): boolean | Promise<boolean>
+```
+
+- `publish` uses the existing HTML renderer, previous-revision snapshot, storage, lazy server and live reload. Full documents or fragments are accepted, up to 2 MiB UTF-8; title must be nonempty (at most 4000 characters). Reuse the same title to update the same slug/URL; slugification is the same as the tool (80 characters, so callers should use unique run titles). Callers own update ordering/coalescing and should await sequential updates. Only `open: true` opens a browser tab. No model is involved.
+- Publication preserves annotation/evidence sidecars and authored `id`/`data-artifact-anchor` attributes. Supply stable anchors in each revision. As with HTML tool updates, a stale Markdown source mirror is removed. The service does not invent or rewrite native decision/evidence controls; include desired markup in each HTML update. Ordinary tool decision/evidence behavior is unchanged.
+- `answer` uses the existing sent-question storage and annotation notification without rewriting HTML.
+- Each slug has one subscriber. Duplicate subscriptions reject rather than stealing ownership. Await subscription before requesting feedback. The unsubscribe function is idempotent and cannot remove a newer subscription.
+- Unowned feedback retains the ordinary `pi.sendUserMessage(..., { deliverAs: 'followUp' })` route. Owned feedback goes **only** to that owner. Its boolean completion is awaited; false, rejection or service disposal leaves the batch undelivered (HTTP 503), never falling back to another session. Concurrent sends and draft saves for that slug receive 409 until delivery settles; browser drafts must be retained and retried. Other slugs remain usable. Consumers should durably deduplicate `annotationIds` before acknowledging: this is not crash-proof exactly-once delivery.
+- Shutdown removes discovery/subscriptions and guards all retained method references. Rediscover and resubscribe in the new session; do not reuse old session callbacks. Runtime sockets remain lazy and session-scoped. A callback already executing cannot be cancelled by this protocol; consumers must guard their own session lifetime too.
+
+This is a compatibility convention, **not authentication or a security boundary**. Providers, consumers, callbacks and supplied HTML are trusted local extension code. Comments/decision selections are review feedback, not approval or authorization.
+
 ## The `artifact` tool
 
 Parameters (TypeBox schema):

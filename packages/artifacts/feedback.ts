@@ -102,9 +102,9 @@ export function validAnnotation(value: unknown): value is Annotation {
 }
 
 /** Read the annotation list for a slug; [] when missing or slug is unsafe. */
-export function readAnnotations(slug: string): Annotation[] {
+export function readAnnotations(slug: string, cwd = process.cwd()): Annotation[] {
   if (!isSafeSlug(slug)) return [];
-  const path = annotationsPath(slug);
+  const path = annotationsPath(slug, cwd);
   if (!existsSync(path)) return [];
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf-8')) as Partial<Sidecar>;
@@ -118,13 +118,13 @@ export function readAnnotations(slug: string): Annotation[] {
 }
 
 /** Replace the annotation list for a slug. Throws (surfaced as 500) on write failure. */
-export function writeAnnotations(slug: string, list: Annotation[]): void {
+export function writeAnnotations(slug: string, list: Annotation[], cwd = process.cwd()): void {
   if (!isSafeSlug(slug)) throw new Error(`invalid slug: ${slug}`);
   if (!list.every(validAnnotation) || new Set(list.map((a) => a.id)).size !== list.length) {
     throw new Error('invalid annotations');
   }
   const sidecar: Sidecar = { version: 1, annotations: list.map(cleanAnnotation) };
-  const path = annotationsPath(slug);
+  const path = annotationsPath(slug, cwd);
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
     writeFileSync(temporary, JSON.stringify(sidecar, null, 2), 'utf-8');
@@ -135,8 +135,8 @@ export function writeAnnotations(slug: string, list: Annotation[]): void {
 }
 
 /** Revision tokens prevent an old browser tab from overwriting a newer review. */
-export function annotationState(slug: string): { annotations: Annotation[]; revision: string } {
-  const annotations = readAnnotations(slug);
+export function annotationState(slug: string, cwd = process.cwd()): { annotations: Annotation[]; revision: string } {
+  const annotations = readAnnotations(slug, cwd);
   return { annotations, revision: createHash('sha256').update(JSON.stringify(annotations)).digest('hex') };
 }
 

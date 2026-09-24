@@ -8,6 +8,7 @@
  * never break out of the tag). The root element carries the `data-artifact-annotate`
  * marker. Vanilla JS, zero deps, tolerant of arbitrary agent-authored DOM.
  */
+import { EVENT_HUB_JS } from './events.js';
 
 /**
  * Splice the annotation layer into an artifact HTML document, before `</body>`
@@ -929,8 +930,8 @@ body.aa-review-layout { padding-right: 400px; }
     })(fieldsets[fi]);
   }
   if (!STATIC && typeof EventSource !== "undefined") {
-    var events = new EventSource("/events");
-    events.addEventListener("annotations", function (e) {
+    ${EVENT_HUB_JS}
+    window.__artifactEvents.on(SLUG, "annotations", function (e) {
       if (e.data !== SLUG) return;
       state.saving = state.saving.then(function () {
         return fetch("/api/annotations?slug=" + encodeURIComponent(SLUG)).then(function (r) { if (!r.ok) throw new Error("refresh failed"); return r.json(); }).then(function (b) {

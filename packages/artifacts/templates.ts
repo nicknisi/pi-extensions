@@ -5,6 +5,7 @@ import { parse as diffParse, html as diffHtml } from 'diff2html';
 import hljs from 'highlight.js';
 
 import { CONFIG, MERMAID_CDN } from './config.js';
+import { EVENT_HUB_JS } from './events.js';
 import { BASE_CSS, D2H_CSS, HLJS_CSS } from './styles.js';
 import { readerBody, READER_ATTRIBUTES, READER_SCRIPT, READER_STYLES } from './reader.js';
 
@@ -121,14 +122,15 @@ function renderDiff(diffText: string): string | null {
 
 // ─── Shell ────────────────────────────────────────────────────────────────────
 
-/** SSE snippet: subscribe to /events, reload only on events for this slug. */
-function sseSnippet(slug: string): string {
+/** SSE snippet: reload only on events for this slug, over the page's shared stream. */
+export function sseSnippet(slug: string): string {
   return `
 <script data-artifact-reload>
+${EVENT_HUB_JS}
 (function () {
   var slug = ${JSON.stringify(slug)};
-  var es = new EventSource("/events");
-  es.addEventListener("reload", function (e) {
+  if (!window.__artifactEvents) return;
+  window.__artifactEvents.on(slug, "reload", function (e) {
     try { if ((e.data === slug || e.data === "*") && window.dispatchEvent(new Event("artifact:before-reload", { cancelable: true }))) location.reload(); } catch (_) {}
   });
 })();

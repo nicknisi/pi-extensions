@@ -5,8 +5,9 @@ import { readFileSync, existsSync, statSync } from 'node:fs';
 import { basename, extname } from 'node:path';
 
 import { HOST } from './config.js';
-import { isSafeSlug, listArtifacts, readArtifact, safeArtifactPath } from './utils.js';
-import { renderCommentMarkdown, renderIndexPage } from './templates.js';
+import { annotationsPath, artifactPath, isSafeSlug, listArtifacts, readArtifact, safeArtifactPath } from './utils.js';
+import { renderCommentMarkdown, renderIndexPage, sseSnippet } from './templates.js';
+import { BAKED_RELOAD_SNIPPET } from './events.js';
 import { injectAnnotations } from './annotate.js';
 import { renderRevisionComparison } from './review.js';
 import {
@@ -28,15 +29,25 @@ interface ServerState {
 }
 
 let state: ServerState | null = null;
+let starting: { server: Server; promise: Promise<number> } | null = null;
 
 /** Delivers a composed feedback message to the live session. false/throw → 503. */
-export type FeedbackSender = (markdown: string) => boolean;
+export type FeedbackSender = (
+  markdown: string,
+  metadata: { slug: string; annotationIds: string[] },
+) => boolean | Promise<boolean>;
+
+// Absolute sidecar paths keep in-flight deliveries isolated across project changes.
+const delivering = new Set<string>();
 
 let feedbackSender: FeedbackSender | null = null;
 
 /** Register (or clear) the feedback sender. Called by the extension per session. */
-export function setFeedbackSender(fn: FeedbackSender | null): void {
+export function setFeedbackSender(fn: FeedbackSender | null): () => void {
   feedbackSender = fn;
+  return () => {
+    if (feedbackSender === fn) feedbackSender = null;
+  };
 }
 
 /** URL for a given slug (or index). Starts the server if needed. */
@@ -77,6 +88,7 @@ export function runningPort(): number | null {
 /** Start the server if not already running. Returns the port. */
 export async function ensureServer(): Promise<number> {
   if (state) return state.port;
+  if (starting) return starting.promise;
 
   const clients = new Set<ServerResponse>();
   const server = createServer((req, res) => {
@@ -87,7 +99,7 @@ export async function ensureServer(): Promise<number> {
     });
   });
 
-  const port = await new Promise<number>((resolve, reject) => {
+  const promise = new Promise<number>((resolve, reject) => {
     server.once('error', reject);
     server.listen(0, HOST, () => {
       server.removeListener('error', reject);
@@ -96,12 +108,27 @@ export async function ensureServer(): Promise<number> {
     });
   });
 
-  state = { port, server, clients };
-  return port;
+  const pending = { server, promise };
+  pending.promise = promise
+    .then((port) => {
+      if (starting !== pending) {
+        server.close();
+        throw new Error('Artifact server stopped during startup');
+      }
+      state = { port, server, clients };
+      return port;
+    })
+    .finally(() => {
+      if (starting === pending) starting = null;
+    });
+  starting = pending;
+  return pending.promise;
 }
 
 /** Stop the server (used on session shutdown). */
 export function stopServer(): void {
+  // The listen continuation closes a cancelled startup once its socket exists.
+  starting = null;
   if (!state) return;
   for (const res of state.clients) {
     try {
@@ -162,8 +189,14 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 
 /** PUT /api/annotations replaces drafts but cannot change or erase sent feedback. */
 async function handlePutAnnotations(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const cwd = process.cwd();
+  const sender = feedbackSender;
   const raw = await readBody(req, res);
   if (raw === null) return; // 413 already sent
+  if (cwd !== process.cwd() || sender !== feedbackSender) {
+    sendJson(res, 409, { error: 'Artifact session changed. Keep your unsaved drafts.' });
+    return;
+  }
   let body: { slug?: unknown; annotations?: unknown; revision?: unknown };
   try {
     body = JSON.parse(raw) ?? {};
@@ -188,6 +221,10 @@ async function handlePutAnnotations(req: IncomingMessage, res: ServerResponse): 
     sendJson(res, 400, { error: 'invalid annotations' });
     return;
   }
+  if (delivering.has(annotationsPath(body.slug))) {
+    sendJson(res, 409, { error: 'Feedback delivery in progress. Keep your unsaved drafts and retry.' });
+    return;
+  }
   const current = annotationState(body.slug);
   if (body.revision !== undefined && body.revision !== current.revision) {
     sendJson(res, 409, { error: 'Review changed in another tab. Copy your unsaved feedback before reloading.' });
@@ -207,8 +244,14 @@ async function handlePutAnnotations(req: IncomingMessage, res: ServerResponse): 
 
 /** POST /api/feedback delivers only drafts and retains a durable sent batch. */
 async function handlePostFeedback(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const sender = feedbackSender;
+  const cwd = process.cwd();
   const raw = await readBody(req, res);
   if (raw === null) return; // 413 already sent
+  if (sender !== feedbackSender || cwd !== process.cwd()) {
+    sendJson(res, 503, { delivered: false, error: 'Artifact session changed. Retry in the owning session.' });
+    return;
+  }
   let body: { slug?: unknown; revision?: unknown };
   try {
     body = JSON.parse(raw) ?? {};
@@ -221,6 +264,11 @@ async function handlePostFeedback(req: IncomingMessage, res: ServerResponse): Pr
     return;
   }
   const slug = body.slug;
+  const key = annotationsPath(slug);
+  if (delivering.has(key)) {
+    sendJson(res, 409, { error: 'Feedback delivery in progress. Retry after it completes.' });
+    return;
+  }
   const current = annotationState(slug);
   if (body.revision !== undefined && body.revision !== current.revision) {
     sendJson(res, 409, { error: 'Review changed. Copy unsaved feedback before reloading.' });
@@ -238,27 +286,41 @@ async function handlePostFeedback(req: IncomingMessage, res: ServerResponse): Pr
   const url = state ? `http://${HOST}:${state.port}/${slug}.html` : `/${slug}.html`;
   const feedback = composeFeedback(slug, url, anns, staleFlags, lines);
 
-  if (!feedbackSender) {
+  if (!sender) {
     sendJson(res, 503, { delivered: false, feedback });
     return;
   }
-  // Persist first so a successful delivery cannot be followed by a failed archive write.
-  const sentAt = new Date().toISOString();
-  writeAnnotations(
-    slug,
-    current.annotations.map((a) => (a.sentAt ? a : { ...a, sentAt })),
-  );
-  let delivered = false;
+  delivering.add(key);
   try {
-    delivered = feedbackSender(feedback) !== false;
-  } catch {
-    delivered = false;
-  }
-  if (delivered) {
-    sendJson(res, 200, { delivered: true, ...annotationState(slug) });
-  } else {
-    writeAnnotations(slug, current.annotations);
-    sendJson(res, 503, { delivered: false, feedback });
+    // Persist first so a successful delivery cannot be followed by a failed archive write.
+    const sentAt = new Date().toISOString();
+    writeAnnotations(
+      slug,
+      current.annotations.map((a) => (a.sentAt ? a : { ...a, sentAt })),
+      cwd,
+    );
+    let delivered = false;
+    try {
+      delivered = (await sender(feedback, { slug, annotationIds: anns.map((a) => a.id) })) === true;
+    } catch {
+      delivered = false;
+    }
+    if (delivered) {
+      sendJson(res, 200, { delivered: true, ...annotationState(slug, cwd) });
+    } else {
+      // Only roll back this batch; preserve replies to older questions and any
+      // unrelated records written by an extension while the receiver awaited.
+      const originals = new Map(anns.map((a) => [a.id, a]));
+      const latest = annotationState(slug, cwd).annotations;
+      writeAnnotations(
+        slug,
+        latest.map((a) => (a.sentAt === sentAt && originals.has(a.id) ? originals.get(a.id)! : a)),
+        cwd,
+      );
+      sendJson(res, 503, { delivered: false, feedback });
+    }
+  } finally {
+    delivering.delete(key);
   }
 }
 
@@ -374,6 +436,20 @@ async function handle(req: IncomingMessage, res: ServerResponse, clients: Set<Se
       Connection: 'keep-alive',
     });
     res.write(': connected\n\n');
+    // Pages drop their stream while hidden; replay what changed meanwhile.
+    const slug = parsedUrl.searchParams.get('slug');
+    const since = Number(parsedUrl.searchParams.get('since'));
+    if (slug && isSafeSlug(slug) && Number.isFinite(since) && since > 0) {
+      const changed = (path: string) => {
+        try {
+          return statSync(path).mtimeMs > since;
+        } catch {
+          return false;
+        }
+      };
+      if (changed(artifactPath(slug))) res.write(`event: reload\ndata: ${slug}\n\n`);
+      else if (changed(annotationsPath(slug))) res.write(`event: annotations\ndata: ${slug}\n\n`);
+    }
     clients.add(res);
     req.on('close', () => clients.delete(res));
     return;
@@ -411,7 +487,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, clients: Set<Se
   if (ext === '.html') {
     const slug = basename(safe).replace(/\.html$/, '');
     const review = annotationState(slug);
-    const injected = injectAnnotations(readFileSync(safe, 'utf-8'), slug, JSON.stringify(review.annotations), {
+    // Files written before the shared event stream still bake the old reload
+    // snippet; serve the current one so old tabs stop holding extra connections.
+    const html = readFileSync(safe, 'utf-8').replace(BAKED_RELOAD_SNIPPET, () => sseSnippet(slug).trim());
+    const injected = injectAnnotations(html, slug, JSON.stringify(review.annotations), {
       revision: review.revision,
     });
     res.writeHead(200, { 'Content-Type': mime });
