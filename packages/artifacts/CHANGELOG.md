@@ -1,5 +1,11 @@
 # @nicknisi/pi-artifacts
 
+## 1.5.2
+
+### Patch Changes
+
+- 7bc88c0: Ship `events.ts` in the published package. 1.5.0 and 1.5.1 omitted it from `files`, so pi failed to load the extension from npm with `Cannot find module './events.js'`.
+
 ## 1.5.1
 
 ### Patch Changes
