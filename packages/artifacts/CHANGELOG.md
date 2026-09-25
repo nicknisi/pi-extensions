@@ -1,5 +1,17 @@
 # @nicknisi/pi-artifacts
 
+## 1.5.2
+
+### Patch Changes
+
+- 7bc88c0: Ship `events.ts` in the published package. 1.5.0 and 1.5.1 omitted it from `files`, so pi failed to load the extension from npm with `Cannot find module './events.js'`.
+
+## 1.5.1
+
+### Patch Changes
+
+- 1da664c: Prompt guidance now tells the agent when to attach `decisions`: whenever an artifact presents options or trade-offs the user must choose between, instead of asking in the terminal. The tool snippet also mentions collecting choices.
+
 ## 1.5.0
 
 ### Minor Changes
