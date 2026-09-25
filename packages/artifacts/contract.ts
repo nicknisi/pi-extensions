@@ -11,6 +11,20 @@ export interface ArtifactFeedback {
   annotationIds: string[];
 }
 
+/**
+ * A page asking its owning session to do something, e.g. `{ action: 'approve' }`
+ * from a `[data-artifact-action="approve"]` button. It is a request, never
+ * permission: the subscriber decides what, if anything, happens, and any
+ * process that can reach the local server could send one.
+ */
+export interface ArtifactRequest {
+  slug: string;
+  action: string;
+}
+
+/** Action names a page may request: short, lowercase, kebab-case. */
+export const ARTIFACT_ACTION = /^[a-z][a-z0-9-]{0,31}$/;
+
 export interface ArtifactsAPI {
   publish(input: {
     title: string;
@@ -21,6 +35,10 @@ export interface ArtifactsAPI {
   subscribe(input: {
     slug: string;
     onFeedback: (feedback: ArtifactFeedback) => boolean | Promise<boolean>;
+    /** Page requests this subscriber accepts; buttons for other actions stay hidden. */
+    actions?: string[];
+    /** Resolve true once the request reached its owner. Required with `actions`. */
+    onRequest?: (request: ArtifactRequest) => boolean | Promise<boolean>;
   }): Promise<() => void>;
 }
 

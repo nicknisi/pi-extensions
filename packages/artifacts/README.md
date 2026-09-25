@@ -30,9 +30,10 @@ publish({ title: string, html: string, open?: boolean })
   // Promise<{ slug: string, url: string, absPath: string }>
 answer({ slug: string, annotationId: string, content: string })
   // Promise<{ ok: true }>
-subscribe({ slug: string, onFeedback })
+subscribe({ slug: string, onFeedback, actions?: string[], onRequest? })
   // Promise<() => void>
 // onFeedback({ slug, markdown, annotationIds: string[] }): boolean | Promise<boolean>
+// onRequest({ slug, action }): boolean | Promise<boolean>
 ```
 
 - `publish` uses the existing HTML renderer, previous-revision snapshot, storage, lazy server and live reload. Full documents or fragments are accepted, up to 2 MiB UTF-8; title must be nonempty (at most 4000 characters). Reuse the same title to update the same slug/URL; slugification is the same as the tool (80 characters, so callers should use unique run titles). Callers own update ordering/coalescing and should await sequential updates. Only `open: true` opens a browser tab. No model is involved.
@@ -40,6 +41,7 @@ subscribe({ slug: string, onFeedback })
 - `answer` uses the existing sent-question storage and annotation notification without rewriting HTML.
 - Each slug has one subscriber. Duplicate subscriptions reject rather than stealing ownership. Await subscription before requesting feedback. The unsubscribe function is idempotent and cannot remove a newer subscription.
 - Unowned feedback retains the ordinary `pi.sendUserMessage(..., { deliverAs: 'followUp' })` route. Owned feedback goes **only** to that owner. Its boolean completion is awaited; false, rejection or service disposal leaves the batch undelivered (HTTP 503), never falling back to another session. Concurrent sends and draft saves for that slug receive 409 until delivery settles; browser drafts must be retained and retried. Other slugs remain usable. Consumers should durably deduplicate `annotationIds` before acknowledging: this is not crash-proof exactly-once delivery.
+- **Page requests.** A page can ask its owner to act: include `<button type="button" data-artifact-action="approve" hidden>…</button>` (and optionally `<span data-artifact-action-status="approve"></span>` for the outcome, and `data-artifact-sent="…"` for the success text). When served live, the button is revealed only while the slug's subscriber lists that action in `actions`; a click POSTs a same-origin JSON request (host-checked) that is handed to `onRequest`. With no listening owner, in a baked share, or opened as a file, the button stays hidden and inert. One request per slug and action is in flight at a time; false, rejection or disposal answers 503. Action names are lowercase kebab-case, at most 32 characters. A request is **not permission**: anything that can reach the local server could send one, so owners must confirm in their own trusted UI before acting.
 - Shutdown removes discovery/subscriptions and guards all retained method references. Rediscover and resubscribe in the new session; do not reuse old session callbacks. Runtime sockets remain lazy and session-scoped. A callback already executing cannot be cancelled by this protocol; consumers must guard their own session lifetime too.
 
 This is a compatibility convention, **not authentication or a security boundary**. Providers, consumers, callbacks and supplied HTML are trusted local extension code. Comments/decision selections are review feedback, not approval or authorization.
