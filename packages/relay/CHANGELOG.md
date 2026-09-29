@@ -1,5 +1,11 @@
 # @nicknisi/pi-relay
 
+## 0.3.5
+
+### Patch Changes
+
+- 561fad7: Declare `typebox` as a `"*"` peer dependency instead of a direct dependency so pi's host-provided copy is used (fixes the extension loader warning about duplicate runtime modules).
+
 ## 0.3.4
 
 ### Patch Changes

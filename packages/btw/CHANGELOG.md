@@ -1,5 +1,12 @@
 # @nicknisi/pi-btw
 
+## 0.2.4
+
+### Patch Changes
+
+- Updated dependencies [561fad7]
+  - @nicknisi/pi-shared@0.5.2
+
 ## 0.2.3
 
 ### Patch Changes

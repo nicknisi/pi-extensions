@@ -1,5 +1,11 @@
 # @nicknisi/pi-artifacts
 
+## 1.5.3
+
+### Patch Changes
+
+- 561fad7: Declare `typebox` as a `"*"` peer dependency instead of a direct dependency so pi's host-provided copy is used (fixes the extension loader warning about duplicate runtime modules).
+
 ## 1.5.2
 
 ### Patch Changes

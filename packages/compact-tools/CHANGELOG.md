@@ -1,5 +1,12 @@
 # @nicknisi/pi-compact-tools
 
+## 0.1.1
+
+### Patch Changes
+
+- Updated dependencies [561fad7]
+  - @nicknisi/pi-shared@0.5.2
+
 ## 0.1.0
 
 ### Minor Changes

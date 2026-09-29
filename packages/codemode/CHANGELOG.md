@@ -1,5 +1,13 @@
 # @nicknisi/pi-codemode
 
+## 0.4.2
+
+### Patch Changes
+
+- 561fad7: Declare `typebox` as a `"*"` peer dependency instead of a direct dependency so pi's host-provided copy is used (fixes the extension loader warning about duplicate runtime modules).
+- Updated dependencies [561fad7]
+  - @nicknisi/pi-shared@0.5.2
+
 ## 0.4.1
 
 ### Patch Changes
