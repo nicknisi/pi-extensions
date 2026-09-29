@@ -30,12 +30,10 @@
       "default": "./dist/index.js"
     }
   },
-  "dependencies": {
-    "typebox": "^1.1.0"
-  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   }
 }

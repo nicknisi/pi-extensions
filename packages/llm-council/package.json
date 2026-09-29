@@ -34,12 +34,12 @@
     }
   },
   "dependencies": {
-    "@nicknisi/pi-shared": "workspace:*",
-    "typebox": "^1.1.0"
+    "@nicknisi/pi-shared": "workspace:*"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   },
   "pi": {
     "extensions": [

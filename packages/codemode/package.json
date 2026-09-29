@@ -28,12 +28,12 @@
   "dependencies": {
     "@nicknisi/pi-shared": "workspace:*",
     "bundle-require": "^5.1.0",
-    "esbuild": "^0.25.0",
-    "typebox": "^1.1.0"
+    "esbuild": "^0.25.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   },
   "pi": {
     "extensions": [
