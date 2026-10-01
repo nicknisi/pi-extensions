@@ -25,7 +25,7 @@ const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
 const DIRECTORY = fs.constants.O_DIRECTORY ?? 0;
 const CLOEXEC = process.platform === 'darwin' ? 0x01000000 : 0x00080000;
 const READ_DIRECTORY_FLAGS = fs.constants.O_RDONLY | NOFOLLOW | DIRECTORY | CLOEXEC;
-const AT_REMOVEDIR = 0x80;
+const AT_REMOVEDIR = process.platform === 'darwin' ? 0x80 : 0x200;
 
 function loadLibc(): ReturnType<typeof koffi.load> {
   const candidates =

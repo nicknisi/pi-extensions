@@ -9,14 +9,14 @@
  *   failed delivery leaves the letter recoverable (recoverInboxClaims) or
  *   requeueable.
  * - A corrupt letter is discarded on read, so it cannot poison every drain.
- * - Consumption is the receipt: the sender learns "delivered" only when the
- *   letter actually disappeared from the target's inbox and durable claims.
+ * - Durable acknowledgement is the receipt: disappearance without exact
+ *   proof is uncertain, never evidence of delivery.
  * - Every deposit and every delivery appends one append-only audit line —
  *   drain-as-receipt must not destroy evidence. The log never holds a full
  *   body, only a short preview.
  */
 
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import * as path from 'node:path';
 import {
   assertPathSegment,
@@ -369,6 +369,45 @@ export function readClaimedLetter(root: string, addr: string, claimToken: string
   }
 }
 
+interface DeliveryAcknowledgement {
+  fileName: string;
+  digest: string;
+  acknowledgedAt: number;
+}
+
+function letterDigest(letter: Letter): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        letter.id,
+        letter.ts,
+        letter.kind,
+        letter.body,
+        letter.replyTo ?? null,
+        letter.from.addr,
+        letter.from.name,
+        letter.from.cwd,
+      ]),
+    )
+    .digest('hex');
+}
+
+function readAcknowledgement(raw: string | null, fileName: string): DeliveryAcknowledgement | null {
+  try {
+    const proof = raw === null ? null : (JSON.parse(raw) as DeliveryAcknowledgement);
+    return proof &&
+      proof.fileName === fileName &&
+      typeof proof.digest === 'string' &&
+      /^[a-f0-9]{64}$/.test(proof.digest) &&
+      Number.isSafeInteger(proof.acknowledgedAt) &&
+      proof.acknowledgedAt >= 0
+      ? proof
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function finishClaimedLetter(
   root: string,
   addr: string,
@@ -398,6 +437,42 @@ function finishClaimedLetter(
             inbox.close();
           }
         } else {
+          // Persist proof before deleting the exact letter. Corrupt payloads are discarded without proof.
+          const raw = claim.readFile(fileToken);
+          if (raw !== null) {
+            let parsed: Letter | undefined;
+            try {
+              parsed = JSON.parse(raw) as Letter;
+            } catch {
+              /* corrupt letter */
+            }
+            if (
+              parsed &&
+              typeof parsed.id === 'string' &&
+              MESSAGE_ID_PATTERN.test(parsed.id) &&
+              typeof parsed.body === 'string' &&
+              ['message', 'ask', 'reply', 'cancel'].includes(parsed.kind) &&
+              parsed.from &&
+              typeof parsed.from.addr === 'string' &&
+              typeof parsed.from.name === 'string' &&
+              typeof parsed.from.cwd === 'string' &&
+              Number.isSafeInteger(parsed.ts) &&
+              parsed.ts >= 0 &&
+              letterFileName(parsed) === fileToken
+            ) {
+              const acks = relay.openDirectory(`${addr}.acks`, true)!;
+              try {
+                const proof: DeliveryAcknowledgement = {
+                  fileName: fileToken,
+                  digest: letterDigest(parsed),
+                  acknowledgedAt: Date.now(),
+                };
+                acks.writeFileAtomic(fileToken, JSON.stringify(proof));
+              } finally {
+                acks.close();
+              }
+            }
+          }
           finished = claim.unlinkFile(fileToken);
           if (finished) claim.sync();
         }
@@ -422,6 +497,42 @@ export function ackClaimedLetter(root: string, addr: string, claimToken: string,
 /** Atomically return one claimed letter to the current inbox. */
 export function requeueClaimedLetter(root: string, addr: string, claimToken: string, fileToken: string): boolean {
   return finishClaimedLetter(root, addr, claimToken, fileToken, true);
+}
+
+/** Retain exact acknowledgement proof for the mail retention window, including live sessions. */
+export function sweepAcknowledgements(root: string, addr: string, now: number, retentionMs: number): number {
+  assertPathSegment(addr, 'relay address');
+  const relay = openRelayRoot(root);
+  if (relay === null) return 0;
+  try {
+    const acks = relay.openDirectory(`${addr}.acks`);
+    if (acks === null) return 0;
+    let retained = 0;
+    try {
+      for (const entry of acks.readDirectory()) {
+        if (entry.isSymbolicLink())
+          throw new RelayFilesystemError(`Refusing symlinked relay acknowledgement: ${entry.name}`);
+        if (!entry.isFile()) {
+          retained++;
+          continue;
+        }
+        const parts = inboxFileTokenParts(entry.name);
+        const proof = readAcknowledgement(acks.readFile(entry.name), entry.name);
+        if (parts === null || proof === null || now - proof.acknowledgedAt < retentionMs) {
+          retained++;
+          continue;
+        }
+        acks.unlinkFile(entry.name);
+      }
+      acks.sync();
+    } finally {
+      acks.close();
+    }
+    relay.removeEmptyDirectory(`${addr}.acks`);
+    return retained;
+  } finally {
+    relay.close();
+  }
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -465,27 +576,41 @@ function receiptFileExists(relay: RelayDirectoryHandle, addr: string, fileName: 
 }
 
 /**
- * Consumption receipt: after depositing to a LIVE target, wait briefly for
- * the exact letter to vanish from both the live inbox and durable claims.
- * 'delivered' means the receiver acknowledged it, not merely claimed it.
+ * After depositing, wait briefly for an exact durable acknowledgement.
+ * A letter in an inbox or claim is queued. Absence without proof is uncertain,
+ * including legacy roots whose acknowledgements were never persisted.
  */
+export type SendReceipt = 'delivered' | 'queued' | 'uncertain';
+
 export async function awaitReceipt(
   root: string,
   toAddr: string,
   letter: Letter,
   timeoutMs = 1500,
-): Promise<'delivered' | 'queued'> {
+): Promise<SendReceipt> {
   assertPathSegment(toAddr, 'relay address');
   const relay = openRelayRoot(root);
-  if (relay === null) return 'delivered';
+  if (relay === null) return 'uncertain';
   try {
     const fileName = letterFileName(letter);
+    const observe = (): SendReceipt => {
+      const acks = relay.openDirectory(`${toAddr}.acks`);
+      if (acks !== null) {
+        try {
+          const proof = readAcknowledgement(acks.readFile(fileName), fileName);
+          if (proof?.digest === letterDigest(letter)) return 'delivered';
+        } finally {
+          acks.close();
+        }
+      }
+      return receiptFileExists(relay, toAddr, fileName) ? 'queued' : 'uncertain';
+    };
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      if (!receiptFileExists(relay, toAddr, fileName)) return 'delivered';
+      if (observe() === 'delivered') return 'delivered';
       await sleep(100);
     }
-    return receiptFileExists(relay, toAddr, fileName) ? 'queued' : 'delivered';
+    return observe();
   } finally {
     relay.close();
   }

@@ -22,7 +22,9 @@
     "registry.ts",
     "mailbox.ts",
     "policy.ts",
-    "format.ts"
+    "format.ts",
+    "discovery.ts",
+    "routing.ts"
   ],
   "type": "module",
   "exports": {

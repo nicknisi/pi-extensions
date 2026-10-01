@@ -367,8 +367,29 @@ it('builds, packs, installs, and imports the real core package without Pi or TUI
   const appDir = path.join(base, 'app');
   fs.mkdirSync(appDir);
 
-  execFileSync('pnpm', ['--filter', packageJson.name, 'build'], { cwd: repoRoot, stdio: 'pipe' });
-  execFileSync('pnpm', ['pack', '--out', tarball], { cwd: relayDir, stdio: 'pipe' });
+  // The repository build script rebuilds every package, even with --filter.
+  // Keep that mutation away from concurrent tests and their mocked workspace imports.
+  const sourceRoot = path.join(base, 'source');
+  const sourceRelay = path.join(sourceRoot, 'packages', 'relay');
+  fs.mkdirSync(path.join(sourceRoot, 'scripts'), { recursive: true });
+  fs.mkdirSync(sourceRelay, { recursive: true });
+  fs.writeFileSync(path.join(sourceRoot, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
+  fs.copyFileSync(path.join(repoRoot, 'tsconfig.json'), path.join(sourceRoot, 'tsconfig.json'));
+  fs.copyFileSync(path.join(repoRoot, 'scripts', 'build.ts'), path.join(sourceRoot, 'scripts', 'build.ts'));
+  for (const entry of fs.readdirSync(relayDir, { withFileTypes: true })) {
+    if (
+      entry.isFile() &&
+      (entry.name.endsWith('.ts') || ['package.json', 'README.md', 'LICENSE'].includes(entry.name))
+    ) {
+      fs.copyFileSync(path.join(relayDir, entry.name), path.join(sourceRelay, entry.name));
+    }
+  }
+  fs.symlinkSync(path.join(repoRoot, 'node_modules'), path.join(sourceRoot, 'node_modules'), 'dir');
+  if (fs.existsSync(path.join(relayDir, 'node_modules'))) {
+    fs.symlinkSync(path.join(relayDir, 'node_modules'), path.join(sourceRelay, 'node_modules'), 'dir');
+  }
+  execFileSync(process.execPath, [path.join(sourceRoot, 'scripts', 'build.ts')], { cwd: sourceRoot, stdio: 'pipe' });
+  execFileSync('pnpm', ['pack', '--out', tarball], { cwd: sourceRelay, stdio: 'pipe' });
   fs.writeFileSync(
     path.join(appDir, 'package.json'),
     JSON.stringify({
@@ -387,6 +408,8 @@ it('builds, packs, installs, and imports the real core package without Pi or TUI
     expect(fs.existsSync(path.join(installedDir, target))).toBe(true);
   }
   expect(fs.existsSync(path.join(installedDir, 'filesystem.ts'))).toBe(true);
+  expect(fs.existsSync(path.join(installedDir, 'discovery.ts'))).toBe(true);
+  expect(fs.existsSync(path.join(installedDir, 'routing.ts'))).toBe(true);
   expect(packageJson.peerDependenciesMeta['@earendil-works/pi-coding-agent']?.optional).toBe(true);
   expect(packageJson.peerDependenciesMeta['@earendil-works/pi-tui']?.optional).toBe(true);
   expect(fs.existsSync(path.join(appDir, 'node_modules', '@earendil-works', 'pi-coding-agent'))).toBe(false);

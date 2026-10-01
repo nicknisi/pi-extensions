@@ -51,14 +51,6 @@ export function formatPendingAsk(letter: Letter, now: number = Date.now()): stri
   return `• ${letter.id.slice(0, 8)} from "${letter.from.name}" (${age(letter.ts, now)}): ${letter.body.replace(/\s+/g, ' ').slice(0, 80)}`;
 }
 
-export function refusalUnknown(to: string, reachable: string[]): string {
-  return `No session matches '${to}'. Reachable: ${reachable.length > 0 ? reachable.join(', ') : '(none)'}.`;
-}
-
-export function refusalAmbiguous(to: string, candidates: string[]): string {
-  return `'${to}' is ambiguous; matches: ${candidates.join(', ')}. Use a full name or address prefix.`;
-}
-
 /** Render recent audit entries for `/relay log`. */
 export function formatAudit(records: AuditRecord[], now: number = Date.now()): string {
   if (records.length === 0) return 'No audit entries yet.';

@@ -22,6 +22,7 @@ import {
   type InboxClaim,
   type Letter,
   type OutAsk,
+  type SendReceipt,
 } from './mailbox.js';
 import {
   claimAlias as claimAliasInternal,
@@ -46,6 +47,7 @@ export {
   type Letter,
   type LetterKind,
   type OutAsk,
+  type SendReceipt,
 } from './mailbox.js';
 export {
   BACKLOG_CAP,
@@ -258,7 +260,7 @@ export async function awaitReceipt(
   toAddr: string,
   letter: Letter,
   timeoutMs = 1500,
-): Promise<'delivered' | 'queued'> {
+): Promise<SendReceipt> {
   assertAddress(toAddr);
   assertLetter(letter);
   return awaitReceiptInternal(root, toAddr, letter, timeoutMs);

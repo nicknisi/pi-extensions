@@ -18,6 +18,7 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { sweepAcknowledgements } from './mailbox.js';
 import {
   assertPathSegment,
   openRelayRoot,
@@ -399,12 +400,16 @@ function removeClaims(directory: RelayDirectoryHandle, addr: string): void {
  */
 export function sweep(root: string, now: number = Date.now(), sessionExists?: (sessionId: string) => boolean): void {
   for (const record of listRecords(root)) {
+    const retainedAcknowledgements = sweepAcknowledgements(root, record.addr, now, SWEEP_MAIL_KEEP_MS);
     if (presenceOf(record, now) !== 'offline') continue;
     const hasMail =
       dirHasJson(root, `${record.addr}.inbox`) ||
       dirHasJson(root, `${record.addr}.asks`) ||
       claimsHaveJson(root, record.addr);
     const expired = now - record.lastSeenAt >= SWEEP_MAIL_KEEP_MS;
+    // Recent proof keeps a resumable record around, but never past expiry —
+    // otherwise one unreadable ack would pin a dead session (and its alias) forever.
+    if (retainedAcknowledgements > 0 && !expired) continue;
     if (hasMail && !expired) continue;
     if (!expired && (sessionExists?.(record.sessionId) ?? true)) continue;
     const relay = openRelayRoot(root);
@@ -412,6 +417,7 @@ export function sweep(root: string, now: number = Date.now(), sessionExists?: (s
       try {
         relay.removeDirectory(`${record.addr}.inbox`);
         relay.removeDirectory(`${record.addr}.asks`);
+        relay.removeDirectory(`${record.addr}.acks`);
         removeClaims(relay, record.addr);
         try {
           relay.unlinkFile(`${record.addr}.json`);
