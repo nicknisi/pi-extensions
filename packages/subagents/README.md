@@ -4,7 +4,7 @@ First-party subagent dispatch and fleet for pi — fan out parallel child agents
 
 ## What it adds
 
-- **`dispatch` tool** (model-facing) — fan out up to 8 child agents in parallel. Each task gets its own prompt, optional label/model/system-prompt, and a tool allowlist (default read-only: `read`, `grep`, `find`, `ls`). Running rows show cumulative token usage after each completed model response. Typed per-task results aggregate into one tool result. `background: true` runs detached and surfaces completion via a transcript message. Tasks whose allowlist includes `edit`, `write`, or `bash` mutate the shared working tree: they must declare `allowTreeMutation: true` (otherwise that task is refused) and always run **sequentially**, one at a time, after the parallel read-only batch completes — never concurrently with each other or the read-only batch.
+- **`dispatch` tool** (model-facing) — fan out up to 8 child agents in parallel. Each task gets its own prompt, optional label/model/system-prompt, and a tool allowlist (default read-only: `read`, `grep`, `find`, `ls`). Running rows show cumulative token usage after each completed model response. Typed per-task results aggregate into one tool result. `background: true` runs detached and surfaces completion via a transcript message. Tasks whose allowlist includes `edit`, `write`, or `bash` mutate the shared working tree: they must declare `allowTreeMutation: true` (otherwise that task is refused) and always run **sequentially**, one at a time, after the parallel read-only batch completes — never concurrently with each other or the read-only batch. A task may set `cwd` — relative to the session cwd and jailed inside it — to run a child (and its worktree) inside a subdirectory such as a repository checkout.
 - **`fleet` tool** (model-facing) — `list` shows queued/running runs owned by the current Pi session. Pass `scope: "all"` for persisted machine-wide history, or fetch a `result` directly by runId. This is how the model checks on background dispatches without mixing in unrelated sessions.
 - **`/fleet` command** — user-facing active-run table. `/fleet all` opens persisted machine-wide history; `/fleet <runId-prefix>` jumps to a historical result.
 - **Fleet radar overlay + statusline** — `Alt+Ctrl+F` (rebind via `~/.pi/agent/keybindings.json`) opens a tmux-choose-tree-style overlay listing active runs owned by the current Pi session as per-child lanes: status, model, current tool, token burn, last activity. `Enter` inspects the live run transcript; `c` cancels the focused run (wired into the cascading-cancellation registry); `Esc` closes. The ambient footer segment (`ctx.ui.setStatus`) exists only while this session owns queued/running subagents; runs from other sessions never make it appear.
@@ -55,7 +55,23 @@ Live progress shows in a widget above the editor; when the child settles, the re
 
 ### Worktree isolation
 
-Builder tasks should prefer `worktree: true` over `allowTreeMutation: true`:
+Builder tasks should prefer `worktree: true` over `allowTreeMutation: true`. The worktree is created from the git repository that contains the child's cwd — the session cwd by default. When the session cwd is not itself a repository (a workspace root holding several checkouts under `repos/`, say), set `cwd` on the task or its profile so the child runs inside the checkout:
+
+```json
+{
+  "tasks": [
+    {
+      "task": "Implement the parser in packages/foo",
+      "profile": "builder",
+      "cwd": "repos/acme__widgets"
+    }
+  ]
+}
+```
+
+`cwd` is relative to the session cwd, must exist, and must stay inside it (checked on real paths, so a symlink cannot escape). A task with a bad `cwd` is refused, like a task naming an unknown profile; the rest of the dispatch proceeds.
+
+A plain worktree task:
 
 ```json
 {
@@ -120,7 +136,7 @@ Compat caveats:
 - The mirror reflects the child's messages as pi sees them (user prompt → assistant turns → tool results). It does **not** carry the subagent-specific metadata (runId, namespace, transcript summary, worktree/patch paths) — that lives only on the bespoke `.json` artifact, which is why both are kept.
 - Worktree-isolated runs mirror with the **worktree's** cwd (where the child actually ran), not the caller's cwd. The session header's `cwd` is honest about where the work happened.
 
-Children are **hermetic by construction**: no user extensions, skills, prompt templates, themes, or `AGENTS.md` context load unless explicitly requested. Tool scoping is likewise by construction — a child receives exactly its allowlist, and no spawn capability exists as a tool, so children cannot recurse. The ecosystem recursion guard (`PI_SUBAGENT_DEPTH` / `PI_SUBAGENT_CHILD`) is honored: inside a pi-subagents child, spawns are refused.
+Children are **hermetic by construction**: no user extensions, skills, prompt templates, themes, or `AGENTS.md` context load unless explicitly requested — the one host-level exception is `childExtensionPaths` (see **Configuration**), which names extension files every child loads and is never model input. Tool scoping is likewise by construction — a child receives exactly its allowlist, and no spawn capability exists as a tool, so children cannot recurse. The ecosystem recursion guard (`PI_SUBAGENT_DEPTH` / `PI_SUBAGENT_CHILD`) is honored: inside a pi-subagents child, spawns are refused.
 
 `spawn()` never rejects; results are a discriminated union (`ok | crashed | empty | schema_invalid | aborted`). See `packages/shared/README.md` for the full runtime API.
 
@@ -148,6 +164,7 @@ Review the change against the task. Prefer the smallest correct fix.
 | `tools`       | Tool allowlist. Omitted = dispatch's read-only default.                                                                                                                                                                                                      |
 | `model`       | Optional model spec.                                                                                                                                                                                                                                         |
 | `worktree`    | Default the task to worktree isolation — set this on builder personas so their `edit`/`write`/`bash` tools stay parallel and need no `allowTreeMutation`.                                                                                                    |
+| `cwd`         | Default working directory for the task, relative to the session cwd and jailed inside it (e.g. `repos/acme__widgets`). An explicit task `cwd` wins. Worktree tasks branch from the repository containing it.                                                 |
 | `replace`     | Replace pi's system prompt with the persona prompt instead of appending.                                                                                                                                                                                     |
 
 Lists accept comma-separated scalars or `- item` block lists. Unknown keys are ignored, so agent files shared with other harnesses load. The parser is deliberately small — flat `key: value` frontmatter, not full YAML.
@@ -175,10 +192,24 @@ None required. Embedders can pass options through the factory:
 ```ts
 import subagents from '@nicknisi/pi-subagents';
 
-export default (pi: ExtensionAPI) => subagents(pi, { profileDirs: ['/path/to/bundled/profiles'] });
+export default (pi: ExtensionAPI) =>
+  subagents(pi, {
+    profileDirs: ['/path/to/bundled/profiles'],
+    childExtensionPaths: ['/app/inference-broker.ts'],
+  });
 ```
 
 `profileDirs` appends lowest-precedence profile directories — the hook for a distribution (e.g. arc) to ship default personas that user and project files can shadow.
+
+`childExtensionPaths` names extension files **every child loads**. Children get a fresh model runtime and load no user extensions, so a host whose model routing lives in an extension — a provider registered with `pi.registerProvider` that streams through a broker, for example — has no working model in a child unless that extension loads there too. The same goes for any per-turn context an extension injects. Entries are absolute or relative to the agent dir; missing files are skipped with a warning at load (and a notification on `session_start` when there is a UI). Children stay hermetic otherwise.
+
+Hosts that install this package with `pi install` rather than wrapping the factory set the same list in **`<agentDir>/subagents.json`**:
+
+```json
+{ "childExtensionPaths": ["/app/inference-broker.ts", "/app/repo-context.ts"] }
+```
+
+Factory-option entries come first, then the file's, deduplicated. The file is read once at load; restart pi after editing it. It is host configuration, never model input — the `dispatch` schema has no way to name extensions.
 
 ## Caveats
 
