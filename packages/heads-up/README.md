@@ -70,7 +70,7 @@ A note appears above the editor as a bordered card in the tag's color: amber `�
 
 ```
 ╭─ ⚑ Heads up ─────────────────────────────────────────────── alt+h to open ─╮
-│ The agent skipped the migration test because it needs a live database.    │
+│ The agent skipped the migration test because it needs a live database.     │
 ╰─ learn more · make a page · knew this · dismiss ───────────────────────────╯
 ```
 
@@ -78,9 +78,9 @@ Press `alt+h` (or run `/heads-up show`) to open the panel. It takes the editor's
 
 ```
 ╭─ ⚑ Heads up ──────────────────────────────────────────────────── just now ─╮
-│ The agent skipped the migration test because it needs a live database.    │
+│ The agent skipped the migration test because it needs a live database.     │
 ├────────────────────────────────────────────────────────────────────────────┤
-│  1  learn more    2  make a page    3  knew this    0  dismiss    esc  back │
+│  1  learn more    2  make a page    3  knew this    0  dismiss    esc  back│
 ╰────────────────────────────────────────────────────────────────────────────╯
 ```
 
