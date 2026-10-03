@@ -134,6 +134,8 @@ importers:
         specifier: workspace:*
         version: link:../shared
 
+  packages/heads-up: {}
+
   packages/llm-council:
     dependencies:
       '@nicknisi/pi-shared':
