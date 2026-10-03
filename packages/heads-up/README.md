@@ -66,19 +66,28 @@ The parser tolerates bold labels, bullets, quotes, smart quotes, and a `#` headi
 
 ## Usage
 
-A note appears above the editor:
+A note appears above the editor as a bordered card in the tag's color: amber `⚑ Heads up` for this session's work, accent `✦ You should know` for background knowledge.
 
 ```
-Heads up · The agent skipped the migration test because it needs a live database.
-alt+h learn more · make a page · knew this · dismiss
+╭─ ⚑ Heads up ─────────────────────────────────────────────── alt+h to open ─╮
+│ The agent skipped the migration test because it needs a live database.    │
+╰─ learn more · make a page · knew this · dismiss ───────────────────────────╯
 ```
 
-Press `alt+h` (or run `/heads-up show`) to open the panel:
+Press `alt+h` (or run `/heads-up show`) to open the panel. It takes the editor's place in the same frame, with the note's age in the top border and key chips below the text:
+
+```
+╭─ ⚑ Heads up ──────────────────────────────────────────────────── just now ─╮
+│ The agent skipped the migration test because it needs a live database.    │
+├────────────────────────────────────────────────────────────────────────────┤
+│  1  learn more    2  make a page    3  knew this    0  dismiss    esc  back │
+╰────────────────────────────────────────────────────────────────────────────╯
+```
 
 | Key   | Collapsed view                                                | Expanded view                                             |
 | ----- | ------------------------------------------------------------- | --------------------------------------------------------- |
 | `1`   | Learn more: expand to the title and explainer                 |                                                           |
-| `2`   | Make a page: ask the main agent to write an artifact about it |                                                           |
+| `2`   | Make a page: ask the main agent to write an artifact about it | same                                                      |
 | `s`   |                                                               | Simpler: rewrite in plain words (≤100 words)              |
 | `l`   |                                                               | Shorter: the single key point (≤45 words)                 |
 | `m`   |                                                               | More detail: real keys, files, edge case (≤160 words)     |

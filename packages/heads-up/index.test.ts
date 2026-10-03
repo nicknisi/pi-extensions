@@ -17,7 +17,7 @@ The agent wrote the migration but did not run it.`;
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
 type Factory = (tui: unknown, theme: unknown, kb?: unknown, done?: (v: unknown) => void) => Component;
 
-const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
+const theme = { fg: (_c: string, s: string) => s, bg: (_c: string, s: string) => s, bold: (s: string) => s };
 
 function harness(reply = NOTE) {
   const handlers = new Map<string, Handler>();

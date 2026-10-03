@@ -16,7 +16,15 @@ import {
   type ExtensionContext,
   type Theme,
 } from '@earendil-works/pi-coding-agent';
-import { type Component, Key, Markdown, matchesKey, type TUI, wrapTextWithAnsi } from '@earendil-works/pi-tui';
+import {
+  type Component,
+  Key,
+  Markdown,
+  matchesKey,
+  type TUI,
+  visibleWidth,
+  wrapTextWithAnsi,
+} from '@earendil-works/pi-tui';
 import {
   type Kind,
   loadConfig,
@@ -29,7 +37,8 @@ import {
   readStore,
   updateStore,
 } from './config.js';
-import { type Note, parse } from './parse.js';
+import { card, innerWidth } from './card.js';
+import { type Note, parse, type Tag } from './parse.js';
 import {
   chatPrompt,
   checkPrompt,
@@ -48,11 +57,49 @@ export type View = 'collapsed' | 'expanded' | 'working';
 
 type PanelAction = 'close' | 'page' | 'chat' | 'known' | 'dismissed';
 
-/** Hotkey hint: accent key, muted label. */
-const hint = (theme: Theme, pairs: [string, string][]): string =>
-  pairs.map(([key, label]) => `${theme.fg('accent', key)} ${theme.fg('muted', label)}`).join(theme.fg('dim', ' · '));
+/** The note on screen, its panel view, the latest rewrite, and when it arrived. */
+type Shown = { note: Note; view: View; rewrite: string | null; at: number };
 
-const heading = (theme: Theme, note: Note): string => theme.fg('accent', theme.bold(note.tag));
+/** Each tag gets its own color and glyph: amber flag for this session's work, accent star for background knowledge. */
+const TAG_STYLE: Record<Tag, { color: 'warning' | 'accent'; glyph: string }> = {
+  'Heads up': { color: 'warning', glyph: '⚑' },
+  'You should know': { color: 'accent', glyph: '✦' },
+};
+
+const tagTitle = (theme: Theme, tag: Tag): string => {
+  const { color, glyph } = TAG_STYLE[tag];
+  return theme.fg(color, theme.bold(`${glyph} ${tag}`));
+};
+
+const painter =
+  (theme: Theme, tag: Tag) =>
+  (s: string): string =>
+    theme.fg(TAG_STYLE[tag].color, s);
+
+const age = (at: number): string => {
+  const minutes = Math.floor((Date.now() - at) / 60_000);
+  if (minutes < 1) return 'just now';
+  return minutes < 60 ? `${minutes}m ago` : `${Math.floor(minutes / 60)}h ago`;
+};
+
+/**
+ * Key chips: the key on a highlighted cell in the tag color, then a muted
+ * label. Packed greedily into rows so a chip never splits from its label.
+ */
+const chips = (theme: Theme, tag: Tag, pairs: [string, string][], width: number): string[] => {
+  const rows: string[] = [];
+  let row = '';
+  for (const [key, label] of pairs) {
+    const chip = `${theme.bg('selectedBg', theme.fg(TAG_STYLE[tag].color, theme.bold(` ${key} `)))} ${theme.fg('muted', label)}`;
+    const joined = row ? `${row}   ${chip}` : chip;
+    if (row && visibleWidth(joined) > width) {
+      rows.push(row);
+      row = chip;
+    } else row = joined;
+  }
+  if (row) rows.push(row);
+  return rows;
+};
 
 /** Collapsed band above the editor. Not focusable: the shortcut opens the panel. */
 class Band implements Component {
@@ -66,13 +113,12 @@ class Band implements Component {
 
   render(width: number): string[] {
     const { theme, note } = this;
-    return [
-      ...wrapTextWithAnsi(`${heading(theme, note)}${theme.fg('dim', ' · ')}${note.learn}`, width),
-      ...wrapTextWithAnsi(
-        `${theme.fg('accent', this.shortcut)} ${theme.fg('dim', 'learn more · make a page · knew this · dismiss')}`,
-        width,
-      ),
-    ];
+    return card(width, painter(theme, note.tag), {
+      title: tagTitle(theme, note.tag),
+      right: theme.fg('accent', `${this.shortcut} to open`),
+      sections: [wrapTextWithAnsi(note.learn, innerWidth(width))],
+      bottom: theme.fg('dim', 'learn more · make a page · knew this · dismiss'),
+    });
   }
 }
 
@@ -84,7 +130,7 @@ export class Panel implements Component {
   constructor(
     private readonly tui: Pick<TUI, 'requestRender'>,
     private readonly theme: Theme,
-    private readonly state: { note: Note; view: View; rewrite: string | null },
+    private readonly state: Shown,
     private readonly rewrite: (variant: Variant, signal: AbortSignal) => Promise<string | null>,
     private readonly onExplain: () => void,
     private readonly done: (action: PanelAction) => void,
@@ -132,6 +178,7 @@ export class Panel implements Component {
       this.finish('close');
       return;
     }
+    if (data === '2') return this.finish('page');
     if (data === '3') return this.finish('known');
     if (data === '0') return this.finish('dismissed');
     if (view === 'collapsed') {
@@ -139,7 +186,7 @@ export class Panel implements Component {
         this.state.view = 'expanded';
         this.onExplain();
         this.tui.requestRender();
-      } else if (data === '2') this.finish('page');
+      }
       return;
     }
     if (view === 'working') return;
@@ -152,44 +199,40 @@ export class Panel implements Component {
   render(width: number): string[] {
     const { theme, state } = this;
     const { note, view } = state;
-    const rule = theme.fg('borderAccent', '─'.repeat(Math.max(1, width)));
+    const inner = innerWidth(width);
     const back: [string, string] = ['esc', view === 'working' ? 'cancel' : 'back'];
+    const frame = (sections: string[][]) =>
+      card(width, painter(theme, note.tag), {
+        title: tagTitle(theme, note.tag),
+        right: theme.fg('dim', age(state.at)),
+        sections,
+      });
+    const keys = (pairs: [string, string][]) => chips(theme, note.tag, pairs, inner);
 
     if (view === 'collapsed') {
-      return [
-        rule,
-        ...wrapTextWithAnsi(`${heading(theme, note)}${theme.fg('dim', ' · ')}${note.learn}`, width),
-        ...wrapTextWithAnsi(
-          hint(theme, [['1', 'Learn more'], ['2', 'Make a page'], ['3', 'Knew this'], ['0', 'Dismiss'], back]),
-          width,
-        ),
-        rule,
-      ];
+      return frame([
+        wrapTextWithAnsi(note.learn, inner),
+        keys([['1', 'learn more'], ['2', 'make a page'], ['3', 'knew this'], ['0', 'dismiss'], back]),
+      ]);
     }
 
     const body =
       view === 'working'
         ? [theme.fg('dim', 'Rewriting…')]
-        : new Markdown(state.rewrite ?? `**${note.title}**\n\n${note.body}`, 0, 0, getMarkdownTheme()).render(width);
-    return [
-      rule,
-      heading(theme, note),
-      ...body,
-      '',
-      ...wrapTextWithAnsi(
-        hint(theme, [
-          ['s', 'Simpler'],
-          ['l', 'Shorter'],
-          ['m', 'More detail'],
-          ['c', 'Ask in chat'],
-          ['3', 'Knew this'],
-          ['0', 'Dismiss'],
-          back,
-        ]),
-        width,
-      ),
-      rule,
-    ];
+        : new Markdown(state.rewrite ?? `**${note.title}**\n\n${note.body}`, 0, 0, getMarkdownTheme()).render(inner);
+    return frame([
+      ['', ...body, ''],
+      keys([
+        ['s', 'simpler'],
+        ['l', 'shorter'],
+        ['m', 'more detail'],
+        ['c', 'ask in chat'],
+        ['2', 'make a page'],
+        ['3', 'knew this'],
+        ['0', 'dismiss'],
+        back,
+      ]),
+    ]);
   }
 }
 
@@ -200,7 +243,7 @@ export default function headsUp(pi: ExtensionAPI) {
 
   // The note on screen, its panel view, and the latest rewrite. In memory: a
   // note never outlives the pi process.
-  let shown: { note: Note; view: View; rewrite: string | null } | null = null;
+  let shown: Shown | null = null;
   let panelOpen = false;
 
   const turn = { running: false, startedAt: 0, tools: 0 };
@@ -282,7 +325,7 @@ export default function headsUp(pi: ExtensionAPI) {
         s.offered = pushFront(s.offered, note.learn, MAX_OFFERED);
         s.events = [...s.events, { ts: Date.now(), kind: 'proposed' as const, learn: note.learn }].slice(-MAX_EVENTS);
       });
-      shown = { note, view: 'collapsed', rewrite: null };
+      shown = { note, view: 'collapsed', rewrite: null, at: Date.now() };
       renderBand(ctx);
     } catch (error) {
       if (signal.aborted) return;

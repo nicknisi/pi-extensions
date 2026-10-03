@@ -17,6 +17,7 @@
   "files": [
     "dist",
     "index.ts",
+    "card.ts",
     "config.ts",
     "parse.ts",
     "prompt.ts"
