@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-heads-up",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "A side agent that flags, above the editor, things you might miss during long tasks",
   "keywords": [
     "pi",
