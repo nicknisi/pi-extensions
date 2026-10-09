@@ -1363,7 +1363,13 @@ async function dispatchInline(
 }
 
 export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = {}) {
-  const runtime = createSubagentRuntime({ namespace: 'subagents', artifactsDir: ARTIFACTS_ROOT });
+  // Children share the parent session's model registry and default model.
+  let parentCtx: ExtensionContext | undefined;
+  const runtime = createSubagentRuntime({
+    namespace: 'subagents',
+    artifactsDir: ARTIFACTS_ROOT,
+    parent: () => parentCtx,
+  });
   const extraProfileDirs = options.profileDirs ?? [];
   // Registration-time snapshot for the tool description; execution rescans.
   const initialProfiles = loadProfiles(process.cwd(), extraProfileDirs);
@@ -1392,6 +1398,7 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
   sweepRunArtifactsOnce(ARTIFACTS_ROOT);
 
   pi.on('session_start', (_event, ctx) => {
+    parentCtx = ctx;
     if (!ctx.hasUI) return;
     statusUi = ctx.ui;
     statusTheme = (ctx.ui as ExtensionUIContext).theme ?? null;

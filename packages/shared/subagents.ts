@@ -34,7 +34,9 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   defineTool,
+  type ExtensionContext,
   getAgentDir,
+  type ModelRegistry,
   ModelRuntime,
   resolveCliModel,
   SessionManager,
@@ -86,8 +88,10 @@ export interface SpawnOptions {
   agent?: string;
   /**
    * Model spec ('provider/id', optionally with a ':thinking' suffix) resolved
-   * against the user's configured models/auth. Omit to use pi's default
-   * resolution (session settings, else first available).
+   * against the parent's model registry when the runtime has a `parent`, else
+   * the user's configured models/auth. Omit to use the parent session's
+   * current model (with a `parent`), else pi's default resolution (session
+   * settings, else first available).
    */
   model?: string;
   /** Appended to pi's default system prompt (like --append-system-prompt). */
@@ -583,6 +587,47 @@ export function sweepRunArtifactsOnce(rootDir: string): void {
   }
 }
 
+// ── Parent model runtime ───────────────────────────────────────────────────
+
+/** The parent session's model state. An ExtensionContext satisfies it. */
+export type SubagentParent = Pick<ExtensionContext, 'modelRegistry' | 'model'>;
+
+let warnedReplay = false;
+
+/**
+ * The model runtime children share with the parent registry, so providers the
+ * parent registered at runtime (pi.registerProvider), with their auth and
+ * header handling, reach the child.
+ *
+ * PRIVATE REACH: pi exposes no public way to get a ModelRegistry's runtime,
+ * and createAgentSession only takes a ModelRuntime. `runtime` is a private
+ * field of ModelRegistry (checked against pi-coding-agent 0.84 and 0.87). A
+ * public accessor upstream would remove this helper.
+ *
+ * Fallback when the field is gone: replay the parent's runtime-registered
+ * providers into a fresh runtime via the public registry API. That keeps
+ * gateway-style providers and their headers, but loses runtime API keys
+ * (--api-key) and any host-supplied credential store.
+ */
+export async function parentModelRuntime(registry: ModelRegistry): Promise<ModelRuntime> {
+  const runtime = (registry as unknown as { runtime?: Partial<ModelRuntime> }).runtime;
+  if (typeof runtime?.streamSimple === 'function' && typeof runtime.getModel === 'function') {
+    return runtime as ModelRuntime;
+  }
+  if (!warnedReplay) {
+    warnedReplay = true;
+    console.warn('[subagents] ModelRegistry runtime not reachable; replaying parent providers into a fresh runtime');
+  }
+  const child = await ModelRuntime.create();
+  for (const id of registry.getRegisteredProviderIds()) {
+    const native = registry.getRegisteredNativeProvider(id);
+    const config = registry.getRegisteredProviderConfig(id);
+    if (native) child.registerNativeProvider(native);
+    else if (config) child.registerProvider(id, config);
+  }
+  return child;
+}
+
 // ── Runtime ────────────────────────────────────────────────────────────────
 
 export function createSubagentRuntime(options: {
@@ -590,6 +635,13 @@ export function createSubagentRuntime(options: {
   maxConcurrent?: number;
   /** When set, run records (plus bounded output) persist to "<dir>/<namespace>/<runId>.json". */
   artifactsDir?: string;
+  /**
+   * The parent session's model state, read at each spawn (pass the latest
+   * ExtensionContext). Children then share the parent's model runtime and
+   * default to its current model. Omit to resolve models from a fresh
+   * runtime over the user's auth/models config.
+   */
+  parent?: () => SubagentParent | undefined;
 }): SubagentRuntime {
   const namespace = options.namespace;
   const maxConcurrent = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
@@ -604,6 +656,16 @@ export function createSubagentRuntime(options: {
   function modelRuntime(): Promise<ModelRuntime> {
     modelRuntimePromise ??= ModelRuntime.create();
     return modelRuntimePromise;
+  }
+
+  /** Snapshot the parent's model state; a stale ExtensionContext throws on access. */
+  function parentState(): SubagentParent | undefined {
+    try {
+      const parent = options.parent?.();
+      return parent ? { modelRegistry: parent.modelRegistry, model: parent.model } : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   function acquire(): Promise<void> {
@@ -771,7 +833,8 @@ export function createSubagentRuntime(options: {
       if (supervisorToolName && !tools.includes(supervisorToolName)) tools.push(supervisorToolName);
     }
 
-    const runtime = await modelRuntime();
+    const parent = parentState();
+    const runtime = parent ? await parentModelRuntime(parent.modelRegistry) : await modelRuntime();
 
     let model: ReturnType<typeof resolveCliModel>['model'];
     let thinkingLevel = opts.thinkingLevel;
@@ -782,6 +845,8 @@ export function createSubagentRuntime(options: {
       }
       model = resolved.model;
       thinkingLevel ??= resolved.thinkingLevel;
+    } else if (parent?.model) {
+      model = parent.model;
     }
 
     const loader = new DefaultResourceLoader({

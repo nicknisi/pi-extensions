@@ -330,8 +330,17 @@ function formatRunResult(result: RunScriptResult, label: string): string {
 export default function workflows(pi: ExtensionAPI): void {
   const cancellables: Cancellables = new Map();
   const activeRuns: ActiveRuns = new Set();
-  const runtime = createSubagentRuntime({ namespace: NAMESPACE, artifactsDir: ARTIFACTS_ROOT });
+  // Children share the parent session's model registry and default model.
+  let parentCtx: ExtensionContext | undefined;
+  const runtime = createSubagentRuntime({
+    namespace: NAMESPACE,
+    artifactsDir: ARTIFACTS_ROOT,
+    parent: () => parentCtx,
+  });
   sweepRunArtifactsOnce(ARTIFACTS_ROOT);
+  pi.on('session_start', (_event, ctx) => {
+    parentCtx = ctx;
+  });
 
   pi.registerTool({
     name: 'workflow',
