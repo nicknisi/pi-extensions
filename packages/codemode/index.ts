@@ -32,6 +32,7 @@ import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from '@earendil-works/
 import { getKeybindings, Text } from '@earendil-works/pi-tui';
 import {
   createSubagentRuntime,
+  subagentsDir,
   runWorkflow,
   type RunWorkflowOptions,
   type SpawnOptions,
@@ -46,7 +47,8 @@ import {
 import { bundleRequire } from 'bundle-require';
 import { Type } from 'typebox';
 
-const ARTIFACTS_ROOT = path.join(getAgentDir(), 'subagent-runs');
+// Resolved at use: PI_SUBAGENTS_DIR (see @nicknisi/pi-shared) relocates every runtime write.
+const artifactsRoot = () => subagentsDir('runs') ?? path.join(getAgentDir(), 'subagent-runs');
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_RESULT_CHARS = 16 * 1024;
@@ -255,7 +257,7 @@ export default function codemode(pi: ExtensionAPI) {
   let parentCtx: ExtensionContext | undefined;
   const runtime = createSubagentRuntime({
     namespace: 'codemode',
-    artifactsDir: ARTIFACTS_ROOT,
+    artifactsDir: artifactsRoot(),
     maxConcurrent: 6,
     parent: () => parentCtx,
   });

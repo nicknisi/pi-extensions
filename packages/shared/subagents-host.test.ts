@@ -1,12 +1,16 @@
 /**
- * Children reuse the parent's model registry: a provider registered on the
- * parent at runtime (header-only auth, like a Cloudflare AI Gateway worker)
- * must carry its headers into the child's request, with no provider key.
+ * The subagent runtime inside a host that supplies its own model provider and
+ * file locations (e.g. Riker's coding workers):
+ * - children reuse the parent's model registry, so a provider registered on
+ *   the parent at runtime (header-only auth, like a Cloudflare AI Gateway
+ *   worker) carries its headers into the child's request, with no provider key;
+ * - PI_SUBAGENTS_DIR moves every file the runtime writes under one root.
  *
  * Everything stays on loopback: a stub OpenAI-compatible server on
  * 127.0.0.1:0 and a temp PI_CODING_AGENT_DIR so no user auth/models load.
  */
 
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -15,7 +19,10 @@ import * as path from 'node:path';
 import type { Api, Model, Provider } from '@earendil-works/pi-ai';
 import { ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createSubagentRuntime, parentModelRuntime } from './subagents.js';
+import { subagentsDir } from './subagents-dir.js';
+import { createSubagentRuntime, parentModelRuntime, writeSessionMirror } from './subagents.js';
+import { runWorkflow } from './workflow.js';
+import { addWorktree, removeWorktree } from './worktree.js';
 
 const PROVIDER = 'stub-gateway';
 
@@ -25,25 +32,39 @@ interface Captured {
   model: string;
 }
 
-/** Minimal OpenAI chat-completions SSE stub that records each request. */
+/**
+ * Minimal OpenAI chat-completions SSE stub that records each request. When
+ * the request offers a `write` tool and no tool result is in the history yet,
+ * it answers with one `write` call (child.txt); otherwise with text.
+ */
 function startStub(): Promise<{ server: http.Server; baseUrl: string; requests: Captured[] }> {
   const requests: Captured[] = [];
   const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (chunk) => (body += chunk));
     req.on('end', () => {
-      let model = '';
+      let parsed: { model?: string; tools?: { function?: { name?: string } }[]; messages?: { role?: string }[] } = {};
       try {
-        model = JSON.parse(body).model ?? '';
+        parsed = JSON.parse(body);
       } catch {
-        // non-JSON body; leave model empty
+        // non-JSON body; record what we can
       }
+      const model = parsed.model ?? '';
       requests.push({ url: req.url ?? '', headers: req.headers, model });
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const chunk = (delta: object, finish: string | null) =>
         `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', created: 0, model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
-      res.write(chunk({ role: 'assistant', content: 'stub reply' }, null));
-      res.write(chunk({}, 'stop'));
+      const offersWrite = parsed.tools?.some((t) => t.function?.name === 'write');
+      const hasToolResult = parsed.messages?.some((m) => m.role === 'tool');
+      if (offersWrite && !hasToolResult) {
+        const args = JSON.stringify({ path: 'child.txt', content: 'from the child\n' });
+        const call = { index: 0, id: 'call_1', type: 'function', function: { name: 'write', arguments: args } };
+        res.write(chunk({ role: 'assistant', tool_calls: [call] }, null));
+        res.write(chunk({}, 'tool_calls'));
+      } else {
+        res.write(chunk({ role: 'assistant', content: 'stub reply' }, null));
+        res.write(chunk({}, 'stop'));
+      }
       res.end('data: [DONE]\n\n');
     });
   });
@@ -178,4 +199,103 @@ describe('children reuse the parent model registry', () => {
       expect(stub.requests).toHaveLength(0);
     },
   );
+});
+
+/** Every file (not dir) under root, relative to it. */
+function filesUnder(root: string): string[] {
+  if (!fs.existsSync(root)) return [];
+  return (fs.readdirSync(root, { recursive: true }) as string[])
+    .filter((rel) => fs.statSync(path.join(root, rel)).isFile())
+    .sort();
+}
+
+function gitRepo(): string {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-subagents-repo-'));
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'pipe', timeout: 10_000 });
+  git('init', '-q');
+  git('-c', 'user.email=test@test', '-c', 'user.name=test', 'commit', '-q', '--allow-empty', '-m', 'init');
+  return repo;
+}
+
+describe('PI_SUBAGENTS_DIR', () => {
+  let root: string;
+  let repo: string;
+  const worktrees: string[] = [];
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-subagents-root-'));
+    repo = gitRepo();
+  });
+
+  afterEach(() => {
+    delete process.env.PI_SUBAGENTS_DIR;
+    for (const wt of worktrees.splice(0)) removeWorktree(repo, wt);
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(repo, { recursive: true, force: true });
+  });
+
+  it('puts every file a worktree child and a workflow write under the root', { timeout: 30_000 }, async () => {
+    process.env.PI_SUBAGENTS_DIR = root;
+    const { registry, model } = await parentRegistry();
+    const before = filesUnder(agentDir);
+    const runtime = createSubagentRuntime({
+      namespace: 'files-test',
+      artifactsDir: subagentsDir('runs')!, // as the extensions resolve it
+      parent: () => ({ modelRegistry: registry, model }),
+    });
+
+    const result = await runtime.spawn({
+      prompt: 'write child.txt',
+      cwd: repo,
+      tools: ['write'],
+      worktree: true,
+      parentSession: path.join(repo, 'parent.jsonl'),
+      timeoutMs: 10_000,
+    });
+    expect(result.ok, result.ok ? '' : result.error).toBe(true);
+    const run = runtime.listRuns()[0]!;
+    if (run.worktree?.path) worktrees.push(run.worktree.path);
+
+    const workflow = await runWorkflow({ name: 'wf', stages: [{ id: 'only', prompt: 'hi', tools: [] }] }, runtime, {
+      cwd: repo,
+    });
+    expect(workflow.ok).toBe(true);
+
+    const id = result.runId;
+    expect(run.worktree?.path).toBe(path.join(root, 'worktrees', id));
+    expect(run.worktree?.patchPath).toBe(path.join(root, 'runs', 'files-test', `${id}.patch`));
+    expect(run.sessionFile?.startsWith(path.join(root, 'sessions') + path.sep)).toBe(true);
+    expect(workflow.runDir.startsWith(path.join(root, 'workflow-runs') + path.sep)).toBe(true);
+
+    const written = filesUnder(root);
+    expect(written).toContain(path.join('runs', 'files-test', `${id}.json`));
+    expect(written).toContain(path.join('runs', 'files-test', `${id}.patch`));
+    expect(written).toContain(path.join('worktrees', id, 'child.txt'));
+    expect(written.some((f) => f.startsWith(`sessions${path.sep}`) && f.endsWith('.jsonl'))).toBe(true);
+    expect(written.some((f) => f.startsWith(`workflow-runs${path.sep}`) && f.endsWith('status.json'))).toBe(true);
+    // Nothing the runtime wrote landed in the agent dir, nor in the caller's tree.
+    expect(filesUnder(agentDir)).toEqual(before);
+    expect(fs.existsSync(path.join(repo, 'child.txt'))).toBe(false);
+  });
+
+  it('without the override, keeps the usual places under the agent dir', { timeout: 15_000 }, () => {
+    delete process.env.PI_SUBAGENTS_DIR;
+    expect(subagentsDir('runs')).toBeUndefined();
+
+    const added = addWorktree(repo, 'default-run');
+    if (!('path' in added)) throw new Error(added.error);
+    worktrees.push(added.path);
+    expect(added.path).toBe(path.join(agentDir, 'subagent-worktrees', 'default-run'));
+
+    const file = writeSessionMirror(
+      [
+        { role: 'user', content: 'hi', timestamp: 1 },
+        { role: 'assistant', content: [{ type: 'text', text: 'yo' }], stopReason: 'stop', timestamp: 2 },
+      ],
+      repo,
+      undefined,
+    );
+    expect(file?.startsWith(path.join(agentDir, 'sessions') + path.sep)).toBe(true);
+    expect(filesUnder(root)).toEqual([]);
+  });
 });

@@ -2,7 +2,8 @@
  * Pi-free git worktree primitives for subagent isolation.
  *
  * Each subagent run that edits code gets a DETACHED worktree under
- * <agentDir>/subagent-worktrees/<runId>, branched from HEAD. On completion,
+ * <agentDir>/subagent-worktrees/<runId> (or $PI_SUBAGENTS_DIR/worktrees/<runId>),
+ * branched from HEAD. On completion,
  * captureHandoff() snapshots the worktree's full delta (including untracked
  * files, which a plain `git diff HEAD` silently misses) as an untruncated
  * patch file; removeWorktree() tears the worktree down.
@@ -16,6 +17,7 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { subagentsDir } from './subagents-dir.js';
 
 const GIT_TIMEOUT_MS = 30_000;
 
@@ -57,7 +59,7 @@ export function findRepoRoot(cwd: string): string | null {
  * first; a failed add is retried once after pruning stale registrations.
  */
 export function addWorktree(repoRoot: string, runId: string): { path: string } | { error: string } {
-  const root = path.join(agentDir(), 'subagent-worktrees');
+  const root = subagentsDir('worktrees') ?? path.join(agentDir(), 'subagent-worktrees');
   const wtPath = path.join(root, runId);
   try {
     fs.mkdirSync(root, { recursive: true });

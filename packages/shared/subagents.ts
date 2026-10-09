@@ -27,6 +27,7 @@
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { subagentsDir } from './subagents-dir.js';
 import { addWorktree, captureHandoff, findRepoRoot, removeWorktree } from './worktree.js';
 import {
   type AgentSession,
@@ -140,6 +141,7 @@ export interface SpawnOptions {
   maxToolCalls?: number;
   /**
    * Run the child in an isolated git worktree (~/.pi/agent/subagent-worktrees/<runId>,
+   * or $PI_SUBAGENTS_DIR/worktrees/<runId>,
    * detached from HEAD at spawn time). The child's writes never touch the caller's
    * working tree; on settle, the full change set (INCLUDING untracked files, via
    * `git add -A` + `git diff --cached`) is captured to `<runId>.patch` next to the
@@ -153,7 +155,7 @@ export interface SpawnOptions {
   /**
    * Owning pi session file path. When set, the run is ALSO persisted as a
    * standard pi session JSONL via the real `SessionManager` into the default
-   * sessions dir (~/.pi/agent/sessions/<encoded-cwd>/), with `parentSession`
+   * sessions dir (~/.pi/agent/sessions/<encoded-cwd>/, or $PI_SUBAGENTS_DIR/sessions/), with `parentSession`
    * set to this path — so the run is inspectable with pi's native /resume,
    * /tree, and --fork machinery. The bespoke run store (fleet/registry)
    * keeps working unchanged; this is an additive dual-write. Omit to disable
@@ -337,7 +339,7 @@ function writeSessionMirror(
   });
   if (safe.length === 0) return undefined;
   try {
-    const mgr = SessionManager.create(cwd, undefined, parentSession ? { parentSession } : undefined);
+    const mgr = SessionManager.create(cwd, subagentsDir('sessions'), parentSession ? { parentSession } : undefined);
     for (const msg of safe) mgr.appendMessage(msg);
     // SessionManager creates the JSONL lazily — only once the first assistant
     // message is appended (see its _persist 'hasAssistant' gate). A child that
