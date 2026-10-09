@@ -124,6 +124,30 @@ Children are **hermetic by construction**: no user extensions, skills, prompt te
 
 `spawn()` never rejects; results are a discriminated union (`ok | crashed | empty | schema_invalid | aborted`). See `packages/shared/README.md` for the full runtime API.
 
+### Models: children use the parent's registry
+
+Children resolve models against the **parent session's model registry**, not a fresh one. So a provider the host registered at runtime (`pi.registerProvider(...)`, e.g. a Cloudflare AI Gateway provider whose requests carry only `cf-aig-authorization`) reaches every child with its auth and headers, and no token is written to disk or env.
+
+- **No `model` on a task** → the child runs on the **parent session's current model** (a gateway worker's children stay on the gateway model).
+- **`model: "provider/id"`** (on a task or profile) → resolved against that same registry, so runtime-registered providers work there too.
+- `workflows` and `codemode` children behave the same way.
+
+pi exposes no public accessor for a registry's runtime, so the shared runtime reads `ModelRegistry`'s private `runtime` field (checked against pi-coding-agent 0.84 and 0.87). If a pi upgrade renames it, children fall back to replaying the parent's runtime-registered providers into a fresh runtime (one console warning). That keeps gateway-style providers working but loses runtime-only API keys (`--api-key`) and host-supplied credential stores.
+
+### Where runtime files go (`PI_SUBAGENTS_DIR`)
+
+By default everything the runtime writes lives under the pi agent dir, as described above. Set **`PI_SUBAGENTS_DIR`** to move all of it under one root, e.g. a host confining a job to its own directory:
+
+| Default                                                   | With `PI_SUBAGENTS_DIR=<root>` |
+| --------------------------------------------------------- | ------------------------------ |
+| `~/.pi/agent/subagent-runs/` (records, `.patch` handoffs) | `<root>/runs/`                 |
+| `~/.pi/agent/subagent-patches/state.json`                 | `<root>/patches/state.json`    |
+| `~/.pi/agent/subagent-worktrees/<runId>`                  | `<root>/worktrees/<runId>`     |
+| `~/.pi/agent/sessions/<encoded-cwd>/` (session mirrors)   | `<root>/sessions/`             |
+| `~/.pi/agent/workflow-runs/` (codemode `runWorkflow`)     | `<root>/workflow-runs/`        |
+
+It is read when the extension starts and at each write, not at import. Config stays put: profiles, keybindings, workflows and snippets still come from the agent dir. Session mirrors under the override are outside pi's sessions dir, so `/resume` won't list them (open them by path).
+
 ## Profiles
 
 A profile is a markdown file — frontmatter on top, persona system prompt below — that names a reusable child persona: which skills it carries, which tools it may use, optionally which model it runs, and how it should behave. Hermetic children get **no** skills by default; a profile is the curated basket that opts specific ones in.
@@ -184,7 +208,7 @@ export default (pi: ExtensionAPI) => subagents(pi, { profileDirs: ['/path/to/bun
 
 - **In-process means no crash isolation.** Children share the parent session's event loop and memory; a pathological child can hurt the host. Untrusted or heavy parallel work should stay on pi-subagents (or a future RPC transport) until this platform grows an isolation option.
 - **Background completion is a notification, not a turn.** The completion message lands in the transcript but doesn't drive the agent — the model learns results when it next acts (or when asked to check `fleet`).
-- **Fleet history is per-machine, per-agent-dir.** `/fleet all` reads records under `~/.pi/agent/subagent-runs/`; they are garbage-collected at startup after 7 days (along with their patches and worktrees). The default `/fleet`, shortcut, tool list, and footer are current-session active views.
+- **Fleet history is per-machine, per-agent-dir.** `/fleet all` reads records under `~/.pi/agent/subagent-runs/` (or `$PI_SUBAGENTS_DIR/runs/`); they are garbage-collected at startup after 7 days (along with their patches and worktrees). The default `/fleet`, shortcut, tool list, and footer are current-session active views.
 - **Background runs live only as long as the host session.** They are detached in-process children; cancel them via the `fleet` tool (`action: 'cancel'`), or let the `session_shutdown` handler abort them deterministically on quit/reload/session-replacement (see **Cascading cancellation** above). Running records left by a hard exit are reaped as `aborted` (and their worktrees removed) on the next host startup.
 - Depends on pi SDK internals (`createAgentSession`, `DefaultResourceLoader` flags, `SessionManager.inMemory`) that could change across pi versions — runtime-aliased to the host at load time, but type-level drift would surface at extension load.
 - **The recursion guard has a hole.** The in-process depth guard only covers spawns made through the shared runtime; a child that itself shells out to `pi -p` via bash starts a fresh process with none of that context — the same exposure as any pi session with bash access.
