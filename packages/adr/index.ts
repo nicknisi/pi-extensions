@@ -2,7 +2,8 @@
  * adr — inject the repo's ADR index into the system prompt.
  *
  * When any ancestor of cwd contains docs/decisions/, its numbered filenames
- * (the "veto list") are appended to the system prompt on before_agent_start.
+ * (the "veto list") go into a `decision_records` system prompt section on
+ * before_agent_start.
  * Full ADRs are read on demand by the agent; only paths ride the prompt.
  *
  * Conventions:
@@ -20,6 +21,7 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 const ADR_DIR = join('docs', 'decisions');
 const ADR_FILE = /^\d{4}-.+\.md$/;
+const SECTION = 'decision_records';
 
 /** Walk up from `start` to the filesystem root; first docs/decisions/ wins. */
 export function findAdrDir(start: string): string | null {
@@ -45,12 +47,17 @@ const FRAMING = `## Decision records
 This repo has ADRs in docs/decisions/. These are settled decisions: read the relevant file before proposing or changing anything it touches, and do not contravene one without asking, unless the user explicitly overrides.`;
 
 export default function (pi: ExtensionAPI) {
+  // A named prompt section lets pi record a small transcript delta (cache-friendly)
+  // instead of replacing the whole system prompt every run.
   pi.on('before_agent_start', (event, ctx) => {
     const dir = findAdrDir(ctx.cwd);
-    if (!dir) return;
-    const adrs = listAdrs(dir);
-    if (adrs.length === 0) return;
+    const adrs = dir ? listAdrs(dir) : [];
+    const { sections } = event.systemPromptOptions;
+    if (adrs.length === 0) {
+      delete sections[SECTION];
+      return;
+    }
     const list = adrs.map((f) => `- docs/decisions/${f}`).join('\n');
-    return { systemPrompt: `${event.systemPrompt}\n\n${FRAMING}\n\n${list}` };
+    sections[SECTION] = `${FRAMING}\n\n${list}`;
   });
 }

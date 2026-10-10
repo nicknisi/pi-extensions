@@ -4,7 +4,7 @@ Injects the repo's ADR index (`docs/decisions/`) into the system prompt as a ste
 
 ## What it adds
 
-- `before_agent_start` hook — walks up from cwd to the nearest ancestor with `docs/decisions/` and appends a framing sentence plus the sorted filename list to the system prompt. Filenames only (~10 tokens per ADR); full files are read on demand by the agent. Recomputed per prompt, so it's never stale. No-ops when no `docs/decisions/` exists.
+- `before_agent_start` hook — walks up from cwd to the nearest ancestor with `docs/decisions/` and puts a framing sentence plus the sorted filename list in a `decision_records` system prompt section (`event.systemPromptOptions.sections`), so pi records a small transcript delta instead of replacing the whole prompt and prompt caching keeps working. Filenames only (~10 tokens per ADR); full files are read on demand by the agent. Recomputed per prompt, so it's never stale. No-ops when no `docs/decisions/` exists.
 
 No slash commands, tools, keybindings, widgets, or config.
 

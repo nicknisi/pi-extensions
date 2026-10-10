@@ -1,27 +1,17 @@
-import { keyText, ToolExecutionComponent, type ExtensionAPI, type Theme } from '@earendil-works/pi-coding-agent';
-import { stripTerminalSequences, truncateToWidth, type Component } from '@earendil-works/pi-tui';
+import {
+  keyText,
+  type AgentToolResult,
+  type ExtensionAPI,
+  type Theme,
+  type ToolRenderers,
+} from '@earendil-works/pi-coding-agent';
+import { Box, stripTerminalSequences, Text, truncateToWidth, type Component } from '@earendil-works/pi-tui';
 import { sanitizeTerminalLabel } from '@nicknisi/pi-shared';
 
-// Pi has no global tool-rendering hook. These TS-private fields are shared by
-// built-in, extension, MCP, and restored tool rows in Pi 0.84 and 0.85.
-interface ToolRow {
-  toolName: string;
-  args: unknown;
-  expanded: boolean;
-  isPartial: boolean;
-  callRendererComponent?: Component;
-  resultRendererComponent?: Component;
-  result?: { content: Array<{ type: string; text?: string }>; isError?: boolean };
-  render(width: number): string[];
-  setExpanded(expanded: boolean): void;
-  handleMouse?(event: MouseEvent): { handled?: boolean } | undefined;
-}
+type ToolRenderContext = Parameters<NonNullable<ToolRenderers['renderCall']>>[2];
 
-interface MouseEvent {
-  type: string;
-  button: string;
-  y: number;
-}
+// Shared per-row renderer state; tells the call frame whether a result frame follows it.
+const HAS_RESULT = 'compactToolsHasResult';
 
 function renderedLines(component: Component | undefined, width: number): string[] {
   try {
@@ -37,101 +27,144 @@ function renderedLines(component: Component | undefined, width: number): string[
   }
 }
 
-function callTitle(row: ToolRow, width: number): string {
-  const title = renderedLines(row.callRendererComponent, width).find((line) => /[\p{L}\p{N}]/u.test(line));
-  if (title) return title;
-  const args = row.args && typeof row.args === 'object' ? (row.args as Record<string, unknown>) : {};
-  const detail = args.path ?? args.command ?? args.query ?? args.action ?? args.url;
-  return sanitizeTerminalLabel(`${row.toolName}${typeof detail === 'string' ? ` ${detail.replace(/\s+/g, ' ')}` : ''}`);
+function argsTitle(toolName: string, args: unknown): string {
+  const record = args && typeof args === 'object' ? (args as Record<string, unknown>) : {};
+  const detail = record.path ?? record.command ?? record.query ?? record.action ?? record.url;
+  return sanitizeTerminalLabel(`${toolName}${typeof detail === 'string' ? ` ${detail.replace(/\s+/g, ' ')}` : ''}`);
 }
 
-function compactLines(row: ToolRow, width: number, theme: Theme): string[] {
-  const title = `▸ ${callTitle(row, width - 2)}`;
-  const color = row.result?.isError ? 'error' : row.isPartial ? 'warning' : 'toolOutput';
-  const background = row.isPartial ? 'toolPendingBg' : row.result?.isError ? 'toolErrorBg' : 'toolSuccessBg';
-  const paint = (line: string) => theme.bg(background, truncateToWidth(line, width, '…', true));
-  const lines = ['', paint(theme.fg('toolTitle', title))];
-  if (!row.result) return lines;
+function background(context: ToolRenderContext): 'toolPendingBg' | 'toolErrorBg' | 'toolSuccessBg' {
+  return context.isPartial ? 'toolPendingBg' : context.isError ? 'toolErrorBg' : 'toolSuccessBg';
+}
 
-  const text = row.result.content
+function textOf(result: AgentToolResult<unknown>): string[] {
+  return result.content
     .filter((part) => part.type === 'text')
-    .map((part) => part.text ?? '')
+    .map((part) => part.text)
     .join('\n')
     .split('\n')
     .map((line) => sanitizeTerminalLabel(line.replaceAll('\t', ' ')).trim())
     .filter(Boolean);
-  const images = row.result.content.filter((part) => part.type === 'image').length;
-  const rendered = renderedLines(row.resultRendererComponent, width - 2);
-  const previewLines = rendered.length ? rendered : text;
-  let preview = previewLines[0] ?? (row.isPartial ? 'Running' : 'Done');
-  try {
-    const value: unknown = JSON.parse(previewLines.join('\n'));
-    if (Array.isArray(value)) preview = `${value.length} result items`;
-    else if (value && typeof value === 'object') preview = `Structured result with ${Object.keys(value).length} fields`;
-  } catch {
-    if (preview === '{' || preview === '[' || preview.startsWith('{"')) preview = 'Structured output';
+}
+
+/** One painted, width-filling line computed at render time. */
+class Line implements Component {
+  constructor(
+    readonly inner: Component | undefined,
+    private readonly line: (width: number) => string,
+    private readonly paint: (text: string) => string,
+  ) {}
+  render(width: number): string[] {
+    return [this.paint(truncateToWidth(this.line(width), width, '…', true))];
   }
-  if (previewLines.length > 1) preview += ' …';
-  if (images) preview += ` [${images} image${images === 1 ? '' : 's'}]`;
-  if (row.result.isError) preview = `Error: ${preview}`;
-  const hint = ` [${keyText('app.tools.expand')}]`;
-  const output = truncateToWidth(`  ${preview}`, Math.max(0, width - hint.length)) + hint;
-  lines.push(paint(theme.fg(color, output)));
-  return lines;
+  invalidate(): void {}
+}
+
+/** Pi's default tool shell (outcome background, outputPad, one blank line above and below), for one slot. */
+class Frame extends Box {
+  constructor(
+    readonly inner: Component,
+    private readonly paint: (text: string) => string,
+    private readonly top: boolean,
+    private readonly bottom: () => boolean,
+    outputPad: number,
+  ) {
+    super(outputPad, 0, paint);
+    this.addChild(inner);
+  }
+  override render(width: number): string[] {
+    const blank = this.paint(' '.repeat(Math.max(0, width)));
+    return [...(this.top ? [blank] : []), ...super.render(width), ...(this.bottom() ? [blank] : [])];
+  }
+  override handleMouse(event: Parameters<Box['handleMouse']>[0]) {
+    if (!this.top) return super.handleMouse(event);
+    return event.y < 1 ? undefined : super.handleMouse({ ...event, y: event.y - 1 });
+  }
+}
+
+function compactRenderers(toolName: string, base: ToolRenderers | undefined): ToolRenderers {
+  const passthrough = base?.renderShell === 'self';
+  const innerContext = (context: ToolRenderContext): ToolRenderContext => ({
+    ...context,
+    // Base renderers reuse their own previous component, never our wrapper.
+    lastComponent:
+      context.lastComponent instanceof Frame || context.lastComponent instanceof Line
+        ? context.lastComponent.inner
+        : context.lastComponent,
+  });
+  const paint = (theme: Theme, context: ToolRenderContext) => (text: string) => theme.bg(background(context), text);
+
+  return {
+    // Self shell so collapsed rows are exactly two lines; expanded rows re-create pi's default box below.
+    renderShell: 'self',
+    renderCall(args, theme, context) {
+      const state = context.state as Record<string, unknown>;
+      const call = () => {
+        try {
+          return base?.renderCall?.(args, theme, innerContext(context));
+        } catch {
+          return undefined;
+        }
+      };
+      if (context.expanded) {
+        const component = call() ?? new Text(theme.fg('toolTitle', argsTitle(toolName, args)), 0, 0);
+        if (passthrough) return component;
+        return new Frame(component, paint(theme, context), true, () => !state[HAS_RESULT], context.outputPad);
+      }
+      const component = call();
+      return new Line(component, (width) => {
+        const title = renderedLines(component, width - 2).find((line) => /[\p{L}\p{N}]/u.test(line));
+        return theme.fg('toolTitle', `▸ ${title ?? argsTitle(toolName, args)}`);
+      }, paint(theme, context));
+    },
+    renderResult(result, options, theme, context) {
+      (context.state as Record<string, unknown>)[HAS_RESULT] = true;
+      const render = (expanded: boolean) => {
+        try {
+          return base?.renderResult?.(result, { ...options, expanded }, theme, innerContext(context));
+        } catch {
+          return undefined;
+        }
+      };
+      if (options.expanded) {
+        const component =
+          render(true) ?? new Text(textOf(result).map((line) => theme.fg('toolOutput', line)).join('\n'), 0, 0);
+        if (passthrough) return component;
+        return new Frame(component, paint(theme, context), false, () => true, context.outputPad);
+      }
+      const component = render(false);
+      const color = context.isError ? 'error' : options.isPartial ? 'warning' : 'toolOutput';
+      return new Line(component, (width) => {
+        const rendered = renderedLines(component, width - 2);
+        const previewLines = rendered.length ? rendered : textOf(result);
+        let preview = previewLines[0] ?? (options.isPartial ? 'Running' : 'Done');
+        try {
+          const value: unknown = JSON.parse(previewLines.join('\n'));
+          if (Array.isArray(value)) preview = `${value.length} result items`;
+          else if (value && typeof value === 'object')
+            preview = `Structured result with ${Object.keys(value).length} fields`;
+        } catch {
+          if (preview === '{' || preview === '[' || preview.startsWith('{"')) preview = 'Structured output';
+        }
+        if (previewLines.length > 1) preview += ' …';
+        const images = result.content.filter((part) => part.type === 'image').length;
+        if (images) preview += ` [${images} image${images === 1 ? '' : 's'}]`;
+        if (context.isError) preview = `Error: ${preview}`;
+        const hint = ` [${keyText('app.tools.expand')}]`;
+        return theme.fg(color, truncateToWidth(`  ${preview}`, Math.max(0, width - hint.length)) + hint);
+      }, paint(theme, context));
+    },
+  };
 }
 
 export default function compactTools(pi: ExtensionAPI) {
-  let dispose: (() => void) | undefined;
+  pi.registerToolRenderer((toolName, next) => compactRenderers(toolName, next()));
 
   pi.on('session_start', (_event, ctx) => {
     if (ctx.mode !== 'tui') return;
-    dispose?.();
-    const prototype = ToolExecutionComponent.prototype as unknown as ToolRow;
-    if (typeof prototype.render !== 'function' || typeof prototype.setExpanded !== 'function') {
-      ctx.ui.notify('compact-tools: unsupported Pi tool renderer. Keeping the original display.', 'warning');
-      return;
-    }
-
-    const originalRender = prototype.render;
-    const originalMouse = prototype.handleMouse;
-    let active = true;
-    const isCompact = (row: ToolRow) => active && row.expanded === false && typeof row.toolName === 'string';
-
-    function render(this: ToolRow, width: number): string[] {
-      return isCompact(this) ? compactLines(this, width, ctx.ui.theme) : originalRender.call(this, width);
-    }
-
-    function handleMouse(this: ToolRow, event: MouseEvent) {
-      if (!isCompact(this)) return originalMouse?.call(this, event);
-      // Hidden children must not receive input at their old, expanded positions.
-      // Unhandled wheel/drag events remain available to transcript scrolling/selection.
-      if (this.result && event.y > 0 && event.type === 'click' && event.button === 'left') {
-        this.setExpanded(true);
-        return { handled: true };
-      }
-      return undefined;
-    }
-
-    prototype.render = render;
-    prototype.handleMouse = handleMouse;
-    dispose = () => {
-      // A later extension may wrap us. In that case leave its wrapper intact,
-      // but make our captured functions pass through after this session ends.
-      active = false;
-      if (prototype.render === render) prototype.render = originalRender;
-      if (prototype.handleMouse === handleMouse) {
-        if (originalMouse) prototype.handleMouse = originalMouse;
-        else delete prototype.handleMouse;
-      }
-    };
     ctx.ui.setToolsExpanded(false);
     // setToolsExpanded is a no-op when already collapsed. Clear our unused status
     // to request a redraw even then, without adding a visible widget or message.
     ctx.ui.setStatus('compact-tools', undefined);
-  });
-
-  pi.on('session_shutdown', () => {
-    dispose?.();
-    dispose = undefined;
   });
 }
