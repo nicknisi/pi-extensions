@@ -26,6 +26,9 @@
       "default": "./dist/index.js"
     }
   },
+  "dependencies": {
+    "@nicknisi/pi-shared": "workspace:*"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"

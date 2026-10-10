@@ -180,6 +180,10 @@ export default (pi: ExtensionAPI) => subagents(pi, { profileDirs: ['/path/to/bun
 
 `profileDirs` appends lowest-precedence profile directories — the hook for a distribution (e.g. arc) to ship default personas that user and project files can shadow.
 
+## Tool exposure
+
+`fleet` (`dispatch` stays always declared) register with `exposure: "deferred"` (pi ≥0.99), so they stay out of the system prompt when pi's built-in `tool_search` is active (`"defaultTools": ["+tool_search"]`): the model finds them on demand. Without `tool_search` the extension declares them directly at session start, as before. Older pi ignores the field. Tools also carry `annotations` (read-only/destructive/open-world hints) for permission extensions.
+
 ## Caveats
 
 - **In-process means no crash isolation.** Children share the parent session's event loop and memory; a pathological child can hurt the host. Untrusted or heavy parallel work should stay on pi-subagents (or a future RPC transport) until this platform grows an isolation option.

@@ -3,3 +3,4 @@ export * from './searchable-select-list.js';
 export * from './subagents.js';
 export * from './workflow.js';
 export * from './patches.js';
+export * from './tools.js';

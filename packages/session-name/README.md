@@ -74,7 +74,7 @@ No environment variables are read.
 
 ## How auto-naming works
 
-1. On `agent_settled`, skip if already named (via `/sn`, `/name`, `--name`, or a prior auto-name) or if `autoName` is `"off"`.
+1. On `agent_settled`, skip if already named (via `/sn`, `/name`, `--name`, or a prior auto-name), if `autoName` is `"off"`, or if the run was cancelled (`aborted`, pi ≥1.1; the next finished run names the session).
 2. Grab the branch via `ctx.sessionManager.getBranch()` and extract the first user message text (string content or `text` content blocks).
 3. Heuristic mode: first non-empty line, whitespace-collapsed, truncated to `heuristicMaxLength`.
 4. LLM mode: one streaming call with a system prompt asking for a ≤ `llmMaxWords`-word title, fed the first user prompt (truncated to 1000 chars) and the start of the first assistant reply (800 chars). The response is cleaned (first line, quotes and trailing punctuation stripped) and truncated to `heuristicMaxLength`. Auth comes from `ctx.modelRegistry.getApiKeyAndHeaders(model)`; if no API key is available, falls back to the heuristic.

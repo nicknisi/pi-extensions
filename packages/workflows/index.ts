@@ -37,6 +37,7 @@ import {
   type SpawnOptions,
   type SpawnResult,
   type SubagentRuntime,
+  declareUnlessSearchable,
 } from '@nicknisi/pi-shared';
 import { Type } from 'typebox';
 import {
@@ -333,9 +334,12 @@ export default function workflows(pi: ExtensionAPI): void {
   const runtime = createSubagentRuntime({ namespace: NAMESPACE, artifactsDir: ARTIFACTS_ROOT });
   sweepRunArtifactsOnce(ARTIFACTS_ROOT);
 
+  pi.on('session_start', () => declareUnlessSearchable(pi, ['workflow']));
+
   pi.registerTool({
     name: 'workflow',
     label: 'Workflow',
+    exposure: 'deferred',
     description: [
       'Run a JavaScript workflow script that orchestrates subagents, or manage runs. Actions: run,',
       'list (saved workflow files), status (run record by runId), stop, pause, resume (hold active',

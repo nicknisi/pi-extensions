@@ -41,7 +41,11 @@ importers:
 
   packages/adr: {}
 
-  packages/agent-urls: {}
+  packages/agent-urls:
+    dependencies:
+      '@nicknisi/pi-shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/answer: {}
 
@@ -57,7 +61,11 @@ importers:
         specifier: ^18.0.5
         version: 18.0.5
 
-  packages/ast-grep: {}
+  packages/ast-grep:
+    dependencies:
+      '@nicknisi/pi-shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/auto-theme: {}
 
@@ -102,7 +110,11 @@ importers:
         specifier: ^0.25.0
         version: 0.25.12
 
-  packages/codesearch: {}
+  packages/codesearch:
+    dependencies:
+      '@nicknisi/pi-shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/compact-tools:
     dependencies:

@@ -179,6 +179,10 @@ Any color field accepts a pi theme token (`"text"`, `"accent"`, `"success"`, `"e
 - `@nicknisi/pi-shared` (workspace) — the in-process subagent runtime (`createSubagentRuntime`) that members and the chairman spawn through.
 - No `pi` binary requirement: children are in-process SDK sessions, not subprocesses.
 
+## Tool exposure
+
+`llm_council` register with `exposure: "deferred"` (pi ≥0.99), so they stay out of the system prompt when pi's built-in `tool_search` is active (`"defaultTools": ["+tool_search"]`): the model finds them on demand. Without `tool_search` the extension declares them directly at session start, as before. Older pi ignores the field. Tools also carry `annotations` (read-only/destructive/open-world hints) for permission extensions.
+
 ## Caveats
 
 - **Extension resolution path is hardcoded.** `extensions: ["name"]` resolves to `~/.pi/agent/extensions/<name>/src/index.ts` — only directory-style extensions with that layout work. Single-file `.ts` extensions and npm-package extensions don't match; the code comments recommend keeping `extensions: []` for members. Same for `skills` → `~/.pi/agent/skills/<name>/SKILL.md`.

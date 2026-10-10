@@ -63,6 +63,10 @@ Apply after reviewing the preview:
 - **Failures:** Each operation first validates `ast-grep --version`, because Pi can report a missing executable as an empty exit 1. Only a verified CLI run with empty stdout and stderr and exit 0 or 1 becomes “No matches found.” Other nonzero exits throw tool errors. Successful stderr diagnostics are retained.
 - **Cancellation:** The tool abort signal and timeout reach both the version check and actual operation. Each process has its own timeout, so the complete invocation can take up to twice the requested timeout, plus mutation-queue waiting. Cancelled or timed-out rewrites may have already changed files. Failures are not rolled back. Inspect the working tree before retrying.
 
+## Tool exposure
+
+`ast_search` and `ast_rewrite` register with `exposure: "deferred"` (pi ≥0.99), so they stay out of the system prompt when pi's built-in `tool_search` is active (`"defaultTools": ["+tool_search"]`): the model finds them on demand. Without `tool_search` the extension declares them directly at session start, as before. Older pi ignores the field. Tools also carry `annotations` (read-only/destructive/open-world hints) for permission extensions.
+
 ## Provenance
 
 Adapted from [`dannote/dot-pi`, `extensions/ast-grep.ts`](https://github.com/dannote/dot-pi/blob/73fe0529c38f9a66fbf9a1b71c88d0d4980afceb/extensions/ast-grep.ts) at commit `73fe0529c38f9a66fbf9a1b71c88d0d4980afceb`, under MIT. This adaptation replaces upstream rendering and temporary-file diff generation, renames the tools, defaults rewrites to preview, and adds explicit file scope, safe execution, failure classification, bounds, and regression tests. The exact upstream license is included in [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) and shipped with the package.

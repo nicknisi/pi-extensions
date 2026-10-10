@@ -88,6 +88,10 @@ The `examples/` directory ships standalone, copy-and-adapt workflow scripts — 
 - `typebox` — the tool's parameter schema.
 - `@earendil-works/pi-coding-agent` (peer) — the extension API, `getAgentDir`, `CONFIG_DIR_NAME`.
 
+## Tool exposure
+
+`workflow` register with `exposure: "deferred"` (pi ≥0.99), so they stay out of the system prompt when pi's built-in `tool_search` is active (`"defaultTools": ["+tool_search"]`): the model finds them on demand. Without `tool_search` the extension declares them directly at session start, as before. Older pi ignores the field. Tools also carry `annotations` (read-only/destructive/open-world hints) for permission extensions.
+
 ## Caveats
 
 - The script runs in the host process with full Node access — the same trust boundary as the `bash` and `codemode` tools. Your model, your session.

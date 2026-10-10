@@ -57,6 +57,10 @@ Pi is a runtime peer supplied by the host. `typebox` is a runtime dependency. No
 
 Each HTTP request and gh command has a 30-second timeout and accepts the tool AbortSignal. HTTP timeout remains active through body consumption. HTTP bodies are limited to 2 MiB. gh output is checked against that limit after Pi buffers it, so that path is not a streaming memory cap. HTTP redirects are rejected. Both tools use Pi truncation with a total budget of 50 KiB / 2000 lines including the notice. Narrow search filters or request a smaller file range when truncated. A single oversized line cannot be retrieved by line slicing. No complete-output temporary files are written.
 
+## Tool exposure
+
+`codesearch` and `codefetch` register with `exposure: "deferred"` (pi ≥0.99), so they stay out of the system prompt when pi's built-in `tool_search` is active (`"defaultTools": ["+tool_search"]`): the model finds them on demand. Without `tool_search` the extension declares them directly at session start, as before. Older pi ignores the field. Tools also carry `annotations` (read-only/destructive/open-world hints) for permission extensions.
+
 ## Security
 
 Public search queries and filters leave your machine and are sent to grep.app. Never include secrets, credentials, or private source without explicit user authorization. The extension does not read local files or automatically submit code. It cannot reliably detect sensitive text supplied by a model or user. Tool descriptions instruct the model not to submit private code by default, but this is not a DLP enforcement layer.

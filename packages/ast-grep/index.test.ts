@@ -26,7 +26,11 @@ function setup(result = ok) {
     .mockImplementation(async (_command, args) =>
       args[0] === '--version' ? { ...ok, stdout: 'ast-grep 0.45.3' } : result,
     );
-  extension({ registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool), exec } as unknown as ExtensionAPI);
+  extension({
+    registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool),
+    on: () => {},
+    exec,
+  } as unknown as ExtensionAPI);
   const call = (name: string, params: Record<string, unknown>, signal?: AbortSignal) =>
     tools.get(name)!.execute('test', params, signal, undefined, { cwd } as ExtensionToolContext);
   return { tools, exec, call };

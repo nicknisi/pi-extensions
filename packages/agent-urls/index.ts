@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
+import { declareUnlessSearchable } from '@nicknisi/pi-shared';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -263,6 +264,30 @@ export default function agentUrls(pi: ExtensionAPI) {
     label: 'List Agent Runs',
     description: 'List recent subagent runs persisted by the shared runtime and their agent:// URLs.',
     promptSnippet: 'List recent subagent runs before reading agent:// URLs.',
+    exposure: 'deferred',
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    outputSchema: {
+      type: 'object',
+      required: ['runs'],
+      properties: {
+        runs: {
+          type: 'array',
+          items: {
+            type: 'object',
+            required: ['url', 'runId', 'namespace'],
+            properties: {
+              url: { type: 'string' },
+              runId: { type: 'string' },
+              namespace: { type: 'string' },
+              agent: { type: 'string' },
+              status: { type: 'string' },
+              durationMs: { type: 'number' },
+              prompt: { type: 'string' },
+            },
+          },
+        },
+      },
+    },
     parameters: {
       type: 'object',
       properties: {
@@ -279,13 +304,23 @@ export default function agentUrls(pi: ExtensionAPI) {
     },
     async execute(_id: string, params: { query?: string; limit?: number }) {
       const runs = discoverRuns();
-      const text = formatRunList(runs, params.query, Math.max(1, Math.min(params.limit ?? DEFAULT_LIMIT, 100)));
+      const limit = Math.max(1, Math.min(params.limit ?? DEFAULT_LIMIT, 100));
+      const shown = filterRuns(runs, params.query)
+        .slice(0, limit)
+        .map((run) => run.record);
       return {
-        content: [{ type: 'text', text }],
-        details: {
-          runs: filterRuns(runs, params.query)
-            .slice(0, params.limit ?? DEFAULT_LIMIT)
-            .map((run) => run.record),
+        content: [{ type: 'text', text: formatRunList(runs, params.query, limit) }],
+        details: { runs: shown },
+        structuredContent: {
+          runs: shown.map((run) => ({
+            url: runUri(run),
+            runId: run.runId,
+            namespace: run.namespace,
+            ...(run.agent && { agent: run.agent }),
+            ...(run.status && { status: run.status }),
+            ...(run.durationMs !== undefined && { durationMs: run.durationMs }),
+            ...(run.promptPreview && { prompt: run.promptPreview }),
+          })),
         },
       };
     },
@@ -296,6 +331,8 @@ export default function agentUrls(pi: ExtensionAPI) {
     label: 'Read Agent URL',
     description: 'Read agent:// URLs for persisted subagent runs: summaries, outputs, errors, and raw records.',
     promptSnippet: 'Read subagent run records via agent://<namespace>/<runId>.',
+    exposure: 'deferred',
+    annotations: { readOnlyHint: true, openWorldHint: false },
     parameters: {
       type: 'object',
       required: ['uri'],
@@ -320,6 +357,8 @@ export default function agentUrls(pi: ExtensionAPI) {
       };
     },
   });
+
+  pi.on('session_start', () => declareUnlessSearchable(pi, ['list_agent_runs', 'read_agent_url']));
 
   pi.registerCommand('agent', {
     description: 'Inspect subagent runs: /agent list [query] | /agent read agent://<namespace>/<runId>',

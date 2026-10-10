@@ -96,6 +96,10 @@ Constants (hardcoded in `index.ts`):
 - `@earendil-works/pi-coding-agent` (peer, `*`) — `ExtensionAPI` (`registerTool`, `registerCommand`, `sendMessage`) and `ExtensionCommandContext` (`ctx.ui.notify`) types/APIs only.
 - Node builtins: `fs`, `os`, `path`. No npm runtime dependencies, no workspace deps.
 
+## Tool exposure
+
+`list_agent_runs` and `read_agent_url` register with `exposure: "deferred"` (pi ≥0.99), so they stay out of the system prompt when pi's built-in `tool_search` is active (`"defaultTools": ["+tool_search"]`): the model finds them on demand. Without `tool_search` the extension declares them directly at session start, as before. Older pi ignores the field. `list_agent_runs` declares an `outputSchema`, so codemode scripts get `{ runs: [{ url, runId, namespace, agent?, status?, durationMs?, prompt? }] }` instead of text. Tools also carry `annotations` (read-only/destructive/open-world hints) for permission extensions.
+
 ## Caveats
 
 - Depends on the shared runtime's on-disk record layout (`~/.pi/agent/subagent-runs/<namespace>/<runId>.json` and the `RunRecord` shape), which is not a stable API; a schema change silently reduces discovery to partial or empty results (all parse failures are swallowed).

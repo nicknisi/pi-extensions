@@ -567,6 +567,7 @@ export default function relay(pi: ExtensionAPI) {
   pi.registerTool({
     name: 'relay',
     label: 'Relay',
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     description:
       'Message other pi sessions on this machine. list/list-cwd return bounded pages of sessions, online first (offline sessions still receive mail); filter with presence or exact sessionIds. Target a full sessionId, address, name, or @alias. send returns a message id and delivered/queued/uncertain receipt. Reply to received messages or pending asks with explicit replyTo. ask waits for a correlated reply, default 120s. Also supports cancel, pending, status, claim, watch, and send broadcasts to "*" or "cwd". Plain text only, ≤32KB: send summaries and paths.',
     promptSnippet: 'Message other pi sessions on this machine',

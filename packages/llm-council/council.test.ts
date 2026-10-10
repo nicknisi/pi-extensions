@@ -95,6 +95,8 @@ function harness(mode: ExtensionContext['mode'] = 'tui') {
       commands.set(name, definition.handler),
     on: (name: string, handler: (event: unknown, ctx: ExtensionContext) => void) => events.set(name, handler),
     appendEntry,
+    getActiveTools: () => ['llm_council'],
+    setActiveTools: vi.fn(),
   } as unknown as ExtensionAPI;
   councilExtension(pi);
   const tool = registerTool.mock.calls[0]![0];

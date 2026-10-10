@@ -112,10 +112,14 @@ function compactRenderers(toolName: string, base: ToolRenderers | undefined): To
         return new Frame(component, paint(theme, context), true, () => !state[HAS_RESULT], context.outputPad);
       }
       const component = call();
-      return new Line(component, (width) => {
-        const title = renderedLines(component, width - 2).find((line) => /[\p{L}\p{N}]/u.test(line));
-        return theme.fg('toolTitle', `▸ ${title ?? argsTitle(toolName, args)}`);
-      }, paint(theme, context));
+      return new Line(
+        component,
+        (width) => {
+          const title = renderedLines(component, width - 2).find((line) => /[\p{L}\p{N}]/u.test(line));
+          return theme.fg('toolTitle', `▸ ${title ?? argsTitle(toolName, args)}`);
+        },
+        paint(theme, context),
+      );
     },
     renderResult(result, options, theme, context) {
       (context.state as Record<string, unknown>)[HAS_RESULT] = true;
@@ -128,31 +132,42 @@ function compactRenderers(toolName: string, base: ToolRenderers | undefined): To
       };
       if (options.expanded) {
         const component =
-          render(true) ?? new Text(textOf(result).map((line) => theme.fg('toolOutput', line)).join('\n'), 0, 0);
+          render(true) ??
+          new Text(
+            textOf(result)
+              .map((line) => theme.fg('toolOutput', line))
+              .join('\n'),
+            0,
+            0,
+          );
         if (passthrough) return component;
         return new Frame(component, paint(theme, context), false, () => true, context.outputPad);
       }
       const component = render(false);
       const color = context.isError ? 'error' : options.isPartial ? 'warning' : 'toolOutput';
-      return new Line(component, (width) => {
-        const rendered = renderedLines(component, width - 2);
-        const previewLines = rendered.length ? rendered : textOf(result);
-        let preview = previewLines[0] ?? (options.isPartial ? 'Running' : 'Done');
-        try {
-          const value: unknown = JSON.parse(previewLines.join('\n'));
-          if (Array.isArray(value)) preview = `${value.length} result items`;
-          else if (value && typeof value === 'object')
-            preview = `Structured result with ${Object.keys(value).length} fields`;
-        } catch {
-          if (preview === '{' || preview === '[' || preview.startsWith('{"')) preview = 'Structured output';
-        }
-        if (previewLines.length > 1) preview += ' …';
-        const images = result.content.filter((part) => part.type === 'image').length;
-        if (images) preview += ` [${images} image${images === 1 ? '' : 's'}]`;
-        if (context.isError) preview = `Error: ${preview}`;
-        const hint = ` [${keyText('app.tools.expand')}]`;
-        return theme.fg(color, truncateToWidth(`  ${preview}`, Math.max(0, width - hint.length)) + hint);
-      }, paint(theme, context));
+      return new Line(
+        component,
+        (width) => {
+          const rendered = renderedLines(component, width - 2);
+          const previewLines = rendered.length ? rendered : textOf(result);
+          let preview = previewLines[0] ?? (options.isPartial ? 'Running' : 'Done');
+          try {
+            const value: unknown = JSON.parse(previewLines.join('\n'));
+            if (Array.isArray(value)) preview = `${value.length} result items`;
+            else if (value && typeof value === 'object')
+              preview = `Structured result with ${Object.keys(value).length} fields`;
+          } catch {
+            if (preview === '{' || preview === '[' || preview.startsWith('{"')) preview = 'Structured output';
+          }
+          if (previewLines.length > 1) preview += ' …';
+          const images = result.content.filter((part) => part.type === 'image').length;
+          if (images) preview += ` [${images} image${images === 1 ? '' : 's'}]`;
+          if (context.isError) preview = `Error: ${preview}`;
+          const hint = ` [${keyText('app.tools.expand')}]`;
+          return theme.fg(color, truncateToWidth(`  ${preview}`, Math.max(0, width - hint.length)) + hint);
+        },
+        paint(theme, context),
+      );
     },
   };
 }

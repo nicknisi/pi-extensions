@@ -247,8 +247,9 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
   });
 
   // ── Auto-naming after the first exchange ──────────────────────────────
-  pi.on('agent_settled', async (_event, ctx) => {
-    if (autoNamed || config.autoName === 'off') return;
+  pi.on('agent_settled', async (event, ctx) => {
+    // A cancelled run's reply is incomplete; wait for a finished one.
+    if (autoNamed || config.autoName === 'off' || event.aborted) return;
     // Respect an existing name (set via /name, /sn, --name, or a prior turn).
     if (pi.getSessionName()) {
       autoNamed = true;

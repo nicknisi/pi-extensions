@@ -19,6 +19,7 @@
     "index.ts",
     "subagents.ts",
     "workflow.ts",
+    "tools.ts",
     "tui-utils.ts",
     "searchable-select-list.ts"
   ],
