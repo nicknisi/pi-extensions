@@ -17,7 +17,6 @@
   "files": [
     "dist",
     "index.ts",
-    "llm.ts",
     "subagents.ts",
     "workflow.ts",
     "tui-utils.ts",

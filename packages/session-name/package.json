@@ -26,12 +26,9 @@
       "default": "./dist/index.js"
     }
   },
-  "dependencies": {
-    "@nicknisi/pi-shared": "workspace:*"
-  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": ">=0.86.0"
   },
   "pi": {
     "extensions": [

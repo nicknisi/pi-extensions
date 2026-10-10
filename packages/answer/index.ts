@@ -1,5 +1,4 @@
 import type { Api, Model, UserMessage } from '@earendil-works/pi-ai';
-import { getModelProvider } from '@nicknisi/pi-shared';
 import { BorderedLoader, Theme, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { loadAnswerConfig, parseModelPreference, type ModelPreference } from './config.js';
 import {
@@ -522,18 +521,11 @@ export default function (pi: ExtensionAPI) {
           timestamp: Date.now(),
         };
 
-        const response = await getModelProvider(ctx, extractionModel)
-          .stream(
-            extractionModel,
-            { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-            {
-              ...(auth.apiKey !== undefined && { apiKey: auth.apiKey }),
-              ...(auth.headers !== undefined && { headers: auth.headers }),
-              ...(auth.env !== undefined && { env: auth.env }),
-              signal: loader.signal,
-            },
-          )
-          .result();
+        const response = await ctx.modelRegistry.complete(
+          extractionModel,
+          { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
+          { signal: loader.signal },
+        );
 
         if (response.stopReason === 'aborted') {
           return { type: 'cancelled' } as ExtractionOutcome;

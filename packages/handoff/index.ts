@@ -14,7 +14,6 @@
  */
 
 import type { Message } from '@earendil-works/pi-ai';
-import { getModelProvider } from '@nicknisi/pi-shared';
 import type { ExtensionAPI, SessionEntry } from '@earendil-works/pi-coding-agent';
 import { BorderedLoader, convertToLlm, serializeConversation } from '@earendil-works/pi-coding-agent';
 
@@ -105,7 +104,6 @@ export default function (pi: ExtensionAPI) {
               error: `No API key for ${ctx.model!.provider}/${ctx.model!.id}: ${auth.error}`,
             };
           }
-          const { apiKey, headers, env } = auth;
 
           const userMessage: Message = {
             role: 'user',
@@ -118,13 +116,11 @@ export default function (pi: ExtensionAPI) {
             timestamp: Date.now(),
           };
 
-          const response = await getModelProvider(ctx, ctx.model!)
-            .stream(
-              ctx.model!,
-              { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-              { apiKey, headers, env, signal: loader.signal },
-            )
-            .result();
+          const response = await ctx.modelRegistry.complete(
+            ctx.model!,
+            { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
+            { signal: loader.signal },
+          );
 
           if (response.stopReason === 'aborted') {
             return { text: null };

@@ -32,7 +32,6 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AssistantMessage, Message, ThinkingLevel } from '@earendil-works/pi-ai';
-import { getModelProvider } from '@nicknisi/pi-shared';
 import type { ExtensionAPI, SessionEntry, Theme } from '@earendil-works/pi-coding-agent';
 import { convertToLlm, CURRENT_SESSION_VERSION, getMarkdownTheme } from '@earendil-works/pi-coding-agent';
 import { loadBtwConfig, parseModelSpec } from './config.js';
@@ -471,7 +470,6 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`No API key for ${model.provider}/${model.id}: ${auth.error}`, 'error');
         return;
       }
-      const { apiKey, headers, env } = auth;
 
       const modelId = model.id;
       const modelName = `${model.provider}/${modelId}`;
@@ -509,15 +507,12 @@ export default function (pi: ExtensionAPI) {
           const signal = win.signal;
           const requestMessages = [...sideThread, makeUser(q)];
           try {
-            const stream = getModelProvider(ctx, model).streamSimple(
+            const stream = ctx.modelRegistry.streamSimple(
               model,
               { systemPrompt: SYSTEM_PROMPT, messages: requestMessages },
               // Spread conditionally: these are optional in SimpleStreamOptions,
               // and exactOptionalPropertyTypes rejects an explicit undefined.
               {
-                ...(apiKey !== undefined && { apiKey }),
-                ...(headers !== undefined && { headers }),
-                ...(env !== undefined && { env }),
                 ...(reasoning !== undefined && { reasoning }),
                 ...(signal !== undefined && { signal }),
               },

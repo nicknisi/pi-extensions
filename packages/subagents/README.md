@@ -116,7 +116,7 @@ This is **additive dual-write**, not a replacement: the bespoke `.json` run stor
 Compat caveats:
 
 - The mirror is written only when the owning pi session is persisted (i.e. `getSessionFile()` returns a path). In `pi -p` print mode or other in-memory hosts there is no owning session file, so no mirror is written — the bespoke `.json` record is still the source of truth.
-- `SessionManager` creates the JSONL lazily — only once the first assistant message is appended. A run that crashed before producing any assistant turn (kind `crashed`/`empty` with no assistant message) leaves no session file on disk; `record.sessionFile` is left undefined in that case rather than advertising a path to nothing.
+- A run that crashed before producing any assistant turn (kind `crashed`/`empty` with no assistant message) is not mirrored; `record.sessionFile` is left undefined rather than advertising a near-empty session.
 - The mirror reflects the child's messages as pi sees them (user prompt → assistant turns → tool results). It does **not** carry the subagent-specific metadata (runId, namespace, transcript summary, worktree/patch paths) — that lives only on the bespoke `.json` artifact, which is why both are kept.
 - Worktree-isolated runs mirror with the **worktree's** cwd (where the child actually ran), not the caller's cwd. The session header's `cwd` is honest about where the work happened.
 

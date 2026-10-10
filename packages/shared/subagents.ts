@@ -331,15 +331,12 @@ function writeSessionMirror(
       role === 'user' || role === 'assistant' || role === 'toolResult' || role === 'bashExecution' || role === 'custom'
     );
   });
-  if (safe.length === 0) return undefined;
+  // No assistant turn means the child crashed before replying: don't mirror it.
+  if (!safe.some((m) => m.role === 'assistant')) return undefined;
   try {
     const mgr = SessionManager.create(cwd, undefined, parentSession ? { parentSession } : undefined);
     for (const msg of safe) mgr.appendMessage(msg);
-    // SessionManager creates the JSONL lazily — only once the first assistant
-    // message is appended (see its _persist 'hasAssistant' gate). A child that
-    // crashed before producing any assistant turn therefore leaves no file on
-    // disk, and getSessionFile() would return a path to nothing. Only report a
-    // sessionFile when the mirror was actually written.
+    // SessionManager creates the JSONL lazily; only report a file that exists.
     const file = mgr.getSessionFile();
     return file && fs.existsSync(file) ? file : undefined;
   } catch {
