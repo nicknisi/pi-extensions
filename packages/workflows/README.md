@@ -58,7 +58,7 @@ Names are bare file stems (`research`, not `research.js`, never a path — `..` 
 
 ## Runs are visible
 
-Every `agent()` call spawns through `@nicknisi/pi-shared`'s subagent runtime with `artifactsDir` set to `~/.pi/agent/subagent-runs/`, namespace `workflows`, and the owning Pi session recorded. Active children therefore appear in that session's default `fleet` view; settled and machine-wide records remain available through the fleet's explicit `all` scope. `status <runId>` and `stop <runId>` here read from / cancel via the same runtime's run records — no parallel store. `stop` cancels in-flight spawns through a live `runId → AbortController` registry (mirroring subagents' cascading-cancellation); a run belonging to a different host process is reported as not cancellable from here.
+Every `agent()` call spawns through `@nicknisi/pi-shared`'s subagent runtime with `artifactsDir` set to `~/.pi/agent/subagent-runs/` (or `$PI_SUBAGENTS_DIR/runs/`), namespace `workflows`, and the owning Pi session recorded. Children use the parent session's model registry and, when a call names no model, its current model (see [subagents](../subagents/README.md#models-children-use-the-parents-registry)). Active children therefore appear in that session's default `fleet` view; settled and machine-wide records remain available through the fleet's explicit `all` scope. `status <runId>` and `stop <runId>` here read from / cancel via the same runtime's run records — no parallel store. `stop` cancels in-flight spawns through a live `runId → AbortController` registry (mirroring subagents' cascading-cancellation); a run belonging to a different host process is reported as not cancellable from here.
 
 ## Migration from `@quintinshaw/pi-dynamic-workflows`
 

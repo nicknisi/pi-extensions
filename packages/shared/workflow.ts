@@ -40,6 +40,7 @@ import * as path from 'node:path';
 import { promisify } from 'node:util';
 import type { TSchema } from 'typebox';
 import type { SpawnFailureKind, SpawnOptions, SpawnResult, SpawnUsage, SubagentRuntime } from './subagents.js';
+import { subagentsDir } from './subagents-dir.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -137,7 +138,7 @@ export interface WorkflowEvent {
 
 export interface RunWorkflowOptions {
   cwd: string;
-  /** Override the run directory (default: <agentDir>/workflow-runs/<name>-<timestamp>). */
+  /** Override the run directory (default: <agentDir>/workflow-runs/<name>-<timestamp>, or $PI_SUBAGENTS_DIR/workflow-runs/…). */
   runDir?: string;
   /** A prior run's directory; stages recorded ok there are skipped and their outcomes loaded. */
   resumeFrom?: string;
@@ -198,6 +199,8 @@ function errorMessage(err: unknown): string {
 }
 
 function defaultRunRoot(): string {
+  const override = subagentsDir('workflow-runs');
+  if (override) return override;
   const agentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), '.pi', 'agent');
   return path.join(agentDir, 'workflow-runs');
 }

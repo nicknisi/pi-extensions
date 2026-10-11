@@ -59,7 +59,7 @@ Tool usage (as called by the LLM):
 
 ## Run discovery
 
-Runs are discovered on every invocation by scanning `~/.pi/agent/subagent-runs/<namespace>/*.json`. Each file is a JSON `RunRecord`:
+Runs are discovered on every invocation by scanning `~/.pi/agent/subagent-runs/<namespace>/*.json` (or `$PI_SUBAGENTS_DIR/runs/<namespace>/*.json`, see below). Each file is a JSON `RunRecord`:
 
 ```json
 {
@@ -84,6 +84,7 @@ No config files are read. No per-run options.
 Environment variables:
 
 - `PI_CODING_AGENT_DIR` — pi agent directory. Defaults to `~/.pi/agent`. A leading `~/` is expanded. This determines where `subagent-runs/` is scanned.
+- `PI_SUBAGENTS_DIR` — when set, runs are read from `$PI_SUBAGENTS_DIR/runs/` instead, matching where the shared runtime writes them. Read on every call.
 
 Constants (hardcoded in `index.ts`):
 

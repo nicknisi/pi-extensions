@@ -41,7 +41,11 @@ importers:
 
   packages/adr: {}
 
-  packages/agent-urls: {}
+  packages/agent-urls:
+    dependencies:
+      '@nicknisi/pi-shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/answer:
     dependencies:

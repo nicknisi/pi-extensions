@@ -27,11 +27,12 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { ExtensionAPI, Theme, ThemeColor } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, ExtensionContext, Theme, ThemeColor } from '@earendil-works/pi-coding-agent';
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from '@earendil-works/pi-coding-agent';
 import { getKeybindings, Text } from '@earendil-works/pi-tui';
 import {
   createSubagentRuntime,
+  subagentsDir,
   runWorkflow,
   type RunWorkflowOptions,
   type SpawnOptions,
@@ -46,7 +47,8 @@ import {
 import { bundleRequire } from 'bundle-require';
 import { Type } from 'typebox';
 
-const ARTIFACTS_ROOT = path.join(getAgentDir(), 'subagent-runs');
+// Resolved at use: PI_SUBAGENTS_DIR (see @nicknisi/pi-shared) relocates every runtime write.
+const artifactsRoot = () => subagentsDir('runs') ?? path.join(getAgentDir(), 'subagent-runs');
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_RESULT_CHARS = 16 * 1024;
@@ -251,7 +253,14 @@ function spinnerDot(theme: Theme, frame: number): string {
 
 export default function codemode(pi: ExtensionAPI) {
   const config = loadConfig();
-  const runtime = createSubagentRuntime({ namespace: 'codemode', artifactsDir: ARTIFACTS_ROOT, maxConcurrent: 6 });
+  // Children share the parent session's model registry and default model.
+  let parentCtx: ExtensionContext | undefined;
+  const runtime = createSubagentRuntime({
+    namespace: 'codemode',
+    artifactsDir: artifactsRoot(),
+    maxConcurrent: 6,
+    parent: () => parentCtx,
+  });
 
   // Append a runscope span to the parent session JSONL. Best-effort: a ledger
   // write must never fail a codemode run.
@@ -309,6 +318,7 @@ export default function codemode(pi: ExtensionAPI) {
   const sessionResults: unknown[] = [];
 
   pi.on('session_start', (_event, ctx) => {
+    parentCtx = ctx;
     sessionResults.length = 0;
     try {
       for (const entry of ctx.sessionManager.getEntries()) {
