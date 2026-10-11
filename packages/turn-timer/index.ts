@@ -6,6 +6,9 @@
  * every LLM response, tool call, and tool result in the run, so a turn
  * with multiple tool-call rounds still produces a single timer row.
  *
+ * Time spent waiting on a ctx.ui prompt (ui_prompt_start/end) is left out,
+ * and cancelled runs are labelled.
+ *
  * Uses agent_start/agent_settled and renders the result as a custom
  * transcript entry that does NOT participate in LLM context, so it never
  * pollutes the conversation and /copy (which reads only assistant message
@@ -28,8 +31,8 @@ function formatDuration(seconds: number): string {
 export default function turnTimer(pi: ExtensionAPI) {
   // ── Render the timer row: a quiet dim line ───────────────────────────
   pi.registerEntryRenderer(CUSTOM_TYPE, (entry, _opts, theme) => {
-    const data = entry.data as { seconds: number };
-    const label = theme.fg('dim', `· ${formatDuration(data.seconds)}`);
+    const data = entry.data as { seconds: number; aborted?: boolean };
+    const label = theme.fg('dim', `· ${formatDuration(data.seconds)}${data.aborted ? ' (aborted)' : ''}`);
     return new Text(label, 0, 0);
   });
 
@@ -39,15 +42,29 @@ export default function turnTimer(pi: ExtensionAPI) {
   // follow-up remaining). This yields one row per user message, not one
   // per tool-call round.
   let start: number | undefined;
+  let promptStart: number | undefined;
+  let waited = 0;
 
   pi.on('agent_start', () => {
     start = Date.now();
+    promptStart = undefined;
+    waited = 0;
   });
 
-  pi.on('agent_settled', () => {
+  pi.on('ui_prompt_start', () => {
+    if (start !== undefined && promptStart === undefined) promptStart = Date.now();
+  });
+
+  pi.on('ui_prompt_end', () => {
+    if (promptStart === undefined) return;
+    waited += Date.now() - promptStart;
+    promptStart = undefined;
+  });
+
+  pi.on('agent_settled', (event) => {
     if (start === undefined) return;
-    const seconds = (Date.now() - start) / 1000;
+    const seconds = (Date.now() - start - waited) / 1000;
     start = undefined;
-    pi.appendEntry(CUSTOM_TYPE, { seconds });
+    pi.appendEntry(CUSTOM_TYPE, event.aborted ? { seconds, aborted: true } : { seconds });
   });
 }

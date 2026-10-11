@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, ExtensionToolContext, ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import extension from './index.js';
 
@@ -26,9 +26,13 @@ function setup(result = ok) {
     .mockImplementation(async (_command, args) =>
       args[0] === '--version' ? { ...ok, stdout: 'ast-grep 0.45.3' } : result,
     );
-  extension({ registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool), exec } as unknown as ExtensionAPI);
+  extension({
+    registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool),
+    on: () => {},
+    exec,
+  } as unknown as ExtensionAPI);
   const call = (name: string, params: Record<string, unknown>, signal?: AbortSignal) =>
-    tools.get(name)!.execute('test', params, signal, undefined, { cwd } as ExtensionContext);
+    tools.get(name)!.execute('test', params, signal, undefined, { cwd } as ExtensionToolContext);
   return { tools, exec, call };
 }
 const rewrite = { pattern: 'console.log($MSG)', replacement: 'logger.debug($MSG)' };

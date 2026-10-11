@@ -2,33 +2,11 @@
 
 Shared helper library for the extensions in this monorepo. It is not a pi extension itself — it exports no default extension entry, adds no commands, tools, keybindings, widgets, or events, and installing it into pi directly does nothing. Other packages depend on it via `"@nicknisi/pi-shared": "workspace:*"` and import from it like any library.
 
-It exists to centralize things that several extensions were duplicating: one-off LLM calls on pi-ai's modern provider API (no `/compat` imports), a set of TUI utilities (gradient text, renderable-tree surgery, two-column layout, escape-sequence sanitization, render dispatch) plus a composable searchable select component, and an in-process subagent runtime for spawning focused child agent sessions.
+It exists to centralize things that several extensions were duplicating: a set of TUI utilities (gradient text, an ANSI-stripping render probe, two-column layout, escape-sequence sanitization, render dispatch) plus a composable searchable select component, and an in-process subagent runtime for spawning focused child agent sessions.
 
 ## Exports
 
-`index.ts` re-exports everything from `llm.ts`, `tui-utils.ts`, `searchable-select-list.ts`, and `subagents.ts`.
-
-### LLM (`llm.ts`)
-
-```ts
-import { getModelProvider } from '@nicknisi/pi-shared';
-```
-
-`getModelProvider(ctx, model)` resolves the composed runtime provider for a model via `ctx.modelRegistry.getProvider(model.provider)`. Unlike compat's global API dispatch, this honors `models.json` overrides and extension-registered providers. Throws `No provider registered for <provider>` if unregistered.
-
-`ctx` only needs a `modelRegistry` (`Pick<ExtensionContext, "modelRegistry">`), so non-extension callers can pass a narrower object.
-
-Migration cheat sheet from the compat API (documented in the source header):
-
-```ts
-// compat complete(model, ctx, opts)
-getModelProvider(ctx, model).stream(model, ctx, opts).result();
-
-// compat streamSimple(model, ctx, opts)
-getModelProvider(ctx, model).streamSimple(model, ctx, opts);
-```
-
-Auth stays explicit: pass `apiKey`/`headers` from `ctx.modelRegistry.getApiKeyAndHeaders(model)` in the stream options.
+`index.ts` re-exports everything from `tui-utils.ts`, `searchable-select-list.ts`, `subagents.ts`, `subagents-dir.ts` (`PI_SUBAGENTS_DIR` paths), `workflow.ts` (`runWorkflow`), `patches.ts` (`parseUnifiedDiff` for worktree patch handoffs), and `tools.ts` (`declareUnlessSearchable`).
 
 ### TUI utilities (`tui-utils.ts`)
 
@@ -37,29 +15,25 @@ import {
   columns,
   formatDirectory,
   gradientText,
-  hideLabeledSection,
   sanitizeTerminalLabel,
   // ...
 } from '@nicknisi/pi-shared';
 ```
 
-Six self-contained patterns, adapted from a pi dashboard extension:
+Self-contained patterns, adapted from a pi dashboard extension:
 
-| Export                                             | What it does                                                                                                                                                                                                                                                                 |
-| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `gradientText(text, phase, palette?)`              | Per-character truecolor gradient. `phase` shifts the gradient (use `rowIndex * k` to stagger multi-line art). Spaces pass through uncolored.                                                                                                                                 |
-| `sampleGradient(position, palette?)`               | Sample a wrapping gradient at `position` (0..1, wraps modulo 1); adjacent palette stops are linearly interpolated.                                                                                                                                                           |
-| `DEFAULT_PALETTE`, `RESET`                         | Default blue-leaning 6-stop RGB palette; ANSI reset code.                                                                                                                                                                                                                    |
-| `hideLabeledSection(root, label)`                  | Walk a renderable tree, find the first child whose first non-empty rendered line equals `label`, splice it out (plus one trailing blank-line sibling), and `invalidate()` the root. Returns `true` if removed. Original use: stripping pi's auto-injected `[Themes]` widget. |
-| `scheduleHideLabeledSection(root, label, delays?)` | Progressive-poll removal at `[0, 50, 250, 1000]` ms for asynchronously injected nodes; calls `root.requestRender(true)` on success. Returns timers.                                                                                                                          |
-| `clearHideTimers(timers)`                          | Teardown for the above.                                                                                                                                                                                                                                                      |
-| `columns(left, right, width)`                      | Two-column line layout. Pads the gap when both sides fit; otherwise shrinks left to ~45% and right to the remainder with a minimum 1-space gap, truncating via pi-tui's `truncateToWidth`.                                                                                   |
-| `sanitizeTerminalLabel(text)`                      | Strip OSC, CSI, other escape sequences, and C0/C1 control chars from user-controllable strings before rendering (prevents escape injection and layout breakage).                                                                                                             |
-| `formatDirectory(cwd)`                             | Collapse `$HOME` to `~` for display, then sanitize.                                                                                                                                                                                                                          |
-| `renderedText(node, width = 200)`                  | Render a node to a throwaway 200-wide buffer and strip ANSI — introspect a component whose API only exposes `render(width)`. Returns `""` if `render` throws.                                                                                                                |
-| `createRenderDispatcher()`                         | Reassignable render thunk so event sources can trigger redraws without knowing which surface is bound. `bind(tui)` points `requestRender()` at `tui.requestRender()`; `unbind()` clears it.                                                                                  |
+| Export                                | What it does                                                                                                                                                                                |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gradientText(text, phase, palette?)` | Per-character truecolor gradient. `phase` shifts the gradient (use `rowIndex * k` to stagger multi-line art). Spaces pass through uncolored.                                                |
+| `sampleGradient(position, palette?)`  | Sample a wrapping gradient at `position` (0..1, wraps modulo 1); adjacent palette stops are linearly interpolated.                                                                          |
+| `DEFAULT_PALETTE`, `RESET`            | Default blue-leaning 6-stop RGB palette; ANSI reset code.                                                                                                                                   |
+| `columns(left, right, width)`         | Two-column line layout. Pads the gap when both sides fit; otherwise shrinks left to ~45% and right to the remainder with a minimum 1-space gap, truncating via pi-tui's `truncateToWidth`.  |
+| `sanitizeTerminalLabel(text)`         | Strip OSC, CSI, other escape sequences, and C0/C1 control chars from user-controllable strings before rendering (prevents escape injection and layout breakage).                            |
+| `formatDirectory(cwd)`                | Collapse `$HOME` to `~` for display, then sanitize.                                                                                                                                         |
+| `renderedText(node, width = 200)`     | Render a node to a throwaway 200-wide buffer and strip ANSI — introspect a component whose API only exposes `render(width)`. Returns `""` if `render` throws.                               |
+| `createRenderDispatcher()`            | Reassignable render thunk so event sources can trigger redraws without knowing which surface is bound. `bind(tui)` points `requestRender()` at `tui.requestRender()`; `unbind()` clears it. |
 
-Shared structural types: `RenderableNode` (`children?`, `invalidate()`, `render(width)`), `RequestRenderable` (adds `requestRender(force?)`), `RenderDispatcher`. These are subsets of pi's own `RenderableNode` and are structurally compatible with `@earendil-works/pi-coding-agent` components.
+Shared structural types: `RenderableNode` (`children?`, `invalidate()`, `render(width)`), `RenderDispatcher`. These are subsets of pi's own `RenderableNode` and are structurally compatible with `@earendil-works/pi-coding-agent` components.
 
 ### Searchable select (`searchable-select-list.ts`)
 
@@ -120,13 +94,13 @@ Design rules baked in:
 - **The supervisor channel is a closure.** `onSupervisorRequest` registers a `<namespace>_contact_supervisor` tool in the child wired straight to the parent handler — no filesystem protocol, no polling.
 - **Ecosystem recursion guard, honored not namespaced.** Spawning is refused when `PI_SUBAGENT_DEPTH` / `PI_SUBAGENT_CHILD` are set (i.e. your extension is itself running inside a pi-subagents child).
 - **Live usage.** `onUsage` receives cumulative input, output, total-token, and optional cost data after each completed assistant response. The current total is also mirrored onto the live `RunRecord`, so registry-backed views can display token burn before the run settles. Observer errors never fail the child.
-- **Run registry + background.** `listRuns()` returns recent runs (newest first, capped at 200); `activeCount()` reports in-flight spawns. `spawnDetached()` launches without awaiting, returning `{ runId, done }` for background work. Concurrency is capped per runtime (`maxConcurrent`, default 4) AND process-wide per module instance (`GLOBAL_MAX_CHILDREN = 8`), which covers the realistic stacking case — a codemode workflow nesting further spawns. pi's loader gives every extension its own evaluated copy of this module, so a _cross-extension_ limiter is impossible without a file lock (overkill) — size each runtime accordingly.
+- **Run registry + background.** `listRuns()` returns recent runs (newest first, capped at 200); `activeCount()` reports in-flight spawns. `spawnDetached()` launches without awaiting, returning `{ runId, done }` for background work. Concurrency is capped per runtime (`maxConcurrent`, default 4) AND process-wide per module instance (`GLOBAL_MAX_CHILDREN = 8`), which covers the realistic stacking case — a workflow nesting further spawns. pi's loader gives every extension its own evaluated copy of this module, so a _cross-extension_ limiter is impossible without a file lock (overkill) — size each runtime accordingly.
 - **Worktree isolation.** `spawn({ worktree: true })` runs the child in a detached git worktree (`~/.pi/agent/subagent-worktrees/<runId>`, from HEAD). On settle, the full delta — including untracked files, via `git add -A` + `git diff --cached HEAD` — is captured untruncated to `<runId>.patch` beside the run artifact, and `RunRecord.worktree` records `{ path, repoRoot, patchPath, changedFiles }`. Merge-back is the caller's decision (central integration). Fails fast with `kind: 'crashed'` when cwd isn't in a git repo.
 - **Persisted run artifacts.** With `artifactsDir` on `createSubagentRuntime`, every run persists its record (status, timing, usage, bounded output, last-20-events transcript, worktree handoff, and `ownerSession` when supplied) to `<dir>/<namespace>/<runId>.json` on each status transition and usage update — the cross-extension fleet view, since the on-disk root is the only layer pi's module isolation leaves shared. `readRunArtifacts(rootDir)` reads records across namespaces. `sweepRunArtifactsOnce(rootDir)` (call at extension init) garbage-collects records older than 7 days — with their `.patch` siblings and worktrees — and reaps ghost `running`/`queued` records whose `hostPid` belongs to a dead process (marked `aborted`, **and their worktrees removed**, so the fleet shows the truth after a host crash without leaking detached worktrees).
-- **Standard pi session mirror (dual-write).** `spawn({ ownerSession })` records ownership on `RunRecord.ownerSession` without enabling a mirror. `spawn({ parentSession })` uses the same path as the owner and ALSO persists the run as a standard pi session JSONL via the real `SessionManager` into the default sessions dir, with the header's `parentSession` linked to the owning session — so runs are inspectable with pi's native `/resume`, `/tree`, and `--fork`. The child mirror path is recorded separately on `RunRecord.sessionFile`. Additive: the bespoke `.json` artifact is still written and is what `readRunArtifacts`/fleet read. Opt-in: when `parentSession` is omitted, no mirror is written (so other shared-runtime consumers are unaffected). `SessionManager` creates the JSONL lazily on the first assistant message, so a run that produced no assistant turn leaves no file and `sessionFile` is `undefined`.
+- **Standard pi session mirror (dual-write).** `spawn({ ownerSession })` records ownership on `RunRecord.ownerSession` without enabling a mirror. `spawn({ parentSession })` uses the same path as the owner and ALSO persists the run as a standard pi session JSONL via the real `SessionManager` into the default sessions dir, with the header's `parentSession` linked to the owning session — so runs are inspectable with pi's native `/resume`, `/tree`, and `--fork`. The child mirror path is recorded separately on `RunRecord.sessionFile`. Additive: the bespoke `.json` artifact is still written and is what `readRunArtifacts`/fleet read. Opt-in: when `parentSession` is omitted, no mirror is written (so other shared-runtime consumers are unaffected). A run that produced no assistant turn is not mirrored, so `sessionFile` is `undefined`.
 - **Timeout/abort/budgets.** `timeoutMs` (default 15 min, `0` disables) and `signal` both map to `session.abort()`; `maxTurns` / `maxToolCalls` abort the child when exceeded. All three produce `kind: 'aborted'` with a reason-specific error.
 
-- **Parent model registry.** Pass `parent: () => ctx` (the latest `ExtensionContext`, read at each spawn) to `createSubagentRuntime` and children share the parent session's model runtime, so providers registered at runtime (`pi.registerProvider`) carry over with their auth and headers. A spawn with no `model` then defaults to the parent's current model; an explicit `model` resolves against the same registry. pi has no public accessor for a registry's runtime, so `parentModelRuntime(registry)` reads `ModelRegistry`'s private `runtime` field (checked on pi-coding-agent 0.84 and 0.87) and, if it's gone, replays the parent's runtime-registered providers into a fresh runtime (losing runtime `--api-key` keys and host credential stores). If `parent` is configured but returns nothing or throws (a stale context), the spawn fails closed with kind `crashed` instead of falling back to the user's default provider. Without `parent`, models resolve from a fresh `ModelRuntime.create()` as before.
+- **Parent model registry.** Pass `parent: () => ctx` (the latest `ExtensionContext`, read at each spawn) to `createSubagentRuntime` and children share the parent session's model runtime, so providers registered at runtime (`pi.registerProvider`) carry over with their auth and headers. A spawn with no `model` then defaults to the parent's current model; an explicit `model` resolves against the same registry. pi has no public accessor for a registry's runtime, so `parentModelRuntime(registry)` reads `ModelRegistry`'s private `runtime` field (checked on pi-coding-agent 0.84, 0.87 and 1.1) and, if it's gone, replays the parent's runtime-registered providers into a fresh runtime (losing runtime `--api-key` keys and host credential stores). If `parent` is configured but returns nothing or throws (a stale context), the spawn fails closed with kind `crashed` instead of falling back to the user's default provider. Without `parent`, models resolve from a fresh `ModelRuntime.create()` as before.
 - **`PI_SUBAGENTS_DIR`.** `subagentsDir(leaf)` returns `<$PI_SUBAGENTS_DIR>/<leaf>` when the env var is set, else `undefined` (keep your default). The runtime uses it for worktrees (`worktrees`), session mirrors (`sessions`) and workflow run dirs (`workflow-runs`); extensions use it for `runs` (their `artifactsDir`) and `patches`. Read at call time.
 
 Also exported: `resolveContainedAgentResource(kind, name, leaf)` — containment-checked resolution of a bare name under the agent dir (`~/.pi/agent/extensions/<name>/<leaf>` etc.) for untrusted config input; returns `null` for anything with path separators or `..`. And `sweepRunArtifacts(rootDir, { now?, retentionMs? })` for direct GC control (returns `{ deleted, reaped }`).
@@ -196,7 +170,17 @@ Consumers in this monorepo add the workspace dependency:
 }
 ```
 
-and import individual functions as shown above. Known consumers: `answer`, `btw`, `handoff`, `header`, `llm-council`, `session-name`, `statusline`.
+and import individual functions as shown above. Known consumers: `header`, `llm-council`, `statusline`, `subagents`, `workflows`.
+
+### Tool exposure (`tools.ts`)
+
+```ts
+import { declareUnlessSearchable } from '@nicknisi/pi-shared';
+
+pi.on('session_start', () => declareUnlessSearchable(pi, ['my_tool']));
+```
+
+For tools registered with `exposure: 'deferred'`: when pi's built-in `tool_search` is not active, adds them to the active tool set so the model can still reach them. With `tool_search` active it does nothing and the tools stay out of the system prompt. It only declares tools pi still has registered: an explicit `--tools` allowlist or `--exclude-tools` removes unnamed extension tools from the registry, so the fallback never re-enables them.
 
 ## Configuration
 
@@ -216,7 +200,7 @@ pi would load the package and find no extension entry point.
 
 Peer dependencies (all `*`, provided by the pi runtime):
 
-- `@earendil-works/pi-ai` — types (`Api`, `Model`, `Provider`) for `getModelProvider`.
+- `@earendil-works/pi-ai` — types.
 - `@earendil-works/pi-coding-agent` — `ExtensionContext` type; the `RenderableNode` shape targets its component tree.
 - `@earendil-works/pi-tui` — `truncateToWidth`, `visibleWidth` (layout), and `Container`, `Input`, `SelectList`, `getKeybindings` (searchable select).
 
@@ -226,9 +210,6 @@ Runtime npm dependencies:
 
 ## Caveats
 
-- `getModelProvider` depends on pi-ai's provider-owns-streaming architecture and `ModelRegistry.getProvider()` returning the composed runtime provider. Both are current pi internals and could change across pi versions; the compat API this replaces is the canary — if pi-ai restructures provider resolution again, this needs to move with it.
-- `hideLabeledSection` relies on rendering children to a throwaway buffer to compare visible text — it depends on `render(width)` being side-effect-free enough to call speculatively, and on target sections having a stable first visible line (pi's `[Themes]` widget label is a pi internal that could change).
-- `scheduleHideLabeledSection` is a timing heuristic (`[0, 50, 250, 1000]` ms) for asynchronously injected nodes; a sufficiently slow injection can slip past the last poll.
 - `SearchableSelectList` hardcodes the `tui.select.*` keybinding IDs from pi-tui. If those IDs are renamed, navigation silently stops routing.
 - `package.json` `files` lists every shipped source plus `dist`; `pnpm pack`/publish produces a working tarball.
 - The package is marked `private: true` and ships TypeScript sources (`exports: { ".": "./index.ts" }`); consumers must run in pi's TS-loading extension environment, not plain Node.

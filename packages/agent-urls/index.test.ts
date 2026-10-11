@@ -21,7 +21,11 @@ it('reads run records from $PI_SUBAGENTS_DIR/runs when set', async () => {
     );
     process.env.PI_SUBAGENTS_DIR = root;
     const tools = new Map<string, { execute: (...args: any[]) => Promise<{ content: { text: string }[] }> }>();
-    agentUrls({ registerTool: (t: any) => tools.set(t.name, t), registerCommand: () => {} } as unknown as ExtensionAPI);
+    agentUrls({
+      registerTool: (t: any) => tools.set(t.name, t),
+      registerCommand: () => {},
+      on: () => {},
+    } as unknown as ExtensionAPI);
     const listed = await tools.get('list_agent_runs')!.execute('id', {});
     expect(listed.content[0]!.text).toContain('agent://subagents/abc123');
     const read = await tools.get('read_agent_url')!.execute('id', { uri: 'agent://subagents/abc123' });

@@ -7,7 +7,7 @@
 # against claude-haiku-4-5.
 set -u
 PKG="$(cd "$(dirname "${BASH_SOURCE[0]}")/../packages" && pwd)"
-EXTS="-ne -e $PKG/llm-council/index.ts -e $PKG/subagents/index.ts -e $PKG/codemode/index.ts -e $PKG/relay/index.ts"
+EXTS="-ne -e $PKG/llm-council/index.ts -e $PKG/subagents/index.ts -e $PKG/workflows/index.ts -e $PKG/relay/index.ts"
 export PI_RELAY_DIR=/tmp/smoke-relay
 rm -rf /tmp/smoke-relay /tmp/smoke-a /tmp/smoke-b /tmp/smoke-council
 mkdir -p /tmp/smoke-a /tmp/smoke-b /tmp/smoke-council/.pi/configs
@@ -42,29 +42,25 @@ echo "── 3/7 fleet: persisted runs visible"
 cd /tmp/smoke-a && pi -p --no-session $EXTS "Use the fleet tool with action list. How many runs do you see and from which namespaces? Answer briefly." > /tmp/smoke-3.log 2>&1
 check "fleet lists persisted dispatch runs" /tmp/smoke-3.log "subagents"
 
-echo "── 4/7 codemode: spawn composition"
-cd /tmp/smoke-a && pi -p --no-session $EXTS 'Use the codemode tool exactly once with this code (pass it through verbatim):
-const [a, b] = await Promise.all([
-  spawn({ prompt: "Answer with just the number: 6*7", model: "anthropic/claude-haiku-4-5", tools: [] }),
-  spawn({ prompt: "Answer with just the word: opposite of hot", model: "anthropic/claude-haiku-4-5", tools: [] })
+echo "── 4/7 workflow: parallel agent fan-out"
+cd /tmp/smoke-a && pi -p --no-session $EXTS 'Use the workflow tool exactly once with action run and this script (pass it through verbatim):
+const opts = { model: "anthropic/claude-haiku-4-5", tools: [] };
+const [a, b] = await parallel([
+  () => agent("Answer with just the number: 6*7", opts),
+  () => agent("Answer with just the word: opposite of hot", opts),
 ]);
-export default { product: a.ok ? a.text : "ERR", opposite: b.ok ? b.text : "ERR" };
+return { product: a, opposite: b };
 Report the result.' > /tmp/smoke-4.log 2>&1
-check "codemode Promise.all spawn fan-out" /tmp/smoke-4.log "42"
-grep -qi "cold" /tmp/smoke-4.log && echo "   (cold ✓)" || { echo "❌ FAIL: codemode cold"; FAIL=$((FAIL+1)); }
+check "workflow parallel fan-out" /tmp/smoke-4.log "42"
+grep -qi "cold" /tmp/smoke-4.log && echo "   (cold ✓)" || { echo "❌ FAIL: workflow cold"; FAIL=$((FAIL+1)); }
 
-echo "── 5/7 codemode runWorkflow: 2-stage DAG with typed handoff"
-cd /tmp/smoke-a && pi -p --no-session $EXTS 'Use the codemode tool exactly once with this code (pass it through verbatim):
-const r = await runWorkflow({
-  name: "smoke",
-  stages: [
-    { id: "a", needs: [], model: "anthropic/claude-haiku-4-5", tools: [], prompt: "Answer with just the number: 9*9" },
-    { id: "b", model: "anthropic/claude-haiku-4-5", tools: [], prompt: (ctx) => `Stage a answered: "${ctx.results.a.ok ? ctx.results.a.output : "?"}" — restate the number and append DONE.` }
-  ]
-});
-export default { ok: r.ok, b: r.outcomes.b.ok ? r.outcomes.b.output : "FAILED" };
+echo "── 5/7 workflow: 2-stage handoff"
+cd /tmp/smoke-a && pi -p --no-session $EXTS 'Use the workflow tool exactly once with action run and this script (pass it through verbatim):
+const opts = { model: "anthropic/claude-haiku-4-5", tools: [] };
+const a = await agent("Answer with just the number: 9*9", opts);
+return await agent(`Stage a answered: "${a}" — restate the number and append DONE.`, opts);
 Report what came back.' > /tmp/smoke-5.log 2>&1
-check "runWorkflow typed handoff (81 + DONE)" /tmp/smoke-5.log "81"
+check "workflow handoff (81 + DONE)" /tmp/smoke-5.log "81"
 grep -q "DONE" /tmp/smoke-5.log && echo "   (DONE ✓)" || { echo "❌ FAIL: workflow DONE"; FAIL=$((FAIL+1)); }
 
 echo "── 6/7 llm-council: members + chairman synthesis"

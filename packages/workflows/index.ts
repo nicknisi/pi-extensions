@@ -38,6 +38,7 @@ import {
   type SpawnOptions,
   type SpawnResult,
   type SubagentRuntime,
+  declareUnlessSearchable,
 } from '@nicknisi/pi-shared';
 import { Type } from 'typebox';
 import {
@@ -344,9 +345,14 @@ export default function workflows(pi: ExtensionAPI): void {
     parentCtx = ctx;
   });
 
+  pi.on('session_start', () => declareUnlessSearchable(pi, ['workflow']));
+
   pi.registerTool({
     name: 'workflow',
     label: 'Workflow',
+    exposure: 'deferred',
+    // Scripts run host-process JS and child agents may edit files or reach the network.
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     description: [
       'Run a JavaScript workflow script that orchestrates subagents, or manage runs. Actions: run,',
       'list (saved workflow files), status (run record by runId), stop, pause, resume (hold active',

@@ -1,6 +1,6 @@
 # @nicknisi/pi-statusline
 
-Custom footer for pi's TUI, replacing the default footer with a single-line statusline showing model, session cost, lines changed, Anthropic usage limits, context window usage, and git branch/PR. Also writes tmux status files (`working`/`done`/`idle`) to `~/.cache/pi-status/` so tmux sidebars and other tooling can display per-pane agent state.
+Custom footer for pi's TUI, replacing the default footer with a single-line statusline showing model, session cost, lines changed, Anthropic usage limits, context window usage, and git branch/PR. Also writes tmux status files (`working`/`permit`/`question`/`done`/`idle`) to `~/.cache/pi-status/` so tmux sidebars and other tooling can display per-pane agent state.
 
 ## Install
 
@@ -23,15 +23,17 @@ There are no slash commands, tools, keybindings, widgets, or custom message/entr
 
 ### Events hooked
 
-| Event                   | Action                                                                                        |
-| ----------------------- | --------------------------------------------------------------------------------------------- |
-| `session_start`         | Installs the footer; writes `idle` status                                                     |
-| `agent_start`           | Writes `working` status                                                                       |
-| `tool_execution_start`  | Writes `working` status with `toolName`                                                       |
-| `turn_start`            | Re-writes `working` to keep the status-file timestamp fresh during long tool-less generations |
-| `agent_end`             | Writes `done` status; spawns `claude-notify waiting <session> <pane>` (detached)              |
-| `session_shutdown`      | Removes the pane's status file                                                                |
-| `thinking_level_select` | Triggers a footer re-render so the new level shows immediately                                |
+| Event                   | Action                                                                                          |
+| ----------------------- | ----------------------------------------------------------------------------------------------- |
+| `session_start`         | Installs the footer; writes `idle` status                                                       |
+| `agent_start`           | Writes `working` status                                                                         |
+| `tool_execution_start`  | Writes `working` status with `toolName`                                                         |
+| `turn_start`            | Re-writes `working` to keep the status-file timestamp fresh during long tool-less generations   |
+| `agent_end`             | Writes `done` status; spawns `claude-notify waiting <session> <pane>` (detached)                |
+| `ui_prompt_start`       | Writes `permit` (confirm dialogs) or `question` (other `ctx.ui` prompts), `tool` = prompt title |
+| `ui_prompt_end`         | Restores `working` (mid-run) or the state from before the prompt                                |
+| `session_shutdown`      | Removes the pane's status file                                                                  |
+| `thinking_level_select` | Triggers a footer re-render so the new level shows immediately                                  |
 
 ## Checkpoint integration
 
@@ -61,7 +63,7 @@ Path: `~/.cache/pi-status/<pane>.status` where `<pane>` is `TMUX_PANE` with the 
 }
 ```
 
-- `state` is one of `working`, `done`, `idle` (the function signature also accepts `completed`, unused in practice).
+- `state` is one of `working`, `permit`, `question`, `done`, `idle` (the function signature also accepts `completed`, unused in practice). `permit`/`question` match the states fleet's Claude Code hooks write for approval dialogs and questions; they need pi ≥0.85 (`ui_prompt_*` events).
 - `tool` is the tool name from `tool_execution_start`, else `""`.
 - `ts` is a unix timestamp; external consumers can treat a stale `working` state as idle (the code comments mention a 180s decay in "fleet").
 - The tmux session name is resolved with `tmux display-message -p '#{session_name}'`, falling back to parsing the socket path in `$TMUX`.

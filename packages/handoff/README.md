@@ -33,11 +33,10 @@ None. No config files, no options, no environment variables. Uses whatever model
 
 ## Dependencies
 
-- `@earendil-works/pi-coding-agent` (peer): `ExtensionAPI`, `SessionEntry` types; `BorderedLoader`, `convertToLlm`, `serializeConversation` runtime imports.
+- `@earendil-works/pi-coding-agent` (peer, `>=0.86.0`): `ExtensionAPI`, `SessionEntry` types; `BorderedLoader`, `convertToLlm`, `serializeConversation` runtime imports.
 - `@earendil-works/pi-ai` (peer): `Message` type; provider streaming via the model registry.
-- `@nicknisi/pi-shared` (workspace): `getModelProvider(ctx, model)` — resolves the composed runtime provider from `ctx.modelRegistry`, honoring `models.json` overrides and extension-registered providers.
 
-Auth is resolved per-call via `ctx.modelRegistry.getApiKeyAndHeaders(ctx.model)`; a missing API key aborts with an error notification.
+The handoff prompt is generated with `ctx.modelRegistry.complete(ctx.model, { systemPrompt, messages }, { signal })` (pi `>=0.86.0`), which applies `models.json` overrides, extension-registered providers, and request-time auth. A `ctx.modelRegistry.getApiKeyAndHeaders(ctx.model)` pre-check aborts with an error notification when no API key is configured.
 
 ## Caveats
 

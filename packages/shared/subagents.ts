@@ -337,15 +337,12 @@ function writeSessionMirror(
       role === 'user' || role === 'assistant' || role === 'toolResult' || role === 'bashExecution' || role === 'custom'
     );
   });
-  if (safe.length === 0) return undefined;
+  // No assistant turn means the child crashed before replying: don't mirror it.
+  if (!safe.some((m) => m.role === 'assistant')) return undefined;
   try {
     const mgr = SessionManager.create(cwd, subagentsDir('sessions'), parentSession ? { parentSession } : undefined);
     for (const msg of safe) mgr.appendMessage(msg);
-    // SessionManager creates the JSONL lazily — only once the first assistant
-    // message is appended (see its _persist 'hasAssistant' gate). A child that
-    // crashed before producing any assistant turn therefore leaves no file on
-    // disk, and getSessionFile() would return a path to nothing. Only report a
-    // sessionFile when the mirror was actually written.
+    // SessionManager creates the JSONL lazily; only report a file that exists.
     const file = mgr.getSessionFile();
     return file && fs.existsSync(file) ? file : undefined;
   } catch {
@@ -603,7 +600,7 @@ let warnedReplay = false;
  *
  * PRIVATE REACH: pi exposes no public way to get a ModelRegistry's runtime,
  * and createAgentSession only takes a ModelRuntime. `runtime` is a private
- * field of ModelRegistry (checked against pi-coding-agent 0.84 and 0.87). A
+ * field of ModelRegistry (checked against pi-coding-agent 0.84, 0.87 and 1.1). A
  * public accessor upstream would remove this helper.
  *
  * Fallback when the field is gone: replay the parent's runtime-registered

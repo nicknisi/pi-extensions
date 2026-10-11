@@ -31,9 +31,10 @@ No npm runtime dependencies, no workspace deps.
 
 ## Caveats
 
-- Depends on pi extension internals: `registerEntryRenderer`, `appendEntry`, and the `agent_start` / `agent_settled` event names. A pi release that renames these APIs or events breaks the extension.
+- Depends on pi extension internals: `registerEntryRenderer`, `appendEntry`, and the `agent_start` / `agent_settled` / `ui_prompt_*` event names. A pi release that renames these APIs or events breaks the extension.
 - Relies on the theme's `"dim"` foreground color existing; unusual themes could render the row differently.
-- Uses wall-clock time (`Date.now()`), so the measurement includes any time the session sat idle mid-turn (e.g. waiting on an interactive tool prompt or permission prompt).
+- Uses wall-clock time (`Date.now()`) minus time spent waiting on `ctx.ui` prompts (`ui_prompt_start`/`ui_prompt_end`, pi ≥0.85). Waits that don't go through `ctx.ui` are still counted.
+- Cancelled runs (`agent_settled` `aborted`, pi ≥1.1) are labelled `(aborted)`; older pi shows them unlabelled.
 - No platform-specific behavior; works anywhere pi runs.
 
 ## Install

@@ -1,12 +1,12 @@
 # @nicknisi/pi-orchestrate
 
-Evidence-aware `/goal` and recurring `/loop` for pi. `/goal <condition>` keeps working until a sidecar using the **current session's model** finds cited evidence of completion, or pauses when verification or continuation budgets fail. No Jev, separate provider, or additional credentials are needed. `/loop [interval] <prompt>` re-runs a prompt on a timer or self-paced after every `agent_end`. One goal and one loop per session; state persists to disk keyed to the owning session file so it survives `--resume` without leaking into other sessions sharing the same cwd.
+Evidence-aware `/goal` and recurring `/loop` for pi. `/goal <condition>` keeps working until a sidecar using the **current session's model** finds cited evidence of completion, or pauses when verification or continuation budgets fail. No Jev, separate provider, or additional credentials are needed. `/loop [interval] <prompt>` re-runs a prompt on a timer or self-paced after every run settles. One goal and one loop per session; state persists to disk keyed to the owning session file so it survives `--resume` without leaking into other sessions sharing the same cwd.
 
 ## What it adds
 
 - Slash commands: `/goal`, `/loop`
 - Status line entry (`pi-goal`): shows active/paused goal (duration, runs/budget) or loop (pace, runs)
-- Events hooked: `session_start`, `agent_end`, `session_compact`, `session_shutdown`, `turn_start`
+- Events hooked: `session_start`, `agent_end`, `agent_settled`, `session_compact`, `session_shutdown`, `turn_start`
 - Files read/written: `<cwd>/.pi-goal/state.json`, `<cwd>/.pi-loop.md`
 - No tools, no widgets, no keybindings, no custom message/entry types
 
@@ -50,7 +50,7 @@ Example:
 Two pacing modes:
 
 - **Timer-paced**: leading interval token — `Nms`, `Ns`, `Nm`, `Nh` (e.g. `5m`, `30s`). Fires on a `setTimeout` regardless of session activity.
-- **Self-paced**: no interval. The prompt is re-sent ~1.5s after each `agent_end` (delay avoids losing the message at the teardown boundary).
+- **Self-paced**: no interval. The prompt is re-sent from `agent_settled` (pi defers runs requested there until every settled handler finishes, so the message is never lost at the teardown boundary).
 
 ```
 /loop 5m check if the deploy finished
@@ -99,14 +99,13 @@ Restoration happens on `session_start`; a timer-driven loop is re-armed. The leg
 
 ## The evaluator
 
-Implemented as a throwaway `createAgentSession` with:
+A single `ctx.modelRegistry.streamSimple()` call (request-time auth, no sub-session) with:
 
-- the current session's model and model runtime (`ctx.model`, `ctx.modelRegistry.runtime`)
-- `thinkingLevel: "minimal"`
-- `tools: []` — judges evidence but cannot run commands or inspect files itself
-- an empty `ResourceLoader` (no extensions, skills, prompts, themes, agents files) with a synthetic system prompt requiring JSON: `verdict`, `reason`, `basis` (`tool` or `answer`), and `evidence` (session entry IDs)
-- `SessionManager.inMemory` / `SettingsManager.inMemory` — no evaluator transcript written to disk; automatic provider retries disabled
-- a 60-second timeout on the evaluator prompt, with abort, unsubscribe, and disposal on completion/error/cancellation
+- the current session's model (`ctx.model`) and `reasoning: "minimal"`
+- no tools — judges evidence but cannot run commands or inspect files itself
+- a fixed system prompt requiring JSON: `verdict`, `reason`, `basis` (`tool` or `answer`), and `evidence` (session entry IDs)
+- nothing written to disk and no automatic provider retries
+- a 60-second timeout, aborting the request on timeout or cancellation
 
 Evidence comes from the public `sessionManager.getBranch()` API, not reconstructed compaction summaries. The approximately 20,000-character window retains up to 4,000 characters per entry (both ends of large outputs). It includes tool calls/arguments, tool names, result error flags, and direct shell command/exit-code/output metadata. Thinking, images, tool `details`, and shell executions excluded from model context are not sent. Truncated or omitted evidence may require a fresh check.
 
@@ -125,16 +124,16 @@ No settings file and no environment variables. Behavior is controlled entirely b
 
 ## Dependencies
 
-- `@earendil-works/pi-coding-agent` (peer, `*`): imports `createAgentSession`, `createExtensionRuntime`, `SessionManager`, `SettingsManager`, and the `ExtensionAPI` / `ExtensionContext` / `ResourceLoader` types. The evaluator sub-session is the heavy consumer of these APIs.
+- `@earendil-works/pi-coding-agent` (peer, `>=0.87.0`): types only (`ExtensionAPI`, `ExtensionContext`, `AgentEndEvent`). Needs `ctx.modelRegistry.streamSimple()` (0.86) and deferred `agent_settled` runs (0.87).
 - No npm runtime deps, no workspace deps. Node builtins (`fs`, `path`) only.
 
 ## Caveats
 
 - **Package name vs. content**: `package.json` describes this as "Multi-agent orchestration across pi sessions", but the current code implements goal/loop, not cross-session orchestration.
-- **Pi internals**: evidence and model selection use public context APIs, but sharing the model registry's backing runtime still uses a structural cast because that property is private in pi 0.84. A pi upgrade could change it.
+- **Pi APIs**: evidence, model selection, and the evaluator call (`ctx.modelRegistry.streamSimple()`) use public extension APIs only; no private pi internals.
 - **Evidence limitations**: the evaluator sees bounded text, not the filesystem or screenshots. Citation validation prevents invented IDs, not an incorrect interpretation of a real result. Unknown means unverified, never success.
 - **Stale contexts**: the extension caches the last `ExtensionContext` and probes `ctx.isIdle()` before reuse; timer callbacks silently no-op if the context has gone stale. Errors matching `stale|invalid|session replacement|assertActive` are treated as expected.
-- **Evaluator cost**: one sub-session prompt per `agent_end` while a goal is active, using the session's current model. No tools and minimal thinking reduce overhead, but the current model may be expensive. Each completed run adds an evaluation call until the goal completes or pauses.
+- **Evaluator cost**: one model call per `agent_end` while a goal is active, using the session's current model. No tools and minimal thinking reduce overhead, but the current model may be expensive. Each completed run adds an evaluation call until the goal completes or pauses.
 - **`ms` intervals**: `parseInterval` accepts `Nms` (e.g. `/loop 500ms ...`), which yields sub-second loops. Use deliberately.
 - No platform-specific behavior (no tmux/ghostty/macOS dependencies); persistence is plain fs.
 

@@ -58,6 +58,7 @@ import {
   type SpawnResult,
   type SubagentRuntime,
   type SpawnUsage,
+  declareUnlessSearchable,
 } from '@nicknisi/pi-shared';
 import { Type } from 'typebox';
 import { scopeFleetRuns, type FleetScope } from './fleet.js';
@@ -1404,6 +1405,7 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
 
   pi.on('session_start', (_event, ctx) => {
     parentCtx = ctx;
+    declareUnlessSearchable(pi, ['fleet']);
     if (!ctx.hasUI) return;
     statusUi = ctx.ui;
     statusTheme = (ctx.ui as ExtensionUIContext).theme ?? null;
@@ -1445,6 +1447,8 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
   pi.registerTool({
     name: 'dispatch',
     label: 'Dispatch Subagents',
+    // Children may run bash/edit/write (or builders in worktrees) and reach the network.
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     description: [
       'Fan out focused child agents in parallel: independent research questions, parallel reviews,',
       'second opinions, or scoped file investigations. Each child runs hermetically (no user',
@@ -1780,6 +1784,8 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
     description:
       "Inspect subagent runs: list active runs owned by the current pi session by default, list persisted machine-wide history with scope='all', or fetch a specific run result by runId. Use to check background dispatch results.",
     promptSnippet: 'List or inspect subagent runs',
+    exposure: 'deferred',
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     parameters: Type.Object({
       action: Type.Union([Type.Literal('list'), Type.Literal('result'), Type.Literal('cancel')], {
         description: 'list runs, fetch one result, or cancel a running run',

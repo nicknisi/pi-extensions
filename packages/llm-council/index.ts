@@ -26,6 +26,7 @@ import {
   resolveContainedAgentResource,
   type SpawnUsage,
   type SubagentRuntime,
+  declareUnlessSearchable,
 } from '@nicknisi/pi-shared';
 import { Type } from 'typebox';
 import { CONFIG, councilConfigPath, loadCouncil, saveCouncilDefaults, type ResolvedCouncil } from './config.js';
@@ -495,6 +496,7 @@ export default function (pi: ExtensionAPI) {
     updateCouncilStatus(ctx, currentCouncil(ctx), !!restoreSelection(ctx));
   pi.on('session_start', (_event, ctx) => {
     parentCtx = ctx;
+    declareUnlessSearchable(pi, ['llm_council']);
     refreshStatus(ctx);
   });
   pi.on('session_tree', (_event, ctx) => refreshStatus(ctx));
@@ -672,6 +674,8 @@ export default function (pi: ExtensionAPI) {
       'or when accuracy matters. Not for simple factual questions.',
     ].join(' '),
     promptSnippet: 'Ask multiple LLMs for a council opinion',
+    exposure: 'deferred',
+    annotations: { readOnlyHint: true, openWorldHint: true },
     promptGuidelines: [
       'Use llm_council for complex questions that benefit from multiple LLM perspectives or cross-checking.',
       'Do NOT use llm_council for simple factual questions or routine tasks.',

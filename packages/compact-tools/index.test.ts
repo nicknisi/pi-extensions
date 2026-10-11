@@ -4,6 +4,7 @@ import {
   ToolExecutionComponent,
   type ExtensionAPI,
   type ExtensionContext,
+  type ToolRendererResolver,
 } from '@earendil-works/pi-coding-agent';
 import {
   getKeybindings,
@@ -18,12 +19,10 @@ import { afterEach, expect, it, vi } from 'vitest';
 import compactTools from './index.js';
 
 type Handler = (event: unknown, ctx: ExtensionContext) => void;
-const shutdowns: Array<() => void> = [];
 const originalKeybindings = getKeybindings();
 initTheme('dark', false);
 afterEach(() => {
-  for (const shutdown of shutdowns.reverse()) shutdown();
-  shutdowns.length = 0;
+  resolver = undefined;
   setKeybindings(originalKeybindings);
 });
 
@@ -42,13 +41,15 @@ function install(mode: ExtensionContext['mode'] = 'tui') {
       setStatus: vi.fn(),
     },
   } as unknown as ExtensionContext;
-  compactTools({ on: (name: string, handler: Handler) => handlers.set(name, handler) } as unknown as ExtensionAPI);
-  const start = () => handlers.get('session_start')!({}, ctx);
-  const shutdown = () => handlers.get('session_shutdown')!({}, ctx);
-  shutdowns.push(shutdown);
-  start();
-  return { start, shutdown, handlers, ctx };
+  compactTools({
+    on: (name: string, handler: Handler) => handlers.set(name, handler),
+    registerToolRenderer: (fn: ToolRendererResolver) => (resolver = fn),
+  } as unknown as ExtensionAPI);
+  handlers.get('session_start')!({}, ctx);
+  return { handlers, ctx };
 }
+
+let resolver: ToolRendererResolver | undefined;
 
 type Definition = NonNullable<ConstructorParameters<typeof ToolExecutionComponent>[4]>;
 
@@ -58,7 +59,7 @@ function row(name = 'bash', definition?: Definition) {
     'call-1',
     { command: 'printf "first\\nsecond\\nthird"' },
     {},
-    definition,
+    (resolver ? resolver(name, () => definition) : definition) as Definition,
     { requestRender: vi.fn() } as unknown as TUI,
     process.cwd(),
   );
@@ -78,19 +79,26 @@ const click = (component: ToolExecutionComponent, type = 'click', button = 'left
     y,
   });
 
-it('compacts existing and future rows, preserves results, and restores native expanded rendering', () => {
-  const existing = row('bash', createBashToolDefinition(process.cwd()));
-  existing.updateResult(result);
-  existing.setExpanded(true);
-  const expanded = existing.render(80);
-  existing.setExpanded(false);
+it('compacts built-in and unknown rows, preserves results, and matches native expanded rendering', () => {
+  const native = row('bash', createBashToolDefinition(process.cwd()));
+  native.updateResult(result);
+  native.setExpanded(true);
+  const expanded = native.render(80);
+  native.setExpanded(false);
+  const pending = row('bash', createBashToolDefinition(process.cwd()));
+  pending.setExpanded(true);
+  const expandedPending = pending.render(80);
   const { ctx, handlers } = install();
 
-  expect([...handlers.keys()]).toEqual(['session_start', 'session_shutdown']);
+  expect([...handlers.keys()]).toEqual(['session_start']);
   expect(ctx.ui.setToolsExpanded).toHaveBeenCalledWith(false);
   expect(ctx.ui.setStatus).toHaveBeenCalledWith('compact-tools', undefined);
   const before = structuredClone(result);
-  for (const component of [existing, row('mcp__test__query')]) {
+  const bash = row('bash', createBashToolDefinition(process.cwd()));
+  bash.setExpanded(true);
+  expect(bash.render(80)).toEqual(expandedPending);
+  bash.setExpanded(false);
+  for (const component of [bash, row('mcp__test__query')]) {
     component.updateResult(result);
     expect(plain(component)).toEqual(['', expect.stringContaining('▸ '), '  first … [ctrl+o]']);
     component.setExpanded(true);
@@ -98,8 +106,8 @@ it('compacts existing and future rows, preserves results, and restores native ex
     component.setExpanded(false);
     expect(plain(component)).toHaveLength(3);
   }
-  existing.setExpanded(true);
-  expect(existing.render(80)).toEqual(expanded);
+  bash.setExpanded(true);
+  expect(bash.render(80)).toEqual(expanded);
   expect(result).toEqual(before);
 });
 
@@ -111,21 +119,21 @@ it('restores custom self-shell renderers and allows per-row clicks without sendi
     renderCall: () => new Text('Original header\nExtra header', 0, 0),
     renderResult: () => new Text('Original result\nOriginal detail', 0, 0),
   };
+  const native = row('custom', definition);
+  native.updateResult(result);
+  native.setExpanded(true);
+  const expanded = native.render(80);
+  install();
   const component = row('custom', definition);
   component.updateResult(result);
-  component.setExpanded(true);
-  const expanded = component.render(80);
-  component.setExpanded(false);
-  install();
   expect(plain(component)).toHaveLength(3);
   expect(plain(component)[1]).toBe('▸ Original header');
   expect(plain(component)[2]).toBe('  Original result … [ctrl+o]');
   expect(click(component, 'click', 'right')).toBeUndefined();
   expect(click(component, 'wheel')).toBeUndefined();
   expect(click(component, 'drag')).toBeUndefined();
-  expect(click(component, 'click', 'left', 0)).toBeUndefined();
   expect(plain(component)).toHaveLength(3);
-  expect(click(component)).toEqual({ handled: true });
+  expect(click(component)).toMatchObject({ handled: true });
   expect(component.render(80)).toEqual(expanded);
   component.setExpanded(false);
   expect(plain(component)).toHaveLength(3);
@@ -156,7 +164,18 @@ it('bounds pending, streaming, error, empty, and image displays, including narro
 });
 
 it('fills both compact lines with the native outcome background and never dumps JSON arguments', () => {
-  const { ctx } = install();
+  install();
+  const opener = (color: 'toolPendingBg' | 'toolSuccessBg' | 'toolErrorBg') => {
+    let open = '';
+    const probe: Definition = {
+      ...createBashToolDefinition(process.cwd()),
+      renderShell: 'self',
+      renderCall: (_args, theme) => new Text((open = theme.bg(color, '\0').split('\0')[0]!), 0, 0),
+      renderResult: () => new Text('', 0, 0),
+    };
+    row('probe', probe).render(10);
+    return open;
+  };
   const component = row('custom');
   component.updateArgs({ path: 'src/index.ts', content: 'private payload', extra: { nested: true } });
   expect(plain(component)[1]).toBe('▸ custom src/index.ts');
@@ -166,11 +185,9 @@ it('fills both compact lines with the native outcome background and never dumps 
     [false, true, 'toolErrorBg'],
   ] as const) {
     component.updateResult({ ...result, isError }, isPartial);
-    vi.mocked(ctx.ui.theme.bg).mockClear();
     const lines = component.render(80);
     expect(lines.slice(1).map(visibleWidth)).toEqual([80, 80]);
-    expect(ctx.ui.theme.bg).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(ctx.ui.theme.bg).mock.calls.every(([color]) => color === background)).toBe(true);
+    expect(lines.slice(1).every((line) => line.startsWith(opener(background)))).toBe(true);
     expect(lines.join('\n')).not.toContain('private payload');
     expect(lines.join('\n')).not.toContain('{');
   }
@@ -192,26 +209,9 @@ it('summarizes JSON-only results instead of showing braces or serialized payload
   }
 });
 
-it('restores prototype methods on shutdown and does not stack wrappers on repeated starts', () => {
-  const originalRender = ToolExecutionComponent.prototype.render;
-  const component = row();
-  component.updateResult(result);
-  const originalLines = component.render(80);
-  const extension = install();
-  extension.start();
-  expect(plain(component)).toHaveLength(3);
-  extension.shutdown();
-  expect(ToolExecutionComponent.prototype.render).toBe(originalRender);
-  expect(component.render(80)).toEqual(originalLines);
-  extension.start();
-  expect(plain(component)).toHaveLength(3);
-});
-
-it('leaves print, JSON, and RPC runtimes untouched', () => {
-  const originalRender = ToolExecutionComponent.prototype.render;
+it('does not touch the expansion state of print, JSON, and RPC runtimes', () => {
   for (const mode of ['print', 'json', 'rpc'] as const) {
     const { ctx } = install(mode);
-    expect(ToolExecutionComponent.prototype.render).toBe(originalRender);
     expect(ctx.ui.setToolsExpanded).not.toHaveBeenCalled();
   }
 });

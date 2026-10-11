@@ -2,6 +2,7 @@
 import { stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { type ExtensionAPI, truncateHead, truncateLine, withFileMutationQueue } from '@earendil-works/pi-coding-agent';
+import { declareUnlessSearchable } from '@nicknisi/pi-shared';
 import { Type, type Static } from 'typebox';
 
 const common = {
@@ -141,6 +142,8 @@ export default function (pi: ExtensionAPI) {
     description:
       'Search code by AST syntax pattern, not types. Example: console.log($MSG). Uses the installed ast-grep CLI.' +
       limits,
+    exposure: 'deferred',
+    annotations: { readOnlyHint: true, openWorldHint: false },
     parameters: searchSchema,
     execute: (_id, params, signal, _update, ctx) => run(pi, params, ctx.cwd, signal),
   });
@@ -150,7 +153,10 @@ export default function (pi: ExtensionAPI) {
     description:
       'Rewrite AST syntax matches in an explicit file. Not type-aware. Native CLI preview is the default. Set dryRun:false explicitly to apply every match in that file. Preview first and inspect the diff afterward.' +
       limits,
+    exposure: 'deferred',
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     parameters: rewriteSchema,
     execute: (_id, params, signal, _update, ctx) => run(pi, params, ctx.cwd, signal),
   });
+  pi.on('session_start', () => declareUnlessSearchable(pi, ['ast_search', 'ast_rewrite']));
 }

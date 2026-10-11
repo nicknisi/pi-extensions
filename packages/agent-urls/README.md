@@ -1,6 +1,6 @@
 # @nicknisi/pi-agent-urls
 
-`agent://` URL tools for reading subagent runs persisted by the first-party shared runtime (`@nicknisi/pi-shared`). The extension enumerates run records from `~/.pi/agent/subagent-runs/<namespace>/<runId>.json` — one JSON record per run, written by any extension on the shared in-process runtime (e.g. [subagents](../subagents)' `dispatch`, codemode, llm-council) — assigns each record a stable `agent://<namespace>/<runId>` URI, and exposes both a slash command and two LLM tools for listing and reading them. It exists so that a parent agent (or the human at the prompt) can pull a run's status, usage, output, or error back into context after the run has finished, using a short URI instead of a long filesystem path.
+`agent://` URL tools for reading subagent runs persisted by the first-party shared runtime (`@nicknisi/pi-shared`). The extension enumerates run records from `~/.pi/agent/subagent-runs/<namespace>/<runId>.json` — one JSON record per run, written by any extension on the shared in-process runtime (e.g. [subagents](../subagents)' `dispatch`, workflows, llm-council) — assigns each record a stable `agent://<namespace>/<runId>` URI, and exposes both a slash command and two LLM tools for listing and reading them. It exists so that a parent agent (or the human at the prompt) can pull a run's status, usage, output, or error back into context after the run has finished, using a short URI instead of a long filesystem path.
 
 It no longer reads anything from nicobailon/pi-subagents (session JSONLs, tmpdir status dirs, artifact dirs, chain dirs) — that discovery is gone. Because records carry bounded output rather than transcripts, the old `history://` scheme and transcript rendering are dropped; there is no session file to render.
 
@@ -41,7 +41,7 @@ Slash command:
 
 ```text
 /agent list
-/agent list codemode
+/agent list workflows
 /agent read agent://subagents/7c6ef257
 /agent read agent://subagents/7c6ef257/output
 ```
@@ -94,8 +94,13 @@ Constants (hardcoded in `index.ts`):
 
 ## Dependencies
 
-- `@earendil-works/pi-coding-agent` (peer, `*`) — `ExtensionAPI` (`registerTool`, `registerCommand`, `sendMessage`) and `ExtensionCommandContext` (`ctx.ui.notify`) types/APIs only.
-- Node builtins: `fs`, `os`, `path`. No npm runtime dependencies, no workspace deps.
+- `@earendil-works/pi-coding-agent` (peer, `*`) — `ExtensionAPI` (`registerTool`, `registerCommand`, `sendMessage`, `on`, `getActiveTools`, `setActiveTools`) and `ExtensionCommandContext` (`ctx.ui.notify`) types/APIs only.
+- `@nicknisi/pi-shared` (`workspace:*`) — `declareUnlessSearchable` (deferred tool fallback) and `subagentsDir` (`PI_SUBAGENTS_DIR` resolution).
+- Node builtins: `fs`, `os`, `path`. No other runtime dependencies.
+
+## Tool exposure
+
+`list_agent_runs` and `read_agent_url` register with `exposure: "deferred"` (pi ≥0.99), so they stay out of the system prompt when pi's built-in `tool_search` is active (`"defaultTools": ["+tool_search"]`): the model finds them on demand. Without `tool_search` the extension declares them directly at session start, as before. Older pi ignores the field. `list_agent_runs` declares an `outputSchema`, so codemode scripts get `{ runs: [{ url, runId, namespace, agent?, status?, durationMs?, prompt? }] }` instead of text. Tools also carry `annotations` (read-only/destructive/open-world hints) for permission extensions.
 
 ## Caveats
 

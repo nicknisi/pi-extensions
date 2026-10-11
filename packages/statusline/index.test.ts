@@ -1,6 +1,18 @@
 import { createEventBus, type ExtensionAPI, type ExtensionContext, type Theme } from '@earendil-works/pi-coding-agent';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import statusline from './index.js';
+
+// No real tmux or notifier: session names come from the $TMUX socket path fallback.
+vi.mock('node:child_process', async (original) => ({
+  ...(await original<typeof import('node:child_process')>()),
+  execSync: () => {
+    throw new Error('no tmux in tests');
+  },
+  spawn: () => ({ on: () => {}, unref: () => {} }),
+}));
 
 vi.mock('./config.js', () => ({
   loadStatuslineConfig: () => ({ config: { hiddenStatuses: [] }, warnings: [] }),
@@ -52,8 +64,8 @@ function setup() {
     events,
     colors,
     renderRequested,
-    async fire(name: string) {
-      for (const handler of handlers.get(name) ?? []) await handler({}, ctx);
+    async fire(name: string, event: object = {}) {
+      for (const handler of handlers.get(name) ?? []) await handler(event, ctx);
     },
     render() {
       colors.length = 0;
@@ -119,5 +131,54 @@ describe('self-compact context colors', () => {
     h.events.emit('self-compact:context-color', 'not-a-theme-color');
     expect(h.render().bar?.color).toBe('success');
     h.dispose();
+  });
+});
+
+describe('tmux status during ctx.ui prompts', () => {
+  function tmuxSetup() {
+    const home = mkdtempSync(join(tmpdir(), 'statusline-'));
+    const h = setup();
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('TMUX', '/tmp/tmux-501/main,123,0');
+    vi.stubEnv('TMUX_PANE', '%7');
+    const status = () => JSON.parse(readFileSync(join(home, '.cache', 'pi-status', '7.status'), 'utf8'));
+    return { ...h, status, cleanup: () => rmSync(home, { recursive: true, force: true }) };
+  }
+
+  it('reports permit/question mid-run and returns to working afterwards', async () => {
+    const h = tmuxSetup();
+    try {
+      await h.fire('session_start');
+      await h.fire('agent_start');
+      expect(h.status()).toMatchObject({ state: 'working', session: 'main', pane: '%7' });
+      await h.fire('ui_prompt_start', { kind: 'confirm', title: 'Allow bash?' });
+      expect(h.status()).toMatchObject({ state: 'permit', tool: 'Allow bash?' });
+      await h.fire('ui_prompt_end', { kind: 'confirm' });
+      expect(h.status().state).toBe('working');
+      await h.fire('ui_prompt_start', { kind: 'select' });
+      expect(h.status()).toMatchObject({ state: 'question', tool: '' });
+      await h.fire('ui_prompt_end', { kind: 'select' });
+      expect(h.status().state).toBe('working');
+    } finally {
+      h.dispose();
+      h.cleanup();
+    }
+  });
+
+  it('restores the pre-prompt state for prompts outside a run', async () => {
+    const h = tmuxSetup();
+    try {
+      await h.fire('session_start');
+      await h.fire('agent_start');
+      await h.fire('agent_end');
+      expect(h.status().state).toBe('done');
+      await h.fire('ui_prompt_start', { kind: 'input', title: 'Name?' });
+      expect(h.status()).toMatchObject({ state: 'question', tool: 'Name?' });
+      await h.fire('ui_prompt_end', { kind: 'input' });
+      expect(h.status().state).toBe('done');
+    } finally {
+      h.dispose();
+      h.cleanup();
+    }
   });
 });

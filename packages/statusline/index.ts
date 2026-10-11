@@ -6,7 +6,7 @@
  *
  * Tmux status integration:
  *   - Writes state to ~/.cache/pi-status/<session>.status
- *   - States: working, done, idle
+ *   - States: working, permit/question (waiting on a ctx.ui prompt), done, idle
  *
  * Custom footer showing:
  *   - Model name with icon
@@ -30,7 +30,7 @@ const execFileP = promisify(execFile);
 
 // ── Tmux status integration ─────────────────────────────────────────────────
 
-const STATUS_DIR = join(process.env.HOME || '', '.cache', 'pi-status');
+const statusDir = () => join(process.env.HOME || '', '.cache', 'pi-status');
 
 function getTmuxSession(): string | undefined {
   if (!process.env.TMUX) return undefined;
@@ -55,7 +55,7 @@ function removeStatus() {
   if (!paneId) return;
   const paneNum = paneId.replace('%', '');
   try {
-    const file = join(STATUS_DIR, `${paneNum}.status`);
+    const file = join(statusDir(), `${paneNum}.status`);
     if (existsSync(file)) {
       const { unlinkSync } = require('node:fs');
       unlinkSync(file);
@@ -65,16 +65,21 @@ function removeStatus() {
   }
 }
 
-function writeStatus(status: 'working' | 'done' | 'completed' | 'idle', tool?: string) {
+type Status = 'working' | 'permit' | 'question' | 'done' | 'completed' | 'idle';
+let lastStatus: Status = 'idle';
+
+function writeStatus(status: Status, tool?: string) {
+  lastStatus = status;
   const paneId = process.env.TMUX_PANE;
   if (!paneId) return;
   const session = getTmuxSession();
   if (!session) return;
   const paneNum = paneId.replace('%', '');
   try {
-    if (!existsSync(STATUS_DIR)) mkdirSync(STATUS_DIR, { recursive: true });
+    const dir = statusDir();
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     writeFileSync(
-      join(STATUS_DIR, `${paneNum}.status`),
+      join(dir, `${paneNum}.status`),
       JSON.stringify({
         state: status,
         pane: paneId,
@@ -328,8 +333,22 @@ export default function (pi: ExtensionAPI) {
     writeStatus('idle');
   });
 
+  let running = false;
+  let beforePrompt: Status = 'idle';
+
   pi.on('agent_start', async () => {
+    running = true;
     writeStatus('working');
+  });
+
+  // Fleet's claude hooks use the same states for approval dialogs and questions.
+  pi.on('ui_prompt_start', async (event) => {
+    beforePrompt = lastStatus;
+    writeStatus(event.kind === 'confirm' ? 'permit' : 'question', event.title ?? '');
+  });
+
+  pi.on('ui_prompt_end', async () => {
+    writeStatus(running ? 'working' : beforePrompt);
   });
 
   pi.on('tool_execution_start', async (event) => {
@@ -337,6 +356,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on('agent_end', async () => {
+    running = false;
     writeStatus('done');
     const session = getTmuxSession();
     const paneId = process.env.TMUX_PANE;

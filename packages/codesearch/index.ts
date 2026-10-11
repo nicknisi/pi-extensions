@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { declareUnlessSearchable } from '@nicknisi/pi-shared';
 import { Type, type Static } from 'typebox';
 import { bounded, fetchFile, search } from './client.js';
 
@@ -30,6 +31,8 @@ export default function (pi: ExtensionAPI) {
     label: 'Code Search',
     description:
       'Search public GitHub code via grep.app using literal patterns or regex, with repository, path and language filters. Queries leave this machine. Never submit secrets or private code without explicit user authorization. Output includes source URLs, bounded to 50 KiB / 2000 lines. Narrow filters if truncated. Independent of Exa, no API key required.',
+    exposure: 'deferred',
+    annotations: { readOnlyHint: true, openWorldHint: true },
     parameters: searchSchema,
     async execute(_id, params, signal) {
       return bounded(
@@ -43,6 +46,8 @@ export default function (pi: ExtensionAPI) {
     label: 'Code Fetch',
     description:
       'Fetch a GitHub file via blob URL OR repo/path/ref, optionally an inclusive 1-based line range. Prefer authenticated gh, fall back to public GitHub API. Explicit ref supports slashes. Output bounded to 50 KiB / 2000 lines. Private file contents enter model context. Never submit fetched private code to codesearch without explicit user authorization.',
+    exposure: 'deferred',
+    annotations: { readOnlyHint: true, openWorldHint: true },
     parameters: fetchSchema,
     async execute(_id, params, signal) {
       const file = await fetchFile(pi, params, signal);
@@ -64,4 +69,5 @@ export default function (pi: ExtensionAPI) {
       };
     },
   });
+  pi.on('session_start', () => declareUnlessSearchable(pi, ['codesearch', 'codefetch']));
 }

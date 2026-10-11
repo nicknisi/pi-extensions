@@ -38,7 +38,6 @@
  */
 
 import type { Message } from '@earendil-works/pi-ai';
-import { getModelProvider } from '@nicknisi/pi-shared';
 import {
   getAgentDir,
   getPackageDir,
@@ -248,8 +247,9 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
   });
 
   // ── Auto-naming after the first exchange ──────────────────────────────
-  pi.on('agent_settled', async (_event, ctx) => {
-    if (autoNamed || config.autoName === 'off') return;
+  pi.on('agent_settled', async (event, ctx) => {
+    // A cancelled run's reply is incomplete; wait for a finished one.
+    if (autoNamed || config.autoName === 'off' || event.aborted) return;
     // Respect an existing name (set via /name, /sn, --name, or a prior turn).
     if (pi.getSessionName()) {
       autoNamed = true;
@@ -308,13 +308,11 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
     };
 
     try {
-      const response = await getModelProvider(ctx, model)
-        .stream(
-          model,
-          { systemPrompt, messages: [userMessage] },
-          { apiKey: auth.apiKey, headers: auth.headers, env: auth.env, signal: controller.signal },
-        )
-        .result();
+      const response = await ctx.modelRegistry.complete(
+        model,
+        { systemPrompt, messages: [userMessage] },
+        { signal: controller.signal },
+      );
       if (response.stopReason === 'error' || response.stopReason === 'aborted') return null;
       const raw = response.content
         .filter((c): c is { type: 'text'; text: string } => c.type === 'text')

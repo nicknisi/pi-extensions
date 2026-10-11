@@ -2,15 +2,9 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createAgentSession } from '@earendil-works/pi-coding-agent';
 import factory from './index.js';
 
-vi.mock('@earendil-works/pi-coding-agent', () => ({
-  createAgentSession: vi.fn(),
-  createExtensionRuntime: () => ({}),
-  SessionManager: { inMemory: () => ({}) },
-  SettingsManager: { inMemory: () => ({}) },
-}));
+const modelStream = vi.fn();
 
 let cwd: string;
 let cleanup: (() => void) | undefined;
@@ -46,7 +40,7 @@ function makeHarness() {
     cwd,
     hasUI: true,
     model: { id: 'current-model' },
-    modelRegistry: { runtime: {} },
+    modelRegistry: { streamSimple: modelStream },
     ui: {
       notify: (msg: string) => notifications.push(msg),
       setStatus: (_key: string, status: string) => statuses.push(status),
@@ -75,21 +69,13 @@ function makeHarness() {
 }
 
 function evaluator(text: string, stopReason = 'stop') {
-  let listener: (event: any) => void = () => {};
-  const unsubscribe = vi.fn();
-  const session = {
-    subscribe: vi.fn((fn: typeof listener) => {
-      listener = fn;
-      return unsubscribe;
-    }),
-    prompt: vi.fn(async (_prompt: string) => {
-      listener({ type: 'message_end', message: { role: 'assistant', stopReason, content: [{ type: 'text', text }] } });
-    }),
-    abort: vi.fn(async () => {}),
-    dispose: vi.fn(),
+  const result = vi.fn(async () => ({ role: 'assistant', stopReason, content: [{ type: 'text', text }] }));
+  modelStream.mockImplementation(() => ({ result }));
+  return {
+    result,
+    prompt: (i = 0) => modelStream.mock.calls[i]![1].messages[0].content[0].text as string,
+    signal: (i = 0) => modelStream.mock.calls[i]![2].signal as AbortSignal,
   };
-  vi.mocked(createAgentSession).mockResolvedValue({ session } as never);
-  return { session, unsubscribe };
 }
 
 function verdict(verdict: string, evidence: string[] = [], basis = 'tool') {
@@ -127,8 +113,21 @@ describe('/goal stop', () => {
     expect(h.abort).toHaveBeenCalled();
     h.sent.length = 0;
     await h.event('agent_end');
+    await h.event('agent_settled');
     await vi.advanceTimersByTimeAsync(3000);
     expect(h.sent).toEqual([]);
+  });
+
+  it('ticks a self-paced loop when the run settles, not at agent_end', async () => {
+    const h = makeHarness();
+    await h.commands.get('loop')!('keep going', h.ctx);
+    expect(h.sent).toEqual(['keep going']);
+    await h.event('agent_end');
+    expect(h.sent).toHaveLength(1);
+    await h.event('agent_settled');
+    expect(h.sent).toEqual(['keep going', 'keep going']);
+    await h.event('agent_settled');
+    expect(h.sent).toHaveLength(2);
   });
 
   it('clears an active goal and aborts the in-flight turn', async () => {
@@ -154,21 +153,31 @@ describe('evidence-based evaluation', () => {
     const e = evaluator(verdict('met', ['result']));
     await h.command('all tests pass');
     await h.event('agent_end');
-    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({ model: h.ctx.model, tools: [] }));
-    const prompt = JSON.parse(e.session.prompt.mock.calls[0]![0]);
+    expect(modelStream).toHaveBeenCalledWith(
+      h.ctx.model,
+      expect.objectContaining({ systemPrompt: expect.stringContaining('No tools are available') }),
+      expect.objectContaining({ reasoning: 'minimal' }),
+    );
+    const prompt = JSON.parse(e.prompt());
     expect(prompt.evidence.join('\n')).toContain('pnpm test');
     expect(prompt.evidence.join('\n')).toContain('"isError":false');
     expect(h.notifications.at(-1)).toContain('Goal achieved');
     expect(h.notifications.at(-1)).toContain('Evidence: result');
     expect(h.sent).toHaveLength(1);
-    expect(e.session.dispose).toHaveBeenCalledOnce();
-    expect(e.unsubscribe).toHaveBeenCalledOnce();
     expect(fs.existsSync(path.join(cwd, '.pi-goal/state.json'))).toBe(false);
   });
 
   it('accepts a single JSON fence without accepting surrounding prose', async () => {
     const h = makeHarness();
     evaluator('```json\n' + verdict('met', ['result']) + '\n```');
+    await h.command('all tests pass');
+    await h.event('agent_end');
+    expect(h.notifications.at(-1)).toContain('Goal achieved');
+  });
+
+  it('accepts a fence with the JSON on the same line', async () => {
+    const h = makeHarness();
+    evaluator('```json ' + verdict('met', ['result']) + ' ```');
     await h.command('all tests pass');
     await h.event('agent_end');
     expect(h.notifications.at(-1)).toContain('Goal achieved');
@@ -205,7 +214,7 @@ describe('evidence-based evaluation', () => {
     await h.command('all tests pass');
     await h.event('agent_end');
     expect(saved().goal.pausedReason).toContain('Evaluator stopped: error');
-    expect(e.session.dispose).toHaveBeenCalledOnce();
+    expect(e.result).toHaveBeenCalledOnce();
   });
 
   it('keeps the end of huge tool output rather than discarding all earlier evidence', async () => {
@@ -214,7 +223,7 @@ describe('evidence-based evaluation', () => {
     const e = evaluator(verdict('not_met'));
     await h.command('all tests pass');
     await h.event('agent_end');
-    const prompt = JSON.parse(e.session.prompt.mock.calls[0]![0]);
+    const prompt = JSON.parse(e.prompt());
     expect(prompt.evidence.join('\n')).toContain('Tests: 3 passed');
     expect(prompt.evidence.join('\n')).toContain('pnpm test');
     expect(prompt.evidence.join('\n')).toContain('content truncated');
@@ -237,7 +246,7 @@ describe('evidence-based evaluation', () => {
     const e = evaluator(verdict('not_met'));
     await h.command('all tests pass');
     await h.event('agent_end');
-    const prompt = e.session.prompt.mock.calls[0]![0];
+    const prompt = e.prompt();
     expect(prompt).toContain('exitCode');
     expect(prompt).not.toContain('secret-command');
   });
@@ -247,7 +256,7 @@ describe('evidence-based evaluation', () => {
     h.entries.length = 0;
     await h.command('all tests pass');
     await h.event('agent_end');
-    expect(createAgentSession).not.toHaveBeenCalled();
+    expect(modelStream).not.toHaveBeenCalled();
     expect(saved().goal.lastVerdict).toBe('unknown');
     expect(h.sent.at(-1)).toContain('Gather the missing evidence');
   });
@@ -264,7 +273,7 @@ describe('continuation budgets and recovery', () => {
     expect(saved().goal.pausedReason).toContain('Unable to verify completion twice');
     await h.event('agent_end');
     expect(h.sent).toHaveLength(2);
-    expect(createAgentSession).toHaveBeenCalledTimes(2);
+    expect(modelStream).toHaveBeenCalledTimes(2);
   });
 
   it('pauses after ten unsuccessful runs and resume grants a fresh budget', async () => {
@@ -272,14 +281,14 @@ describe('continuation budgets and recovery', () => {
     evaluator(verdict('not_met'));
     await h.command('all tests pass');
     for (let i = 0; i < 12; i++) await h.event('agent_end');
-    expect(createAgentSession).toHaveBeenCalledTimes(10);
+    expect(modelStream).toHaveBeenCalledTimes(10);
     expect(h.sent).toHaveLength(10);
     expect(saved().goal.pausedReason).toContain('Reached 10 goal runs');
     await h.command('resume');
     expect(saved().goal.turns).toBe(0);
     expect(saved().goal.pausedReason).toBeUndefined();
     await h.event('agent_end');
-    expect(createAgentSession).toHaveBeenCalledTimes(11);
+    expect(modelStream).toHaveBeenCalledTimes(11);
   });
 
   it('pauses at the next boundary after thirty minutes, stopping a concurrent loop', async () => {
@@ -291,7 +300,7 @@ describe('continuation budgets and recovery', () => {
     await h.event('agent_end');
     expect(saved().goal.pausedReason).toContain('30-minute');
     expect(saved().loop).toBeNull();
-    expect(createAgentSession).not.toHaveBeenCalled();
+    expect(modelStream).not.toHaveBeenCalled();
     const count = h.sent.length;
     await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(h.sent).toHaveLength(count);
@@ -299,7 +308,7 @@ describe('continuation budgets and recovery', () => {
 
   it('pauses immediately on evaluator failure rather than sending more work', async () => {
     const h = makeHarness();
-    vi.mocked(createAgentSession).mockRejectedValue(new Error('provider offline'));
+    modelStream.mockReturnValue({ result: async () => Promise.reject(new Error('provider offline')) });
     await h.command('all tests pass');
     await h.event('agent_end');
     expect(saved().goal.pausedReason).toContain('provider offline');
@@ -310,14 +319,13 @@ describe('continuation budgets and recovery', () => {
     vi.useFakeTimers();
     const h = makeHarness();
     const e = evaluator('');
-    e.session.prompt.mockImplementation(() => new Promise(() => {}));
+    e.result.mockImplementation(() => new Promise(() => {}));
     await h.command('all tests pass');
     const pending = h.event('agent_end');
     await vi.advanceTimersByTimeAsync(60_000);
     await pending;
     expect(saved().goal.pausedReason).toContain('timed out');
-    expect(e.session.abort).toHaveBeenCalledOnce();
-    expect(e.session.dispose).toHaveBeenCalledOnce();
+    expect(e.signal().aborted).toBe(true);
     expect(h.sent).toHaveLength(1);
   });
 
@@ -340,7 +348,7 @@ describe('continuation budgets and recovery', () => {
     await h.command('all tests pass');
     await h.event('agent_end', { messages: [{ role: 'assistant', stopReason: 'aborted' }] });
     expect(saved().goal.pausedReason).toContain('Agent stopped: aborted');
-    expect(createAgentSession).not.toHaveBeenCalled();
+    expect(modelStream).not.toHaveBeenCalled();
     expect(h.sent).toHaveLength(1);
   });
 
@@ -351,9 +359,9 @@ describe('continuation budgets and recovery', () => {
     const ready = new Promise<void>((resolve) => {
       started = resolve;
     });
-    e.session.prompt.mockImplementation(async () => {
+    e.result.mockImplementation(async () => {
       started();
-      await new Promise(() => {});
+      return new Promise(() => {});
     });
     await h.command('old goal');
     const pending = h.event('agent_end');
@@ -362,8 +370,7 @@ describe('continuation budgets and recovery', () => {
     await pending;
     expect(saved().goal.condition).toBe('new goal');
     expect(saved().goal.lastVerdict).toBeUndefined();
-    expect(e.session.abort).toHaveBeenCalledOnce();
-    expect(e.session.dispose).toHaveBeenCalledOnce();
+    expect(e.signal().aborted).toBe(true);
     expect(h.sent).toEqual(['old goal', 'new goal']);
   });
 
@@ -375,9 +382,9 @@ describe('continuation budgets and recovery', () => {
     const ready = new Promise<void>((resolve) => {
       started = resolve;
     });
-    e.session.prompt.mockImplementation(async () => {
+    e.result.mockImplementation(async () => {
       started();
-      await new Promise(() => {});
+      return new Promise(() => {});
     });
     await h.command('all tests pass');
     const pending = h.event('agent_end');
@@ -397,26 +404,6 @@ describe('continuation budgets and recovery', () => {
     await h.event('session_compact');
     await vi.advanceTimersByTimeAsync(3000);
     expect(h.sent).toHaveLength(1);
-  });
-
-  it('disposes a late-created evaluator without prompting after the goal is cleared', async () => {
-    const h = makeHarness();
-    const e = evaluator(verdict('met', ['result']));
-    let resolveSession!: (value: any) => void;
-    vi.mocked(createAgentSession).mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          resolveSession = resolve;
-        }),
-    );
-    await h.command('all tests pass');
-    const pending = h.event('agent_end');
-    await h.command('clear');
-    resolveSession({ session: e.session });
-    await pending;
-    expect(e.session.prompt).not.toHaveBeenCalled();
-    expect(e.session.dispose).toHaveBeenCalledOnce();
-    expect(h.notifications.some((n) => n.includes('Goal achieved'))).toBe(false);
   });
 
   it('does not send an old compaction continuation to a replacement goal', async () => {

@@ -116,7 +116,7 @@ This is **additive dual-write**, not a replacement: the bespoke `.json` run stor
 Compat caveats:
 
 - The mirror is written only when the owning pi session is persisted (i.e. `getSessionFile()` returns a path). In `pi -p` print mode or other in-memory hosts there is no owning session file, so no mirror is written — the bespoke `.json` record is still the source of truth.
-- `SessionManager` creates the JSONL lazily — only once the first assistant message is appended. A run that crashed before producing any assistant turn (kind `crashed`/`empty` with no assistant message) leaves no session file on disk; `record.sessionFile` is left undefined in that case rather than advertising a path to nothing.
+- A run that crashed before producing any assistant turn (kind `crashed`/`empty` with no assistant message) is not mirrored; `record.sessionFile` is left undefined rather than advertising a near-empty session.
 - The mirror reflects the child's messages as pi sees them (user prompt → assistant turns → tool results). It does **not** carry the subagent-specific metadata (runId, namespace, transcript summary, worktree/patch paths) — that lives only on the bespoke `.json` artifact, which is why both are kept.
 - Worktree-isolated runs mirror with the **worktree's** cwd (where the child actually ran), not the caller's cwd. The session header's `cwd` is honest about where the work happened.
 
@@ -130,9 +130,9 @@ Children resolve models against the **parent session's model registry**, not a f
 
 - **No `model` on a task** → the child runs on the **parent session's current model** (a gateway worker's children stay on the gateway model).
 - **`model: "provider/id"`** (on a task or profile) → resolved against that same registry, so runtime-registered providers work there too.
-- `workflows` and `codemode` children behave the same way.
+- `workflows` and `llm-council` children behave the same way.
 
-pi exposes no public accessor for a registry's runtime, so the shared runtime reads `ModelRegistry`'s private `runtime` field (checked against pi-coding-agent 0.84 and 0.87). If a pi upgrade renames it, children fall back to replaying the parent's runtime-registered providers into a fresh runtime (one console warning). That keeps gateway-style providers working but loses runtime-only API keys (`--api-key`) and host-supplied credential stores.
+pi exposes no public accessor for a registry's runtime, so the shared runtime reads `ModelRegistry`'s private `runtime` field (checked against pi-coding-agent 0.84, 0.87 and 1.1). If a pi upgrade renames it, children fall back to replaying the parent's runtime-registered providers into a fresh runtime (one console warning). That keeps gateway-style providers working but loses runtime-only API keys (`--api-key`) and host-supplied credential stores.
 
 ### Where runtime files go (`PI_SUBAGENTS_DIR`)
 
@@ -144,9 +144,9 @@ By default everything the runtime writes lives under the pi agent dir, as descri
 | `~/.pi/agent/subagent-patches/state.json`                 | `<root>/patches/state.json`    |
 | `~/.pi/agent/subagent-worktrees/<runId>`                  | `<root>/worktrees/<runId>`     |
 | `~/.pi/agent/sessions/<encoded-cwd>/` (session mirrors)   | `<root>/sessions/`             |
-| `~/.pi/agent/workflow-runs/` (codemode `runWorkflow`)     | `<root>/workflow-runs/`        |
+| `~/.pi/agent/workflow-runs/` (shared `runWorkflow`)       | `<root>/workflow-runs/`        |
 
-It is read when the extension starts and at each write, not at import. Config stays put: profiles, keybindings, workflows and snippets still come from the agent dir. Session mirrors under the override are outside pi's sessions dir, so `/resume` won't list them (open them by path).
+It is read when the extension starts and at each write, not at import. Config stays put: profiles, keybindings, and workflows still come from the agent dir. Session mirrors under the override are outside pi's sessions dir, so `/resume` won't list them (open them by path).
 
 ## Profiles
 
@@ -203,6 +203,10 @@ export default (pi: ExtensionAPI) => subagents(pi, { profileDirs: ['/path/to/bun
 ```
 
 `profileDirs` appends lowest-precedence profile directories — the hook for a distribution (e.g. arc) to ship default personas that user and project files can shadow.
+
+## Tool exposure
+
+`fleet` registers with `exposure: "deferred"` (pi ≥0.99; `dispatch` stays always declared), so it stays out of the system prompt when pi's built-in `tool_search` is active (`"defaultTools": ["+tool_search"]`): the model finds it on demand. Without `tool_search` the extension declares it directly at session start, as before. Older pi ignores the field. It also carries `annotations` (read-only/destructive/open-world hints) for permission extensions.
 
 ## Caveats
 

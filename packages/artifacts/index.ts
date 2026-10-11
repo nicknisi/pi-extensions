@@ -148,6 +148,8 @@ export default function artifacts(pi: ExtensionAPI) {
   pi.registerTool({
     name: 'artifact',
     label: 'Artifact',
+    // update overwrites an existing artifact file; share can upload a gist.
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     description:
       'Create, update, open, or list HTML artifacts rendered from markdown or raw HTML and served from a lazy localhost server (opened in the browser). Two kinds: `markdown` (rendered to styled HTML — GFM tables, fenced ```diff blocks render as diffs, fenced code blocks get syntax highlighting, fenced ```mermaid blocks render as diagrams) and `html` (escape hatch — body fragment injected into a styled shell, or a full <!DOCTYPE> document passed through unchanged). `create`/`update` write the file and return the slug + localhost URL + absolute path; `update` on a slug whose file is missing creates it. `update` on an already-open artifact refreshes the browser tab in place via live reload. `open` starts the server and opens the artifact. `list` lists existing artifacts (does not start the server). Set `path` to read content from a file instead of passing `content` (kind is still required). html fragments inherit the artifact stylesheet (system fonts, light/dark scheme) and its CSS variables — `--bg`, `--fg`, `--muted`, `--border`, `--code-bg`, `--accent` — so write semantic HTML and use those variables in any scoped <style> instead of hardcoding colors. Storage: <project>/.pi/artifacts/<slug>.html.',
     promptSnippet:

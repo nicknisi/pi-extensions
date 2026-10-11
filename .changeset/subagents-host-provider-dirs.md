@@ -2,7 +2,6 @@
 '@nicknisi/pi-subagents': minor
 '@nicknisi/pi-shared': minor
 '@nicknisi/pi-workflows': minor
-'@nicknisi/pi-codemode': minor
 '@nicknisi/pi-llm-council': minor
 '@nicknisi/pi-agent-urls': minor
 ---

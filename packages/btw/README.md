@@ -66,7 +66,7 @@ Fork happens _before_ the transcript card is persisted, so the forked session do
 ## How it works
 
 - On `/btw`, the current branch (`ctx.sessionManager.getBranch()`) is converted to LLM messages with `convertToLlm()`. Assistant tool calls with no matching `toolResult` are dropped first, because `/btw` can run mid-turn when tool calls are still unanswered, and Anthropic rejects `tool_use` blocks without a matching `tool_result`.
-- The side thread starts from that snapshot. Each question is sent to the configured model override, or the current session model if no override is configured or it cannot be resolved, with a fixed system prompt (concise, no tool suggestions) via `getModelProvider(ctx, model).streamSimple(...)`, with `apiKey`/`headers` from `ctx.modelRegistry.getApiKeyAndHeaders()` and the current thinking level (`off` maps to `undefined`). Completed Q&A pairs are appended to the side thread, so follow-ups have full side-thread history plus the original branch snapshot.
+- The side thread starts from that snapshot. Each question is sent to the configured model override, or the current session model if no override is configured or it cannot be resolved, with a fixed system prompt (concise, no tool suggestions) via `ctx.modelRegistry.streamSimple(...)` with the current thinking level (`off` maps to `undefined`). The registry applies `models.json` overrides and extension-registered providers and resolves auth per request; a `getApiKeyAndHeaders()` pre-check only produces a friendly error when no key is configured. Completed Q&A pairs are appended to the side thread, so follow-ups have full side-thread history plus the original branch snapshot.
 - The overlay is a `Component`/`Focusable` from `@earendil-works/pi-tui`, rendering a bordered box (max width 100, body capped at 30 rows or `terminal.rows - 14`) with a spinner while streaming and markdown-rendered answers.
 - On close with at least one completed turn, the thread is persisted via `pi.appendEntry<BtwEntryData>("btw-answer", { model, turns })`.
 
@@ -94,9 +94,7 @@ Optional global config: `~/.pi/agent/configs/btw.json`. Changes take effect on t
 
 ## Dependencies
 
-Runtime (workspace):
-
-- `@nicknisi/pi-shared` — `getModelProvider(ctx, model)`, which resolves the composed runtime provider from `ctx.modelRegistry.getProvider()` (honoring `models.json` overrides and extension-registered providers).
+No runtime dependencies. Requires pi `>=0.86.0` (`ctx.modelRegistry.streamSimple()`).
 
 Peer (pi APIs):
 

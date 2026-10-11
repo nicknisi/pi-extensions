@@ -35,7 +35,7 @@ Restart Pi or run `/reload` after installation.
 | Success                       | Both lines use Pi's green `toolSuccessBg` background                                |
 | Running                       | Both lines use Pi's `toolPendingBg` background                                      |
 | Error                         | Both lines use Pi's red `toolErrorBg` background, with an explicit `Error:` preview |
-| Images                        | An image count instead of inline images                                             |
+| Images                        | An image count in the preview; pi still draws inline images below the row           |
 | Ctrl+O                        | Pi's existing expand/collapse toggle for all tools                                  |
 | Fullscreen left click         | Expand one collapsed tool. Click its original header or result to collapse it again |
 
@@ -50,12 +50,11 @@ None. The default is two content lines. Use Pi's existing expansion controls whe
 ## Dependencies and caveats
 
 - Pi supplies `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` as peer dependencies. `@nicknisi/pi-shared` supplies terminal-label sanitization.
-- Keyboard compaction works with Pi 0.84 and 0.85. Fullscreen click expansion needs Pi 0.85.1 or newer. Regular terminal mode leaves mouse input to terminal scrollback, so use Ctrl+O there.
-- Pi has no public global tool-rendering hook. This extension wraps `ToolExecutionComponent.render` and its mouse handler, reading the component's private display state. A Pi update can break this integration. Missing required methods produce a warning and leave the original display in place.
-- The wrapper is installed only in TUI sessions and removed on session shutdown, including reload. Print, JSON, and RPC sessions are unchanged.
+- Needs Pi 1.0.1 or newer (`pi.registerToolRenderer`). Regular terminal mode leaves mouse input to terminal scrollback, so use Ctrl+O there.
+- Uses Pi's public `pi.registerToolRenderer()` hook, wrapping whatever renderer the tool (or a later extension) provides. Rows draw their own shell so collapsed rows stay two lines; expanded rows re-create Pi's default box around the original renderer.
+- Pi draws inline images for a result regardless of the row's renderer, so collapsed rows with images are not fully compact.
 - Previews use the tool's existing result renderer when available, falling back to the first nonempty output line. JSON-only output shows an item or field count instead of serialized data. No model call is made. Custom controls and detailed progress displays are available when expanded.
 - Expanded displays retain each tool's own limits. This extension cannot recover output already truncated by a tool.
-- Other extensions that replace the same component methods can conflict. This extension does not overwrite a later wrapper during cleanup.
 - User shell commands entered with `!` or `!!` use a separate Pi component and are unchanged.
 
 ## Development
