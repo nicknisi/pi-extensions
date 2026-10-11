@@ -175,6 +175,14 @@ describe('evidence-based evaluation', () => {
     expect(h.notifications.at(-1)).toContain('Goal achieved');
   });
 
+  it('accepts a fence with the JSON on the same line', async () => {
+    const h = makeHarness();
+    evaluator('```json ' + verdict('met', ['result']) + ' ```');
+    await h.command('all tests pass');
+    await h.event('agent_end');
+    expect(h.notifications.at(-1)).toContain('Goal achieved');
+  });
+
   it('allows an actual assistant deliverable for answer-only goals', async () => {
     const h = makeHarness();
     evaluator(verdict('met', ['answer'], 'answer'));

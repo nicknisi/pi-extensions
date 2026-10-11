@@ -295,7 +295,7 @@ interface EvalResult {
 
 function parseEvaluation(text: string, entries: EvidenceEntry[]): EvalResult {
   // Accept a single enclosing Markdown fence, but never extract JSON from prose.
-  const value = JSON.parse(text.trim().replace(/^```(?:json)?\s*\n([\s\S]*?)\n```$/i, '$1'));
+  const value = JSON.parse(text.trim().replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/i, '$1'));
   if (
     !value ||
     !['met', 'not_met', 'unknown'].includes(value.verdict) ||
