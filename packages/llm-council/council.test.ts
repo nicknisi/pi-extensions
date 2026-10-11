@@ -24,10 +24,16 @@ import {
   type CouncilSelection,
 } from './selection.js';
 
-const { spawn } = vi.hoisted(() => ({ spawn: vi.fn() }));
+const { spawn, runtimeOptions } = vi.hoisted(() => ({
+  spawn: vi.fn(),
+  runtimeOptions: [] as Array<{ parent?: () => unknown }>,
+}));
 vi.mock('@nicknisi/pi-shared', async (original) => ({
   ...(await original<typeof import('@nicknisi/pi-shared')>()),
-  createSubagentRuntime: () => ({ spawn }),
+  createSubagentRuntime: (options: { parent?: () => unknown }) => {
+    runtimeOptions.push(options);
+    return { spawn };
+  },
 }));
 
 const fable = 'anthropic/claude-fable-5-1';
@@ -314,6 +320,14 @@ describe('council selection and execution', () => {
     spawn.mockClear();
     await h.run();
     expect(spawn.mock.calls.map(([args]) => args.model)).toEqual([fable, fable]);
+  });
+
+  it('gives member runs the session context as their parent registry', () => {
+    const h = harness();
+    const { parent } = runtimeOptions.at(-1)!;
+    expect(parent?.()).toBeUndefined();
+    h.events.get('session_start')!({}, h.ctx);
+    expect(parent?.()).toBe(h.ctx);
   });
 
   it('restores active-branch selections, clears them on branch navigation, and supports reset', async () => {
