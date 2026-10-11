@@ -1,5 +1,11 @@
 # @nicknisi/pi-turn-timer
 
+## 0.2.0
+
+### Minor Changes
+
+- b67617e: Use pi's newer lifecycle events. turn-timer leaves out time spent waiting on `ctx.ui` prompts and labels cancelled runs. session-name skips auto-naming after a cancelled run. statusline writes `permit`/`question` tmux status while a `ctx.ui` prompt is open.
+
 ## 0.1.3
 
 ### Patch Changes

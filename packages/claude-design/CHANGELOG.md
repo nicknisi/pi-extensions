@@ -1,5 +1,11 @@
 # @nicknisi/pi-claude-design
 
+## 0.1.1
+
+### Patch Changes
+
+- b67617e: shared: remove `hideLabeledSection`, `scheduleHideLabeledSection`, `clearHideTimers`, and `RequestRenderable`; their only use was pi's `[Themes]` banner, removed in pi 0.99. claude-design: setup and the `design` skill target pi's built-in MCP support (`!command` headers, `mcp__claude_design__*` tool names) instead of pi-mcp-adapter.
+
 ## 0.1.0
 
 ### Minor Changes

@@ -1,5 +1,11 @@
 # @nicknisi/pi-handoff
 
+## 0.1.10
+
+### Patch Changes
+
+- b67617e: Fix system prompts being silently dropped on pi >=0.86: model calls now go through `ctx.modelRegistry.complete()`/`streamSimple()`, which accept `systemPrompt` and resolve auth. Requires pi >=0.86.0.
+
 ## 0.1.9
 
 ### Patch Changes
