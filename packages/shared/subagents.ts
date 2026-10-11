@@ -27,6 +27,7 @@
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { subagentsDir } from './subagents-dir.js';
 import { addWorktree, captureHandoff, findRepoRoot, removeWorktree } from './worktree.js';
 import {
   type AgentSession,
@@ -34,7 +35,9 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   defineTool,
+  type ExtensionContext,
   getAgentDir,
+  type ModelRegistry,
   ModelRuntime,
   resolveCliModel,
   SessionManager,
@@ -86,8 +89,10 @@ export interface SpawnOptions {
   agent?: string;
   /**
    * Model spec ('provider/id', optionally with a ':thinking' suffix) resolved
-   * against the user's configured models/auth. Omit to use pi's default
-   * resolution (session settings, else first available).
+   * against the parent's model registry when the runtime has a `parent`, else
+   * the user's configured models/auth. Omit to use the parent session's
+   * current model (with a `parent`), else pi's default resolution (session
+   * settings, else first available).
    */
   model?: string;
   /** Appended to pi's default system prompt (like --append-system-prompt). */
@@ -136,6 +141,7 @@ export interface SpawnOptions {
   maxToolCalls?: number;
   /**
    * Run the child in an isolated git worktree (~/.pi/agent/subagent-worktrees/<runId>,
+   * or $PI_SUBAGENTS_DIR/worktrees/<runId>,
    * detached from HEAD at spawn time). The child's writes never touch the caller's
    * working tree; on settle, the full change set (INCLUDING untracked files, via
    * `git add -A` + `git diff --cached`) is captured to `<runId>.patch` next to the
@@ -149,7 +155,7 @@ export interface SpawnOptions {
   /**
    * Owning pi session file path. When set, the run is ALSO persisted as a
    * standard pi session JSONL via the real `SessionManager` into the default
-   * sessions dir (~/.pi/agent/sessions/<encoded-cwd>/), with `parentSession`
+   * sessions dir (~/.pi/agent/sessions/<encoded-cwd>/, or $PI_SUBAGENTS_DIR/sessions/), with `parentSession`
    * set to this path — so the run is inspectable with pi's native /resume,
    * /tree, and --fork machinery. The bespoke run store (fleet/registry)
    * keeps working unchanged; this is an additive dual-write. Omit to disable
@@ -334,7 +340,7 @@ function writeSessionMirror(
   // No assistant turn means the child crashed before replying: don't mirror it.
   if (!safe.some((m) => m.role === 'assistant')) return undefined;
   try {
-    const mgr = SessionManager.create(cwd, undefined, parentSession ? { parentSession } : undefined);
+    const mgr = SessionManager.create(cwd, subagentsDir('sessions'), parentSession ? { parentSession } : undefined);
     for (const msg of safe) mgr.appendMessage(msg);
     // SessionManager creates the JSONL lazily; only report a file that exists.
     const file = mgr.getSessionFile();
@@ -580,6 +586,47 @@ export function sweepRunArtifactsOnce(rootDir: string): void {
   }
 }
 
+// ── Parent model runtime ───────────────────────────────────────────────────
+
+/** The parent session's model state. An ExtensionContext satisfies it. */
+export type SubagentParent = Pick<ExtensionContext, 'modelRegistry' | 'model'>;
+
+let warnedReplay = false;
+
+/**
+ * The model runtime children share with the parent registry, so providers the
+ * parent registered at runtime (pi.registerProvider), with their auth and
+ * header handling, reach the child.
+ *
+ * PRIVATE REACH: pi exposes no public way to get a ModelRegistry's runtime,
+ * and createAgentSession only takes a ModelRuntime. `runtime` is a private
+ * field of ModelRegistry (checked against pi-coding-agent 0.84, 0.87 and 1.1). A
+ * public accessor upstream would remove this helper.
+ *
+ * Fallback when the field is gone: replay the parent's runtime-registered
+ * providers into a fresh runtime via the public registry API. That keeps
+ * gateway-style providers and their headers, but loses runtime API keys
+ * (--api-key) and any host-supplied credential store.
+ */
+export async function parentModelRuntime(registry: ModelRegistry): Promise<ModelRuntime> {
+  const runtime = (registry as unknown as { runtime?: Partial<ModelRuntime> }).runtime;
+  if (typeof runtime?.streamSimple === 'function' && typeof runtime.getModel === 'function') {
+    return runtime as ModelRuntime;
+  }
+  if (!warnedReplay) {
+    warnedReplay = true;
+    console.warn('[subagents] ModelRegistry runtime not reachable; replaying parent providers into a fresh runtime');
+  }
+  const child = await ModelRuntime.create();
+  for (const id of registry.getRegisteredProviderIds()) {
+    const native = registry.getRegisteredNativeProvider(id);
+    const config = registry.getRegisteredProviderConfig(id);
+    if (native) child.registerNativeProvider(native);
+    else if (config) child.registerProvider(id, config);
+  }
+  return child;
+}
+
 // ── Runtime ────────────────────────────────────────────────────────────────
 
 export function createSubagentRuntime(options: {
@@ -587,6 +634,13 @@ export function createSubagentRuntime(options: {
   maxConcurrent?: number;
   /** When set, run records (plus bounded output) persist to "<dir>/<namespace>/<runId>.json". */
   artifactsDir?: string;
+  /**
+   * The parent session's model state, read at each spawn (pass the latest
+   * ExtensionContext). Children then share the parent's model runtime and
+   * default to its current model. Omit to resolve models from a fresh
+   * runtime over the user's auth/models config.
+   */
+  parent?: () => SubagentParent | undefined;
 }): SubagentRuntime {
   const namespace = options.namespace;
   const maxConcurrent = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
@@ -601,6 +655,23 @@ export function createSubagentRuntime(options: {
   function modelRuntime(): Promise<ModelRuntime> {
     modelRuntimePromise ??= ModelRuntime.create();
     return modelRuntimePromise;
+  }
+
+  /**
+   * Snapshot the parent's model state. With a configured `parent`, an
+   * unavailable or stale context (a stale ExtensionContext throws on access)
+   * is an error: falling back to a fresh runtime would silently use the
+   * user's default provider instead of the host's registry.
+   */
+  function parentState(): { parent?: SubagentParent; error?: string } {
+    if (!options.parent) return {};
+    try {
+      const parent = options.parent();
+      if (!parent) return { error: 'parent session context is unavailable' };
+      return { parent: { modelRegistry: parent.modelRegistry, model: parent.model } };
+    } catch (err) {
+      return { error: `parent session context is stale: ${err instanceof Error ? err.message : String(err)}` };
+    }
   }
 
   function acquire(): Promise<void> {
@@ -716,6 +787,14 @@ export function createSubagentRuntime(options: {
     let cwd = opts.cwd ?? process.cwd();
     const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
+    const { parent, error: parentError } = parentState();
+    if (parentError) {
+      return markFailed(
+        record,
+        fail(runId, 'crashed', `${parentError}; refusing to fall back to the default provider`, startedAt),
+      );
+    }
+
     // Worktree isolation: the child writes into a detached worktree, never
     // the caller's tree. Handoff (full patch incl. untracked files) is
     // captured at settle; merge-back is the caller's decision.
@@ -768,7 +847,7 @@ export function createSubagentRuntime(options: {
       if (supervisorToolName && !tools.includes(supervisorToolName)) tools.push(supervisorToolName);
     }
 
-    const runtime = await modelRuntime();
+    const runtime = parent ? await parentModelRuntime(parent.modelRegistry) : await modelRuntime();
 
     let model: ReturnType<typeof resolveCliModel>['model'];
     let thinkingLevel = opts.thinkingLevel;
@@ -779,6 +858,8 @@ export function createSubagentRuntime(options: {
       }
       model = resolved.model;
       thinkingLevel ??= resolved.thinkingLevel;
+    } else if (parent?.model) {
+      model = parent.model;
     }
 
     const loader = new DefaultResourceLoader({

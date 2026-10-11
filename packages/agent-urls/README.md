@@ -59,7 +59,7 @@ Tool usage (as called by the LLM):
 
 ## Run discovery
 
-Runs are discovered on every invocation by scanning `~/.pi/agent/subagent-runs/<namespace>/*.json`. Each file is a JSON `RunRecord`:
+Runs are discovered on every invocation by scanning `~/.pi/agent/subagent-runs/<namespace>/*.json` (or `$PI_SUBAGENTS_DIR/runs/<namespace>/*.json`, see below). Each file is a JSON `RunRecord`:
 
 ```json
 {
@@ -84,6 +84,7 @@ No config files are read. No per-run options.
 Environment variables:
 
 - `PI_CODING_AGENT_DIR` — pi agent directory. Defaults to `~/.pi/agent`. A leading `~/` is expanded. This determines where `subagent-runs/` is scanned.
+- `PI_SUBAGENTS_DIR` — when set, runs are read from `$PI_SUBAGENTS_DIR/runs/` instead, matching where the shared runtime writes them. Read on every call.
 
 Constants (hardcoded in `index.ts`):
 
@@ -93,8 +94,9 @@ Constants (hardcoded in `index.ts`):
 
 ## Dependencies
 
-- `@earendil-works/pi-coding-agent` (peer, `*`) — `ExtensionAPI` (`registerTool`, `registerCommand`, `sendMessage`) and `ExtensionCommandContext` (`ctx.ui.notify`) types/APIs only.
-- Node builtins: `fs`, `os`, `path`. No npm runtime dependencies, no workspace deps.
+- `@earendil-works/pi-coding-agent` (peer, `*`) — `ExtensionAPI` (`registerTool`, `registerCommand`, `sendMessage`, `on`, `getActiveTools`, `setActiveTools`) and `ExtensionCommandContext` (`ctx.ui.notify`) types/APIs only.
+- `@nicknisi/pi-shared` (`workspace:*`) — `declareUnlessSearchable` (deferred tool fallback) and `subagentsDir` (`PI_SUBAGENTS_DIR` resolution).
+- Node builtins: `fs`, `os`, `path`. No other runtime dependencies.
 
 ## Tool exposure
 

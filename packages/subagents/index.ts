@@ -9,7 +9,7 @@
  *   (✓/✗ rows, └─ sub-lines, spinner), matching llm-council's vocabulary.
  * `fleet` (tool) / `/fleet` (command) — inspect live and persisted runs,
  *   including background ones. Run records persist to
- *   <agentDir>/subagent-runs/<namespace>/<runId>.json, so runs from other
+ *   <agentDir>/subagent-runs/<namespace>/<runId>.json (or $PI_SUBAGENTS_DIR/runs/…), so runs from other
  *   extensions using the shared runtime show up here too. In TUI mode `/fleet`
  *   opens an interactive overlay (searchable list → run detail); otherwise it
  *   falls back to a plain-text transcript entry.
@@ -44,6 +44,7 @@ import {
 } from '@earendil-works/pi-tui';
 import {
   createSubagentRuntime,
+  subagentsDir,
   readRunArtifacts,
   sweepRunArtifactsOnce,
   sanitizeTerminalLabel,
@@ -81,9 +82,9 @@ export interface SubagentsOptions {
   profileDirs?: string[];
 }
 
-const ARTIFACTS_ROOT = path.join(getAgentDir(), 'subagent-runs');
-const PATCHES_STATE_DIR = path.join(getAgentDir(), 'subagent-patches');
-const PATCHES_STATE_FILE = path.join(PATCHES_STATE_DIR, 'state.json');
+// Resolved at use: PI_SUBAGENTS_DIR (see @nicknisi/pi-shared) relocates every runtime write.
+const artifactsRoot = () => subagentsDir('runs') ?? path.join(getAgentDir(), 'subagent-runs');
+const patchesStateDir = () => subagentsDir('patches') ?? path.join(getAgentDir(), 'subagent-patches');
 const STATUS_KEY = 'subagents';
 const INLINE_WIDGET_KEY = 'subagents-inline';
 /** Toggle the fleet radar overlay. Rebind via ~/.pi/agent/keybindings.json. */
@@ -244,7 +245,7 @@ function formatRunLine(run: RunArtifact): string {
 
 function collectFleet(live: RunArtifact[]): RunArtifact[] {
   const byId = new Map<string, RunArtifact>();
-  for (const record of readRunArtifacts(ARTIFACTS_ROOT)) byId.set(record.runId, record);
+  for (const record of readRunArtifacts(artifactsRoot())) byId.set(record.runId, record);
   // Live wins for status/timing, but live records carry no output — keep the artifact's.
   for (const record of live) {
     const persisted = byId.get(record.runId);
@@ -687,7 +688,8 @@ class FleetOverlay implements Component, Focusable {
 // pending patch with diffstat, a clean/conflicts/stale pre-flight (checked
 // WITHOUT applying, via `git apply --check`), apply / apply-selected-hunk /
 // discard, and an expandable full-diff view. Apply/discard decisions persist
-// to ~/.pi/agent/subagent-patches/state.json so /patches survives restart.
+// to ~/.pi/agent/subagent-patches/state.json (or $PI_SUBAGENTS_DIR/patches/) so
+// /patches survives restart.
 
 interface PatchState {
   version: 1;
@@ -709,7 +711,7 @@ const PATCH_DIFF_CAP = 2000;
 
 function loadPatchState(): PatchState {
   try {
-    const j = JSON.parse(fs.readFileSync(PATCHES_STATE_FILE, 'utf8')) as Partial<PatchState>;
+    const j = JSON.parse(fs.readFileSync(path.join(patchesStateDir(), 'state.json'), 'utf8')) as Partial<PatchState>;
     if (j && j.decisions) return { version: 1, decisions: j.decisions };
   } catch {
     // missing/corrupt state — start fresh
@@ -719,10 +721,12 @@ function loadPatchState(): PatchState {
 
 function savePatchState(state: PatchState): void {
   try {
-    fs.mkdirSync(PATCHES_STATE_DIR, { recursive: true });
-    const tmp = `${PATCHES_STATE_FILE}.${process.pid}.tmp`;
+    const dir = patchesStateDir();
+    const file = path.join(dir, 'state.json');
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
-    fs.renameSync(tmp, PATCHES_STATE_FILE);
+    fs.renameSync(tmp, file);
   } catch {
     // best-effort persistence; a lost decision just means the patch re-appears
   }
@@ -754,17 +758,18 @@ async function stampPatch(
 async function collectPatches(pi: ExtensionAPI, runtime: SubagentRuntime, cwd: string): Promise<PatchEntry[]> {
   const state = loadPatchState();
   const artifacts = new Map<string, RunArtifact>();
-  for (const a of readRunArtifacts(ARTIFACTS_ROOT)) artifacts.set(a.runId, a);
+  const root = artifactsRoot();
+  for (const a of readRunArtifacts(root)) artifacts.set(a.runId, a);
   const entries: PatchEntry[] = [];
   let namespaces: fs.Dirent[];
   try {
-    namespaces = fs.readdirSync(ARTIFACTS_ROOT, { withFileTypes: true });
+    namespaces = fs.readdirSync(root, { withFileTypes: true });
   } catch {
     return entries;
   }
   for (const ns of namespaces) {
     if (!ns.isDirectory()) continue;
-    const dir = path.join(ARTIFACTS_ROOT, ns.name);
+    const dir = path.join(root, ns.name);
     let files: fs.Dirent[];
     try {
       files = fs.readdirSync(dir, { withFileTypes: true });
@@ -1364,7 +1369,13 @@ async function dispatchInline(
 }
 
 export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = {}) {
-  const runtime = createSubagentRuntime({ namespace: 'subagents', artifactsDir: ARTIFACTS_ROOT });
+  // Children share the parent session's model registry and default model.
+  let parentCtx: ExtensionContext | undefined;
+  const runtime = createSubagentRuntime({
+    namespace: 'subagents',
+    artifactsDir: artifactsRoot(),
+    parent: () => parentCtx,
+  });
   const extraProfileDirs = options.profileDirs ?? [];
   // Registration-time snapshot for the tool description; execution rescans.
   const initialProfiles = loadProfiles(process.cwd(), extraProfileDirs);
@@ -1390,9 +1401,10 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
   };
   // GC old artifacts (7d retention, incl. worktrees + patches) and reap
   // ghost 'running' records left by dead host processes. Once per process.
-  sweepRunArtifactsOnce(ARTIFACTS_ROOT);
+  sweepRunArtifactsOnce(artifactsRoot());
 
   pi.on('session_start', (_event, ctx) => {
+    parentCtx = ctx;
     declareUnlessSearchable(pi, ['fleet']);
     if (!ctx.hasUI) return;
     statusUi = ctx.ui;
@@ -1435,6 +1447,8 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
   pi.registerTool({
     name: 'dispatch',
     label: 'Dispatch Subagents',
+    // Children may run bash/edit/write (or builders in worktrees) and reach the network.
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     description: [
       'Fan out focused child agents in parallel: independent research questions, parallel reviews,',
       'second opinions, or scoped file investigations. Each child runs hermetically (no user',

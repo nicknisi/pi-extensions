@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
-import { declareUnlessSearchable } from '@nicknisi/pi-shared';
+import { declareUnlessSearchable, subagentsDir } from '@nicknisi/pi-shared';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -57,13 +57,14 @@ function statMtime(file: string): number {
 }
 
 /**
- * Enumerate persisted run records under ~/.pi/agent/subagent-runs/<ns>/*.json
- * (written by @nicknisi/pi-shared's in-process runtime). Unreadable or
+ * Enumerate persisted run records under ~/.pi/agent/subagent-runs/<ns>/*.json,
+ * or $PI_SUBAGENTS_DIR/runs/<ns>/*.json when set (written by @nicknisi/pi-shared's
+ * in-process runtime). Unreadable or
  * invalid files are skipped; a record missing `namespace` inherits its
  * directory name.
  */
 function discoverRuns(): LocatedRun[] {
-  const root = path.join(AGENT_DIR, 'subagent-runs');
+  const root = subagentsDir('runs') ?? path.join(AGENT_DIR, 'subagent-runs');
   const runs: LocatedRun[] = [];
   let namespaces: string[];
   try {

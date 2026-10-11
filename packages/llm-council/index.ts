@@ -471,7 +471,9 @@ let liveDetails: CouncilDetails | null = null;
 // ── Tool registration ────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-  const subagents = createSubagentRuntime({ namespace: 'llm-council' });
+  // Members may sit on runtime-registered providers; children need the parent's registry.
+  let parentCtx: ExtensionContext | undefined;
+  const subagents = createSubagentRuntime({ namespace: 'llm-council', parent: () => parentCtx });
   // Parallel tool calls must not replace one another's model-selection dialogs.
   let modelSelections = Promise.resolve();
   const resolveModels = (
@@ -493,6 +495,7 @@ export default function (pi: ExtensionAPI) {
   const refreshStatus = (ctx: ExtensionContext) =>
     updateCouncilStatus(ctx, currentCouncil(ctx), !!restoreSelection(ctx));
   pi.on('session_start', (_event, ctx) => {
+    parentCtx = ctx;
     declareUnlessSearchable(pi, ['llm_council']);
     refreshStatus(ctx);
   });

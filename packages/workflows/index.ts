@@ -31,6 +31,7 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@e
 import { CONFIG_DIR_NAME, getAgentDir } from '@earendil-works/pi-coding-agent';
 import {
   createSubagentRuntime,
+  subagentsDir,
   readRunArtifacts,
   sweepRunArtifactsOnce,
   type RunArtifact,
@@ -51,7 +52,8 @@ import {
   type RunScriptResult,
 } from './engine.js';
 
-const ARTIFACTS_ROOT = path.join(getAgentDir(), 'subagent-runs');
+// Resolved at use: PI_SUBAGENTS_DIR (see @nicknisi/pi-shared) relocates every runtime write.
+const artifactsRoot = () => subagentsDir('runs') ?? path.join(getAgentDir(), 'subagent-runs');
 const NAMESPACE = 'workflows';
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_TIMEOUT_MS = 30 * 60 * 1000;
@@ -331,8 +333,17 @@ function formatRunResult(result: RunScriptResult, label: string): string {
 export default function workflows(pi: ExtensionAPI): void {
   const cancellables: Cancellables = new Map();
   const activeRuns: ActiveRuns = new Set();
-  const runtime = createSubagentRuntime({ namespace: NAMESPACE, artifactsDir: ARTIFACTS_ROOT });
-  sweepRunArtifactsOnce(ARTIFACTS_ROOT);
+  // Children share the parent session's model registry and default model.
+  let parentCtx: ExtensionContext | undefined;
+  const runtime = createSubagentRuntime({
+    namespace: NAMESPACE,
+    artifactsDir: artifactsRoot(),
+    parent: () => parentCtx,
+  });
+  sweepRunArtifactsOnce(artifactsRoot());
+  pi.on('session_start', (_event, ctx) => {
+    parentCtx = ctx;
+  });
 
   pi.on('session_start', () => declareUnlessSearchable(pi, ['workflow']));
 
@@ -340,6 +351,8 @@ export default function workflows(pi: ExtensionAPI): void {
     name: 'workflow',
     label: 'Workflow',
     exposure: 'deferred',
+    // Scripts run host-process JS and child agents may edit files or reach the network.
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     description: [
       'Run a JavaScript workflow script that orchestrates subagents, or manage runs. Actions: run,',
       'list (saved workflow files), status (run record by runId), stop, pause, resume (hold active',
@@ -741,7 +754,7 @@ async function cmdWf(
 /** Find a run by full id or unique 8-char prefix across live + persisted records. */
 function findRun(runtime: SubagentRuntime, runId: string): RunArtifact | undefined {
   const live = runtime.listRuns() as RunArtifact[];
-  const persisted = readRunArtifacts(ARTIFACTS_ROOT);
+  const persisted = readRunArtifacts(artifactsRoot());
   const byId = new Map<string, RunArtifact>();
   for (const r of persisted) byId.set(r.runId, r);
   for (const r of live) byId.set(r.runId, { ...byId.get(r.runId), ...r });

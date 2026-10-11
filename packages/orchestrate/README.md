@@ -130,7 +130,7 @@ No settings file and no environment variables. Behavior is controlled entirely b
 ## Caveats
 
 - **Package name vs. content**: `package.json` describes this as "Multi-agent orchestration across pi sessions", but the current code implements goal/loop, not cross-session orchestration.
-- **Pi internals**: evidence and model selection use public context APIs, but sharing the model registry's backing runtime still uses a structural cast because that property is private in pi 0.84. A pi upgrade could change it.
+- **Pi APIs**: evidence, model selection, and the evaluator call (`ctx.modelRegistry.streamSimple()`) use public extension APIs only; no private pi internals.
 - **Evidence limitations**: the evaluator sees bounded text, not the filesystem or screenshots. Citation validation prevents invented IDs, not an incorrect interpretation of a real result. Unknown means unverified, never success.
 - **Stale contexts**: the extension caches the last `ExtensionContext` and probes `ctx.isIdle()` before reuse; timer callbacks silently no-op if the context has gone stale. Errors matching `stale|invalid|session replacement|assertActive` are treated as expected.
 - **Evaluator cost**: one model call per `agent_end` while a goal is active, using the session's current model. No tools and minimal thinking reduce overhead, but the current model may be expensive. Each completed run adds an evaluation call until the goal completes or pauses.

@@ -2,11 +2,11 @@
 
 Shared helper library for the extensions in this monorepo. It is not a pi extension itself — it exports no default extension entry, adds no commands, tools, keybindings, widgets, or events, and installing it into pi directly does nothing. Other packages depend on it via `"@nicknisi/pi-shared": "workspace:*"` and import from it like any library.
 
-It exists to centralize things that several extensions were duplicating: a set of TUI utilities (gradient text, renderable-tree surgery, two-column layout, escape-sequence sanitization, render dispatch) plus a composable searchable select component, and an in-process subagent runtime for spawning focused child agent sessions.
+It exists to centralize things that several extensions were duplicating: a set of TUI utilities (gradient text, an ANSI-stripping render probe, two-column layout, escape-sequence sanitization, render dispatch) plus a composable searchable select component, and an in-process subagent runtime for spawning focused child agent sessions.
 
 ## Exports
 
-`index.ts` re-exports everything from `tui-utils.ts`, `searchable-select-list.ts`, and `subagents.ts`.
+`index.ts` re-exports everything from `tui-utils.ts`, `searchable-select-list.ts`, `subagents.ts`, `subagents-dir.ts` (`PI_SUBAGENTS_DIR` paths), `workflow.ts` (`runWorkflow`), `patches.ts` (`parseUnifiedDiff` for worktree patch handoffs), and `tools.ts` (`declareUnlessSearchable`).
 
 ### TUI utilities (`tui-utils.ts`)
 
@@ -100,6 +100,9 @@ Design rules baked in:
 - **Standard pi session mirror (dual-write).** `spawn({ ownerSession })` records ownership on `RunRecord.ownerSession` without enabling a mirror. `spawn({ parentSession })` uses the same path as the owner and ALSO persists the run as a standard pi session JSONL via the real `SessionManager` into the default sessions dir, with the header's `parentSession` linked to the owning session — so runs are inspectable with pi's native `/resume`, `/tree`, and `--fork`. The child mirror path is recorded separately on `RunRecord.sessionFile`. Additive: the bespoke `.json` artifact is still written and is what `readRunArtifacts`/fleet read. Opt-in: when `parentSession` is omitted, no mirror is written (so other shared-runtime consumers are unaffected). A run that produced no assistant turn is not mirrored, so `sessionFile` is `undefined`.
 - **Timeout/abort/budgets.** `timeoutMs` (default 15 min, `0` disables) and `signal` both map to `session.abort()`; `maxTurns` / `maxToolCalls` abort the child when exceeded. All three produce `kind: 'aborted'` with a reason-specific error.
 
+- **Parent model registry.** Pass `parent: () => ctx` (the latest `ExtensionContext`, read at each spawn) to `createSubagentRuntime` and children share the parent session's model runtime, so providers registered at runtime (`pi.registerProvider`) carry over with their auth and headers. A spawn with no `model` then defaults to the parent's current model; an explicit `model` resolves against the same registry. pi has no public accessor for a registry's runtime, so `parentModelRuntime(registry)` reads `ModelRegistry`'s private `runtime` field (checked on pi-coding-agent 0.84, 0.87 and 1.1) and, if it's gone, replays the parent's runtime-registered providers into a fresh runtime (losing runtime `--api-key` keys and host credential stores). If `parent` is configured but returns nothing or throws (a stale context), the spawn fails closed with kind `crashed` instead of falling back to the user's default provider. Without `parent`, models resolve from a fresh `ModelRuntime.create()` as before.
+- **`PI_SUBAGENTS_DIR`.** `subagentsDir(leaf)` returns `<$PI_SUBAGENTS_DIR>/<leaf>` when the env var is set, else `undefined` (keep your default). The runtime uses it for worktrees (`worktrees`), session mirrors (`sessions`) and workflow run dirs (`workflow-runs`); extensions use it for `runs` (their `artifactsDir`) and `patches`. Read at call time.
+
 Also exported: `resolveContainedAgentResource(kind, name, leaf)` — containment-checked resolution of a bare name under the agent dir (`~/.pi/agent/extensions/<name>/<leaf>` etc.) for untrusted config input; returns `null` for anything with path separators or `..`. And `sweepRunArtifacts(rootDir, { now?, retentionMs? })` for direct GC control (returns `{ deleted, reaped }`).
 
 Non-goal: crash isolation — children share the parent's event loop and memory (a pathological child can hurt the host session). Orchestration lives in `workflow.ts` (below).
@@ -168,6 +171,16 @@ Consumers in this monorepo add the workspace dependency:
 ```
 
 and import individual functions as shown above. Known consumers: `header`, `llm-council`, `statusline`, `subagents`, `workflows`.
+
+### Tool exposure (`tools.ts`)
+
+```ts
+import { declareUnlessSearchable } from '@nicknisi/pi-shared';
+
+pi.on('session_start', () => declareUnlessSearchable(pi, ['my_tool']));
+```
+
+For tools registered with `exposure: 'deferred'`: when pi's built-in `tool_search` is not active, adds them to the active tool set so the model can still reach them. With `tool_search` active it does nothing and the tools stay out of the system prompt. Caveat: it also re-declares tools a user left out with `--tools`.
 
 ## Configuration
 
