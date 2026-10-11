@@ -189,6 +189,24 @@ describe('children reuse the parent model registry', () => {
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ['unavailable', () => undefined],
+    [
+      'stale',
+      () => {
+        throw new Error('ctx is stale');
+      },
+    ],
+  ])('fails closed when the configured parent context is %s', async (state, parent) => {
+    const runtime = createSubagentRuntime({ namespace: 'registry-test', parent });
+    const result = await runtime.spawn({ prompt: 'hi', tools: [], timeoutMs: 10_000 });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.kind).toBe('crashed');
+    expect(result.error).toContain(`parent session context is ${state}`);
+    expect(stub.requests).toHaveLength(0);
+  });
+
   it(
     'without a parent, an unknown runtime-only provider fails (no silent fallback to it)',
     { timeout: 15_000 },

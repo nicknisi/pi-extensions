@@ -660,13 +660,20 @@ export function createSubagentRuntime(options: {
     return modelRuntimePromise;
   }
 
-  /** Snapshot the parent's model state; a stale ExtensionContext throws on access. */
-  function parentState(): SubagentParent | undefined {
+  /**
+   * Snapshot the parent's model state. With a configured `parent`, an
+   * unavailable or stale context (a stale ExtensionContext throws on access)
+   * is an error: falling back to a fresh runtime would silently use the
+   * user's default provider instead of the host's registry.
+   */
+  function parentState(): { parent?: SubagentParent; error?: string } {
+    if (!options.parent) return {};
     try {
-      const parent = options.parent?.();
-      return parent ? { modelRegistry: parent.modelRegistry, model: parent.model } : undefined;
-    } catch {
-      return undefined;
+      const parent = options.parent();
+      if (!parent) return { error: 'parent session context is unavailable' };
+      return { parent: { modelRegistry: parent.modelRegistry, model: parent.model } };
+    } catch (err) {
+      return { error: `parent session context is stale: ${err instanceof Error ? err.message : String(err)}` };
     }
   }
 
@@ -783,6 +790,14 @@ export function createSubagentRuntime(options: {
     let cwd = opts.cwd ?? process.cwd();
     const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
+    const { parent, error: parentError } = parentState();
+    if (parentError) {
+      return markFailed(
+        record,
+        fail(runId, 'crashed', `${parentError}; refusing to fall back to the default provider`, startedAt),
+      );
+    }
+
     // Worktree isolation: the child writes into a detached worktree, never
     // the caller's tree. Handoff (full patch incl. untracked files) is
     // captured at settle; merge-back is the caller's decision.
@@ -835,7 +850,6 @@ export function createSubagentRuntime(options: {
       if (supervisorToolName && !tools.includes(supervisorToolName)) tools.push(supervisorToolName);
     }
 
-    const parent = parentState();
     const runtime = parent ? await parentModelRuntime(parent.modelRegistry) : await modelRuntime();
 
     let model: ReturnType<typeof resolveCliModel>['model'];
