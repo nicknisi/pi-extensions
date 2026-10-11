@@ -180,7 +180,7 @@ import { declareUnlessSearchable } from '@nicknisi/pi-shared';
 pi.on('session_start', () => declareUnlessSearchable(pi, ['my_tool']));
 ```
 
-For tools registered with `exposure: 'deferred'`: when pi's built-in `tool_search` is not active, adds them to the active tool set so the model can still reach them. With `tool_search` active it does nothing and the tools stay out of the system prompt. Caveat: it also re-declares tools a user left out with `--tools`.
+For tools registered with `exposure: 'deferred'`: when pi's built-in `tool_search` is not active, adds them to the active tool set so the model can still reach them. With `tool_search` active it does nothing and the tools stay out of the system prompt. It only declares tools pi still has registered: an explicit `--tools` allowlist or `--exclude-tools` removes unnamed extension tools from the registry, so the fallback never re-enables them.
 
 ## Configuration
 

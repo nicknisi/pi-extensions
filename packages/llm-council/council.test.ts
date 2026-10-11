@@ -102,6 +102,7 @@ function harness(mode: ExtensionContext['mode'] = 'tui') {
     on: (name: string, handler: (event: unknown, ctx: ExtensionContext) => void) => events.set(name, handler),
     appendEntry,
     getActiveTools: () => ['llm_council'],
+    getAllTools: () => [{ name: 'llm_council' }],
     setActiveTools: vi.fn(),
   } as unknown as ExtensionAPI;
   councilExtension(pi);

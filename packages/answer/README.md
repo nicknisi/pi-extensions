@@ -68,17 +68,16 @@ The current session model (`ctx.model`) is **not** used for extraction—only ch
 
 ## Dependencies
 
-- `@earendil-works/pi-coding-agent` — `ExtensionAPI`, `ExtensionContext`, `BorderedLoader`, `Theme`
+- `@earendil-works/pi-coding-agent` (peer, `>=0.86.0`) — `ExtensionAPI`, `ExtensionContext`, `BorderedLoader`, `Theme`; extraction runs through `ctx.modelRegistry.complete(model, { systemPrompt, messages }, { signal })`, which applies `models.json` overrides, extension-registered providers, and request-time auth
 - `@earendil-works/pi-tui` — `Component`, `Focusable`, `Editor`, `EditorTheme`, `Key`, `matchesKey`, `TUI`, `truncateToWidth`, `visibleWidth`, `wrapTextWithAnsi`
 - `@earendil-works/pi-ai` — types only (`Api`, `Model`, `UserMessage`)
-- `@nicknisi/pi-shared` (workspace) — `getModelProvider(ctx, model)`, which resolves the composed runtime provider from `ctx.modelRegistry.getProvider()` (honors models.json overrides and extension-registered providers, unlike compat dispatch)
 
 No third-party npm dependencies.
 
 ## Caveats
 
 - **Extraction-model availability.** If none of the configured candidates exist with working authentication, the command errors out listing every model it checked.
-- **Pi internals:** depends on `ctx.sessionManager.getBranch()` entry shapes (`entry.type === "message"`, `message.role`, `message.stopReason === "stop"`, content part `{ type: "text", text }`), `ctx.modelRegistry.find/getApiKeyAndHeaders/getProvider`, `ctx.ui.custom` component contract, and `pi.sendUserMessage(..., { deliverAs: "followUp" })`. Any of these changing across pi versions will break it.
+- **Pi internals:** depends on `ctx.sessionManager.getBranch()` entry shapes (`entry.type === "message"`, `message.role`, `message.stopReason === "stop"`, content part `{ type: "text", text }`), `ctx.modelRegistry.find/getApiKeyAndHeaders/complete`, `ctx.ui.custom` component contract, and `pi.sendUserMessage(..., { deliverAs: "followUp" })`. Any of these changing across pi versions will break it.
 - **Editor render slicing.** `AnswerComponent.render` strips the first and last lines of the embedded `Editor.render()` output (`editorLines[1..len-2]`) assuming the Editor wraps its content in a border frame. If pi-tui's `Editor` render shape changes, answers will render wrong.
 - **Extraction is heuristic at the edges.** The LLM prompt tries to keep questions self-contained, but the regex fallback (`fallbackExtractQuestions`) is naive — it splits on sentence boundaries ending in `?` and can produce context-free or false-positive questions when extraction JSON parsing fails.
 - **Multi-part assistant messages** are flattened by joining all text parts with `\n`; non-text parts (tool calls, thinking) are ignored.

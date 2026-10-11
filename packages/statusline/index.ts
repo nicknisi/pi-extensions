@@ -30,7 +30,7 @@ const execFileP = promisify(execFile);
 
 // ── Tmux status integration ─────────────────────────────────────────────────
 
-const STATUS_DIR = join(process.env.HOME || '', '.cache', 'pi-status');
+const statusDir = () => join(process.env.HOME || '', '.cache', 'pi-status');
 
 function getTmuxSession(): string | undefined {
   if (!process.env.TMUX) return undefined;
@@ -55,7 +55,7 @@ function removeStatus() {
   if (!paneId) return;
   const paneNum = paneId.replace('%', '');
   try {
-    const file = join(STATUS_DIR, `${paneNum}.status`);
+    const file = join(statusDir(), `${paneNum}.status`);
     if (existsSync(file)) {
       const { unlinkSync } = require('node:fs');
       unlinkSync(file);
@@ -76,9 +76,10 @@ function writeStatus(status: Status, tool?: string) {
   if (!session) return;
   const paneNum = paneId.replace('%', '');
   try {
-    if (!existsSync(STATUS_DIR)) mkdirSync(STATUS_DIR, { recursive: true });
+    const dir = statusDir();
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     writeFileSync(
-      join(STATUS_DIR, `${paneNum}.status`),
+      join(dir, `${paneNum}.status`),
       JSON.stringify({
         state: status,
         pane: paneId,
