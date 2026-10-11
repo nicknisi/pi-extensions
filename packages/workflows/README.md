@@ -4,7 +4,7 @@ The model-facing front door to the first-party workflow engine. One `workflow` t
 
 ## The platform story
 
-Four pieces compose the workflow platform: `@nicknisi/pi-shared`'s **subagent runtime** (hermetic in-process child sessions), `@nicknisi/pi-codemode`'s **VM** approach (compile a model-written script in `node:vm` with injected bindings), `@nicknisi/pi-shared`'s **`workflow.ts` engine** (declarative multi-stage DAGs with needs/foreach/gates/retries), and **this tool** as the model-facing front door that ties them together with the script contract the old third-party engine used. The third-party `@quintinshaw/pi-dynamic-workflows` engine is being evicted — its script contract lives on unchanged here, its built-in pattern library / model tiers / agent-type registry / trigger-word arming do not.
+Three pieces compose the workflow platform: `@nicknisi/pi-shared`'s **subagent runtime** (hermetic in-process child sessions), `@nicknisi/pi-shared`'s **`workflow.ts` engine** (declarative multi-stage DAGs with needs/foreach/gates/retries), and **this tool** as the model-facing front door (compiling the model-written script in `node:vm` with injected bindings) that ties them together with the script contract the old third-party engine used. The third-party `@quintinshaw/pi-dynamic-workflows` engine is being evicted — its script contract lives on unchanged here, its built-in pattern library / model tiers / agent-type registry / trigger-word arming do not.
 
 ## What it adds
 
@@ -52,7 +52,7 @@ The script executes **in the host process with full Node access** — `process`,
 Plain files. The registry is `ls` — no database, no manifest, no config keys.
 
 - `~/.pi/agent/workflows/*.js` — global.
-- `.pi/workflows/*.js` — project-local, **trusted projects only** (the same trust gate as codemode's `/cx`). Untrusted projects see only global workflows.
+- `.pi/workflows/*.js` — project-local, **trusted projects only**. Untrusted projects see only global workflows.
 
 Names are bare file stems (`research`, not `research.js`, never a path — `..` and `/` are rejected to prevent escaping the workflows dirs). Global shadows a same-named project workflow. Files are read on demand, so `/reload` needs no workflow-specific wiring.
 
@@ -62,14 +62,14 @@ Every `agent()` call spawns through `@nicknisi/pi-shared`'s subagent runtime wit
 
 ## Migration from `@quintinshaw/pi-dynamic-workflows`
 
-| Old concept                                          | New home                                                                                                                                                                                                       |
-| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Built-in named patterns (e.g. `research`, `review`)  | Example `.js` files you drop in `~/.pi/agent/workflows/`. No built-in library — the registry is `ls`.                                                                                                          |
-| Model tiers (`fast` / `balanced` / `deep`)           | Explicit `model:` strings passed to `agent(prompt, { model: 'anthropic/claude-haiku-4-5' })`. No tier registry.                                                                                                |
-| `agentType` → tool/systemPrompt resolution           | Resolve `systemPrompt` in the script itself: `agent(prompt, { systemPrompt: 'You are a reviewer…', tools: ['read','grep','bash'] })`. `agentType` is accepted but ignored (logged).                            |
-| Trigger-word arming (the tool activates on keywords) | The model calls the `workflow` tool when intent warrants — no arming, no keyword matching.                                                                                                                     |
-| Phases with per-phase budgets                        | `phase(name)` is a logging marker only. Budget is a single run-level `{ total, spent, remaining }`; per-stage budgets are the `workflow.ts` engine's `tokenBudget` (use `runWorkflow` from codemode for that). |
-| The third-party engine's script globals              | Unchanged: `args`, `agent`, `parallel`, `pipeline`, `phase`, `log`, `budget`, `cwd`. Existing scripts run as-is.                                                                                               |
+| Old concept                                          | New home                                                                                                                                                                                                                     |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Built-in named patterns (e.g. `research`, `review`)  | Example `.js` files you drop in `~/.pi/agent/workflows/`. No built-in library — the registry is `ls`.                                                                                                                        |
+| Model tiers (`fast` / `balanced` / `deep`)           | Explicit `model:` strings passed to `agent(prompt, { model: 'anthropic/claude-haiku-4-5' })`. No tier registry.                                                                                                              |
+| `agentType` → tool/systemPrompt resolution           | Resolve `systemPrompt` in the script itself: `agent(prompt, { systemPrompt: 'You are a reviewer…', tools: ['read','grep','bash'] })`. `agentType` is accepted but ignored (logged).                                          |
+| Trigger-word arming (the tool activates on keywords) | The model calls the `workflow` tool when intent warrants — no arming, no keyword matching.                                                                                                                                   |
+| Phases with per-phase budgets                        | `phase(name)` is a logging marker only. Budget is a single run-level `{ total, spent, remaining }`; per-stage budgets are the `workflow.ts` engine's `tokenBudget` (call `runWorkflow` from `@nicknisi/pi-shared` for that). |
+| The third-party engine's script globals              | Unchanged: `args`, `agent`, `parallel`, `pipeline`, `phase`, `log`, `budget`, `cwd`. Existing scripts run as-is.                                                                                                             |
 
 ## Recipes
 
@@ -90,13 +90,13 @@ The `examples/` directory ships standalone, copy-and-adapt workflow scripts — 
 
 ## Tool exposure
 
-`workflow` register with `exposure: "deferred"` (pi ≥0.99), so they stay out of the system prompt when pi's built-in `tool_search` is active (`"defaultTools": ["+tool_search"]`): the model finds them on demand. Without `tool_search` the extension declares them directly at session start, as before. Older pi ignores the field. Tools also carry `annotations` (read-only/destructive/open-world hints) for permission extensions.
+`workflow` registers with `exposure: "deferred"` (pi ≥0.99), so it stays out of the system prompt when pi's built-in `tool_search` is active (`"defaultTools": ["+tool_search"]`): the model finds it on demand. Without `tool_search` the extension declares it directly at session start, as before. Older pi ignores the field. It also carries `annotations` (read-only/destructive/open-world hints) for permission extensions.
 
 ## Caveats
 
-- The script runs in the host process with full Node access — the same trust boundary as the `bash` and `codemode` tools. Your model, your session.
+- The script runs in the host process with full Node access — the same trust boundary as the `bash` tool. Your model, your session.
 - `checkpoint`/`ask` need an interactive UI host. In a headless/RPC host `checkpoint` degrades to a logged no-op and `ask` throws — scripts that require an answer fail loudly instead of inventing one.
 - Pause/resume are session-scoped and best-effort for tool-initiated runs: slash commands may queue behind an in-flight turn, so a `pause` issued mid-turn engages at the next `agent()` boundary after it's processed. For a guaranteed human gate, put `checkpoint`/`ask` in the script itself.
 - Project-local workflows (`.pi/workflows/`) load only in trusted projects; untrusted projects are limited to global workflows so a cloned repo cannot silently inject orchestration scripts.
-- `agent()` cannot spawn children of its own (the ecosystem recursion guard refuses nested orchestration). For dependent multi-stage work where stages spawn, use `@nicknisi/pi-codemode`'s `runWorkflow` instead.
+- `agent()` cannot spawn children of its own (the ecosystem recursion guard refuses nested orchestration). For dependent multi-stage work where stages spawn, use the `@nicknisi/pi-shared` `runWorkflow` engine directly.
 - `stop` cancels only runs spawned by this host process; persisted runs from other hosts show in `status` but are not cancellable here.

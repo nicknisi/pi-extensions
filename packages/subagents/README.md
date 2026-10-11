@@ -182,7 +182,7 @@ export default (pi: ExtensionAPI) => subagents(pi, { profileDirs: ['/path/to/bun
 
 ## Tool exposure
 
-`fleet` (`dispatch` stays always declared) register with `exposure: "deferred"` (pi ≥0.99), so they stay out of the system prompt when pi's built-in `tool_search` is active (`"defaultTools": ["+tool_search"]`): the model finds them on demand. Without `tool_search` the extension declares them directly at session start, as before. Older pi ignores the field. Tools also carry `annotations` (read-only/destructive/open-world hints) for permission extensions.
+`fleet` registers with `exposure: "deferred"` (pi ≥0.99; `dispatch` stays always declared), so it stays out of the system prompt when pi's built-in `tool_search` is active (`"defaultTools": ["+tool_search"]`): the model finds it on demand. Without `tool_search` the extension declares it directly at session start, as before. Older pi ignores the field. It also carries `annotations` (read-only/destructive/open-world hints) for permission extensions.
 
 ## Caveats
 

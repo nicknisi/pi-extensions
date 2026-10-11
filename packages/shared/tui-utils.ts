@@ -2,16 +2,15 @@
  * Reusable TUI utilities — stolen from a Pi dashboard extension and
  * generalized just enough to drop into other TUI surfaces.
  *
- * Six patterns, each self-contained:
+ * Five patterns, each self-contained:
  *   1. gradientText()          — per-character truecolor gradient text
- *   2. hideThemesSection()     — find/splice a labeled node from a renderable tree
+ *   2. renderedText()          — render a child to a throwaway buffer + strip ANSI
  *   3. columns()               — two-column layout that gracefully overflows
  *   4. sanitizeTerminalLabel() — strip OSC/CSI/control escapes from labels
- *   5. renderedText()          — render a child to a throwaway buffer + strip ANSI
  *   6. createRenderDispatcher()— reassignable render thunk for event-driven redraws
  *
  * Pi types are kept honestly; `visibleWidth` / `truncateToWidth` come from
- * @earendil-works/pi-tui, and the tree-walkers expect a RenderableNode shape
+ * @earendil-works/pi-tui, and renderedText() expects a RenderableNode shape
  * compatible with @earendil-works/pi-coding-agent.
  */
 
@@ -25,10 +24,6 @@ export interface RenderableNode {
   children?: RenderableNode[];
   invalidate(): void;
   render(width: number): string[];
-}
-
-export interface RequestRenderable extends RenderableNode {
-  requestRender(force?: boolean): void;
 }
 
 // ─── 1. gradient text ─────────────────────────────────────────────────────
@@ -81,75 +76,18 @@ export function gradientText(text: string, phase: number, palette: Rgb[] = DEFAU
   return chars.map((ch, i) => (ch === ' ' ? ch : foreground(sampleGradient(i / span + phase, palette), ch))).join('');
 }
 
-// ─── 2. labeled-node removal from a renderable tree ───────────────────────
+// ─── 2. ANSI-stripping render probe ──────────────────────────────────────
 
-// The original use case was stripping Pi's auto-injected `[Themes]` widget,
-// but the walker is generic: pass any label and it splices the first child
-// whose first visible line matches, plus a trailing blank line if present.
-
-/** Render a node to a throwaway buffer and strip ANSI — see pattern 5. */
+/**
+ * Render a node to a throwaway buffer and strip ANSI — read the text of a
+ * component whose API only exposes `render(width)`.
+ */
 export function renderedText(node: RenderableNode, width = 200): string {
   try {
     return node.render(width).join('\n').replace(ANSI_PATTERN, '');
   } catch {
     return '';
   }
-}
-
-function hasChildren(node: RenderableNode): node is RenderableNode & { children: RenderableNode[] } {
-  return Array.isArray(node.children);
-}
-
-/**
- * Find the first node whose first non-empty rendered line equals `label`
- * and splice it out (plus one trailing blank-line sibling if present).
- * Returns true if something was removed.
- */
-export function hideLabeledSection(root: RenderableNode, label: string): boolean {
-  if (!hasChildren(root)) return false;
-
-  for (let i = 0; i < root.children.length; i += 1) {
-    const child = root.children[i]!;
-    const firstLine = renderedText(child)
-      .split('\n')
-      .find((line) => line.trim())
-      ?.trim();
-
-    if (firstLine === label) {
-      const sibling = root.children[i + 1];
-      const removeCount = sibling && renderedText(sibling).trim() === '' ? 2 : 1;
-      root.children.splice(i, removeCount);
-      root.invalidate();
-      return true;
-    }
-    if (hideLabeledSection(child, label)) return true;
-  }
-  return false;
-}
-
-/**
- * Progressive-poll helper: try removal at [0, 50, 250, 1000] ms. Useful when
- * the target node is injected asynchronously and you don't control when.
- * Returns an array of timers (pass to clearHideTimers on teardown).
- */
-export function scheduleHideLabeledSection(
-  root: RequestRenderable,
-  label: string,
-  delays: number[] = [0, 50, 250, 1_000],
-): Array<ReturnType<typeof setTimeout>> {
-  const timers: Array<ReturnType<typeof setTimeout>> = [];
-  for (const delay of delays) {
-    timers.push(
-      setTimeout(() => {
-        if (hideLabeledSection(root, label)) root.requestRender(true);
-      }, delay),
-    );
-  }
-  return timers;
-}
-
-export function clearHideTimers(timers: Array<ReturnType<typeof setTimeout>>) {
-  for (const t of timers) clearTimeout(t);
 }
 
 // ─── 3. two-column layout ─────────────────────────────────────────────────
@@ -207,13 +145,6 @@ export function formatDirectory(cwd: string): string {
   const display = cwd.startsWith(`${home}/`) ? `~/${relative(home, cwd)}` : cwd;
   return sanitizeTerminalLabel(display);
 }
-
-// ─── 5. ANSI-stripping render probe ──────────────────────────────────────
-//
-// `renderedText()` is defined above (pattern 2 depends on it) and exported
-// there. The trick: render a child to a throwaway 200-wide buffer and strip
-// ANSI just to read its text content — handy for introspecting a component
-// whose API only exposes `render(width)`.
 
 // ─── 6. event-driven render dispatcher ───────────────────────────────────
 

@@ -1,6 +1,6 @@
 # @nicknisi/pi-agent-urls
 
-`agent://` URL tools for reading subagent runs persisted by the first-party shared runtime (`@nicknisi/pi-shared`). The extension enumerates run records from `~/.pi/agent/subagent-runs/<namespace>/<runId>.json` — one JSON record per run, written by any extension on the shared in-process runtime (e.g. [subagents](../subagents)' `dispatch`, codemode, llm-council) — assigns each record a stable `agent://<namespace>/<runId>` URI, and exposes both a slash command and two LLM tools for listing and reading them. It exists so that a parent agent (or the human at the prompt) can pull a run's status, usage, output, or error back into context after the run has finished, using a short URI instead of a long filesystem path.
+`agent://` URL tools for reading subagent runs persisted by the first-party shared runtime (`@nicknisi/pi-shared`). The extension enumerates run records from `~/.pi/agent/subagent-runs/<namespace>/<runId>.json` — one JSON record per run, written by any extension on the shared in-process runtime (e.g. [subagents](../subagents)' `dispatch`, workflows, llm-council) — assigns each record a stable `agent://<namespace>/<runId>` URI, and exposes both a slash command and two LLM tools for listing and reading them. It exists so that a parent agent (or the human at the prompt) can pull a run's status, usage, output, or error back into context after the run has finished, using a short URI instead of a long filesystem path.
 
 It no longer reads anything from nicobailon/pi-subagents (session JSONLs, tmpdir status dirs, artifact dirs, chain dirs) — that discovery is gone. Because records carry bounded output rather than transcripts, the old `history://` scheme and transcript rendering are dropped; there is no session file to render.
 
@@ -41,7 +41,7 @@ Slash command:
 
 ```text
 /agent list
-/agent list codemode
+/agent list workflows
 /agent read agent://subagents/7c6ef257
 /agent read agent://subagents/7c6ef257/output
 ```

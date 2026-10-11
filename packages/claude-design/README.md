@@ -41,7 +41,7 @@ Everything is lazy: nothing runs at pi startup, the MCP server connects on first
 
 1. Install the package (`pi install npm:@nicknisi/pi-claude-design` or a local path in `settings.json` `packages`), then run `/design-login` in pi. Approve in the browser and paste the `CODE#STATE` value. Outside pi: `npx -p @nicknisi/pi-claude-design claude-design-auth login`.
 
-2. Add the server to an MCP config [pi-mcp-adapter](https://github.com/badlogic/pi-mono) reads (e.g. `~/.pi/agent/mcp.json`), using the adapter's `!command` header support:
+2. Add the server to `~/.pi/agent/mcp.json`. Pi's built-in MCP support (pi ≥0.99) runs `!command` header values, so the token is fetched on connect:
 
    ```json
    {
@@ -56,7 +56,7 @@ Everything is lazy: nothing runs at pi startup, the MCP server connects on first
    }
    ```
 
-3. `/reload` in pi, then connect (`/mcp` or `mcp({ connect: "claude-design" })`). The `design` skill takes it from there.
+3. `/reload` in pi. Tools register as `mcp__claude_design__*` with pi's default `codemode` exposure (called from codemode scripts); add `"exposure": "direct"` to the entry to declare them as ordinary tools. `/mcp` shows the connection. The `design` skill takes it from there.
 
 ## How auth works
 
