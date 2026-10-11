@@ -1,5 +1,15 @@
 # @nicknisi/pi-orchestrate
 
+## 0.2.0
+
+### Minor Changes
+
+- b67617e: Move to public pi APIs. orchestrate: the goal evaluator is a single `ctx.modelRegistry.streamSimple()` call instead of a sub-session built on a private runtime, and self-paced loops tick from `agent_settled` instead of a 1.5s timer (needs pi >=0.87). compact-tools: uses `pi.registerToolRenderer()` instead of patching `ToolExecutionComponent` (needs pi >=1.0.1; collapsed rows no longer hide inline images). adr: writes a `decision_records` system prompt section instead of replacing the whole prompt each run, keeping prompt caching intact (needs pi >=0.86).
+
+### Patch Changes
+
+- b67617e: Accept an evaluator verdict wrapped in a single-line ```json fence instead of pausing the goal.
+
 ## 0.1.4
 
 ### Patch Changes

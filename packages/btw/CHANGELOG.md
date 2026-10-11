@@ -1,5 +1,11 @@
 # @nicknisi/pi-btw
 
+## 0.2.5
+
+### Patch Changes
+
+- b67617e: Fix system prompts being silently dropped on pi >=0.86: model calls now go through `ctx.modelRegistry.complete()`/`streamSimple()`, which accept `systemPrompt` and resolve auth. Requires pi >=0.86.0.
+
 ## 0.2.4
 
 ### Patch Changes

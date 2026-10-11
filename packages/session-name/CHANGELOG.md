@@ -1,5 +1,12 @@
 # @nicknisi/pi-session-name
 
+## 0.1.12
+
+### Patch Changes
+
+- b67617e: Use pi's newer lifecycle events. turn-timer leaves out time spent waiting on `ctx.ui` prompts and labels cancelled runs. session-name skips auto-naming after a cancelled run. statusline writes `permit`/`question` tmux status while a `ctx.ui` prompt is open.
+- b67617e: Fix system prompts being silently dropped on pi >=0.86: model calls now go through `ctx.modelRegistry.complete()`/`streamSimple()`, which accept `systemPrompt` and resolve auth. Requires pi >=0.86.0.
+
 ## 0.1.11
 
 ### Patch Changes
