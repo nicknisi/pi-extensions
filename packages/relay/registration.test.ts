@@ -44,7 +44,13 @@ describe('/core session registration', () => {
 
     vi.setSystemTime(1_015_000);
     const beat = core.heartbeat(root, addr, { status: 'working', name: 'riker-2' });
-    expect(beat).toMatchObject({ addr, lastSeenAt: 1_015_000, startedAt: 1_000_000, status: 'working', name: 'riker-2' });
+    expect(beat).toMatchObject({
+      addr,
+      lastSeenAt: 1_015_000,
+      startedAt: 1_000_000,
+      status: 'working',
+      name: 'riker-2',
+    });
     expect(core.readRecord(root, addr)).toEqual(beat);
 
     const unknown = core.deriveAddr('/nowhere', 'ghost');
