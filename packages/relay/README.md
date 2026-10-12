@@ -19,6 +19,26 @@ import { OutboundPolicy, claimInbox, deposit, deriveAddr, type Letter } from '@n
 
 The `@nicknisi/pi-relay/core` subpath exports a narrow record and alias registry, mailbox and ask/audit operations, presence and sweep utilities, policy guards and constants, and their public types. Filesystem-facing operations validate canonical relay addresses, aliases, claim tokens, and ask/message IDs before accessing the relay root; path constructors and raw persistence helpers remain internal. Core uses Node built-ins plus Koffi's prebuilt native bridge for descriptor-relative Unix syscalls; Pi and TUI remain optional peers, so core-only installations do not fetch them. The package root remains the pi extension entry point; import `/core` from plain Node services and CLIs.
 
+### Registering a non-Pi host
+
+A host that isn't a pi session (a supervisor, a CLI daemon) can join the relay so it shows in `list`, can be messaged by name, and can hold an alias:
+
+```ts
+import { claimAlias, heartbeat, register, unregister } from '@nicknisi/pi-relay/core';
+
+const { addr } = register(root, { sessionId, name: 'supervisor', cwd: process.cwd() }); // pid defaults to process.pid, status to 'idle'
+claimAlias(root, 'supervisor', addr, sessionId);
+const timer = setInterval(() => heartbeat(root, addr), 15_000); // optional patch: { status, name }
+// on shutdown:
+clearInterval(timer);
+unregister(root, addr);
+```
+
+- `register` writes the same `<addr>.json` record the extension writes. The address is derived from `cwd` + `sessionId`, so re-registering keeps the address and the original `startedAt`.
+- `heartbeat` refreshes `lastSeenAt` (and clears `offline`). Core runs no timers: the host must call it less than `HEARTBEAT_STALE_MS` (45 s) apart — every 15 s, like the extension — or it reads as `stalled`. It returns `null`, writing nothing, if the record is gone; it never re-creates an unregistered session.
+- `unregister` deletes the record (missing is fine). Unlike the extension's shutdown, which marks the session offline so queued mail stays addressable, the address stops existing.
+- An alias lives only as long as its record: `sweep` keeps aliases whose record exists and clears the rest, so an alias survives while the host keeps registered and is reclaimed by the next `sweep` after `unregister`.
+
 ### Durable core inbox claims
 
 A non-Pi consumer can atomically detach the current inbox with `claimInbox(root, addr)`. It receives only a stable `claimToken` and stable `fileTokens`, never filesystem paths. New deposits immediately land in a fresh inbox. `readClaimedLetter` reopens and validates a claimed letter without following links; after the consumer durably writes and `fsync`s its own journal, `ackClaimedLetter` atomically persists exact delivery proof in `<addr>.acks` before deleting the claimed file, or `requeueClaimedLetter` atomically returns it to the current inbox. `recoverInboxClaims` enumerates the same tokens after a process crash. All claim, read, ack, and requeue work is relative to pinned root/inbox/claim/ack descriptors, and empty completed claims are removed automatically. `sweep` removes proof more than seven days after acknowledgement, including for live sessions; proof never keeps an expired session's record alive. The destructive `drain` API does not acknowledge delivery.
