@@ -27,13 +27,16 @@ import {
 import {
   claimAlias as claimAliasInternal,
   clearAlias as clearAliasInternal,
+  deriveAddr,
   isValidAliasName as isValidAliasNameInternal,
   listAliases as listAliasesInternal,
   listRecords as listRecordsInternal,
   presenceOf as presenceOfInternal,
   readAlias as readAliasInternal,
   readRecord as readRecordInternal,
+  removeRecord,
   sweep as sweepInternal,
+  writeRecord,
   type AliasRecord,
   type Presence,
   type SessionRecord,
@@ -110,6 +113,14 @@ function assertLetter(letter: Letter): void {
   }
 }
 
+function assertNonEmptyString(value: unknown, label: string): asserts value is string {
+  if (typeof value !== 'string' || value.length === 0) throw new TypeError(`Invalid relay ${label}: ${value}`);
+}
+
+function assertStatus(status: unknown): asserts status is SessionRecord['status'] {
+  if (status !== 'idle' && status !== 'working') throw new TypeError(`Invalid relay session status: ${status}`);
+}
+
 function isSafeLetter(letter: Letter): boolean {
   try {
     assertLetter(letter);
@@ -172,6 +183,70 @@ export function listRecords(root: string): SessionRecord[] {
 export function presenceOf(record: SessionRecord, now: number = Date.now()): Presence {
   assertAddress(record.addr);
   return presenceOfInternal(record, now);
+}
+
+/**
+ * Register (or re-register) a non-Pi host as a relay session. The address is
+ * derived from `cwd` + `sessionId`, so re-registering keeps it, along with the
+ * existing `startedAt`. The host must call `heartbeat` well inside
+ * `HEARTBEAT_STALE_MS`.
+ */
+export function register(
+  root: string,
+  input: { sessionId: string; name: string; cwd: string; pid?: number; status?: SessionRecord['status'] },
+): SessionRecord {
+  assertNonEmptyString(input.sessionId, 'session id');
+  assertNonEmptyString(input.name, 'session name');
+  assertNonEmptyString(input.cwd, 'session cwd');
+  const pid = input.pid ?? process.pid;
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new TypeError(`Invalid relay session pid: ${pid}`);
+  const status = input.status ?? 'idle';
+  assertStatus(status);
+  const addr = deriveAddr(input.cwd, input.sessionId);
+  const now = Date.now();
+  const record: SessionRecord = {
+    addr,
+    sessionId: input.sessionId,
+    name: input.name,
+    cwd: input.cwd,
+    pid,
+    startedAt: readRecord(root, addr)?.startedAt ?? now,
+    lastSeenAt: now,
+    status,
+  };
+  writeRecord(root, record);
+  return record;
+}
+
+/**
+ * Refresh a registered session's `lastSeenAt` (clearing `offline`), applying an
+ * optional status or name. Returns null, writing nothing, if no record exists.
+ */
+export function heartbeat(
+  root: string,
+  addr: string,
+  patch: { status?: SessionRecord['status']; name?: string } = {},
+): SessionRecord | null {
+  assertAddress(addr);
+  if (patch.status !== undefined) assertStatus(patch.status);
+  if (patch.name !== undefined) assertNonEmptyString(patch.name, 'session name');
+  const existing = readRecord(root, addr);
+  if (existing === null) return null;
+  const { offline: _offline, ...rest } = existing;
+  const record: SessionRecord = {
+    ...rest,
+    name: patch.name ?? rest.name,
+    status: patch.status ?? rest.status,
+    lastSeenAt: Date.now(),
+  };
+  writeRecord(root, record);
+  return record;
+}
+
+/** Delete a session's record. Aliases pointing at it are cleared by the next `sweep`. */
+export function unregister(root: string, addr: string): void {
+  assertAddress(addr);
+  removeRecord(root, addr);
 }
 
 export function readAlias(root: string, name: string): AliasRecord | null {
