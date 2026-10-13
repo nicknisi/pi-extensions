@@ -1,5 +1,11 @@
 # @nicknisi/pi-relay
 
+## 0.5.0
+
+### Minor Changes
+
+- 1e338d3: Add `register`, `heartbeat`, and `unregister` to `@nicknisi/pi-relay/core` so non-Pi hosts can appear in the relay, be messaged by name, and keep an alias.
+
 ## 0.4.1
 
 ### Patch Changes
