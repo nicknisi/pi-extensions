@@ -244,6 +244,18 @@ export function writeRecord(root: string, record: SessionRecord): void {
   }
 }
 
+/** Delete `<addr>.json`. A missing record or relay root is fine. */
+export function removeRecord(root: string, addr: string): void {
+  assertPathSegment(addr, 'relay address');
+  const relay = openRelayRoot(root);
+  if (relay === null) return;
+  try {
+    relay.unlinkFile(`${addr}.json`);
+  } finally {
+    relay.close();
+  }
+}
+
 function readRecordFromDirectory(directory: RelayDirectoryHandle, addr: string): SessionRecord | null {
   const raw = directory.readFile(`${addr}.json`);
   if (raw === null) return null;
