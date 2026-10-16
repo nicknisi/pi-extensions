@@ -684,12 +684,24 @@ describe('reconciliation and queued messages', () => {
         flags: { 'compact-soft-at': '20%', 'compact-at': '50%', 'compact-buffer': '10%' },
         responses: [
           fauxAssistantMessage(fauxToolCall('self_compact', { note_to_self: NOTE })),
-          summary(),
+          // Keep enough summary material to cross the hard cutoff after
+          // compaction rather than relying solely on prompt/tool overhead.
+          fauxAssistantMessage(`## Goal\nWrite result.txt.\n\n${'Retained detail. '.repeat(125)}`),
           fauxAssistantMessage(fauxToolCall('write', { path: 'result.txt', content: 'done' })),
           fauxAssistantMessage('No more tool calls.'),
         ],
       },
       async (fixture) => {
+        let writeTokens: number | undefined;
+        fixture.session.subscribe((event) => {
+          if (
+            event.type === 'message_end' &&
+            event.message.role === 'assistant' &&
+            event.message.content.some((block) => block.type === 'toolCall' && block.name === 'write')
+          ) {
+            writeTokens = event.message.usage.totalTokens;
+          }
+        });
         await fixture.session.prompt(`Begin the long task. ${'CONTEXT '.repeat(30000)}`);
         await waitFor(() => readHandoffState(fixture.branch())?.phase === 'delivered', 20000);
         await fixture.session.waitForIdle();
@@ -700,6 +712,10 @@ describe('reconciliation and queued messages', () => {
           .find((message) => message.role === 'toolResult' && message.toolName === 'write');
         expect(compactionCount(fixture.branch())).toBe(1);
         expect(readDeliveredCycleIds(fixture.branch()).size).toBe(1);
+        // Verify the fixture really crosses the 50% + 10% hard cutoff, without
+        // reaching Pi's 4k automatic-compaction threshold again.
+        expect(writeTokens).toBeGreaterThanOrEqual(2400);
+        expect(writeTokens).toBeLessThan(4000);
         expect(writeResult).toMatchObject({ role: 'toolResult', toolName: 'write', isError: true });
         expect(JSON.stringify(writeResult)).toContain('hard cutoff');
         expect(existsSync(join(fixture.dir, 'result.txt'))).toBe(false);
