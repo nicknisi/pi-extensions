@@ -1,4 +1,4 @@
-import { fauxAssistantMessage, uuidv7 } from '@earendil-works/pi-ai';
+import { createAssistantMessageEventStream, fauxAssistantMessage, fauxProvider, uuidv7 } from '@earendil-works/pi-ai';
 import {
   createEventBus,
   type EventBus,
@@ -7,7 +7,8 @@ import {
   type SessionEntry,
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { CompactionPreparation, StreamSimpleFn } from './extensions/self-compact/prompts.js';
 import extension, {
   INFO_COMMAND,
   CONTINUATION_MESSAGE_TYPE,
@@ -55,6 +56,7 @@ interface HarnessOptions {
   initialActive?: string[];
   contextWindow?: number;
   flags?: Record<string, string>;
+  thinkingLevel?: ReturnType<ExtensionAPI['getThinkingLevel']>;
 }
 
 function makeHarness(options: HarnessOptions | string[] = {}): Harness {
@@ -106,6 +108,7 @@ function makeHarness(options: HarnessOptions | string[] = {}): Harness {
       if (o.default !== undefined && !flags.has(name)) flags.set(name, o.default);
     },
     getFlag: (name: string) => flags.get(name),
+    getThinkingLevel: () => opts.thinkingLevel ?? 'high',
     appendEntry: (type: string, data: unknown) => {
       if (appendThrows) throw new Error('simulated persistence failure (disk full)');
       appended.push({ type, data });
@@ -270,6 +273,79 @@ describe('note validation', () => {
     await h.call('first note');
     await expect(h.call('different note')).rejects.toThrow(/different self_compact handoff/i);
     expect(h.state()?.note).toBe('first note');
+  });
+});
+
+describe('compaction request settings', () => {
+  it.each([
+    { baseUrl: 'https://api.enterprise.githubcopilot.com', thinkingLevel: 'high', reasoning: true },
+    { baseUrl: undefined, thinkingLevel: 'medium', reasoning: true },
+    { baseUrl: undefined, thinkingLevel: 'off', reasoning: true },
+    { baseUrl: undefined, thinkingLevel: 'high', reasoning: false },
+  ] as const)('preserves auth and session settings: %j', async ({ baseUrl, thinkingLevel, reasoning }) => {
+    const h = makeHarness({ thinkingLevel });
+    const model = {
+      ...fauxProvider({ models: [{ id: 'summary-model', contextWindow: 1_000_000 }] }).getModel(),
+      baseUrl: 'https://api.individual.githubcopilot.com',
+      reasoning,
+    };
+    h.ctx.model = model;
+    const preparation: CompactionPreparation = {
+      firstKeptEntryId: 'seed-assistant',
+      messagesToSummarize: [{ role: 'user', content: 'Earlier work', timestamp: Date.now() }],
+      turnPrefixMessages: [{ role: 'user', content: 'Current task', timestamp: Date.now() }],
+      isSplitTurn: true,
+      tokensBefore: 4321,
+      fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+      settings: { enabled: true, reserveTokens: 16384, keepRecentTokens: 1 },
+    };
+    const auth = { ok: true, apiKey: 'test-key', headers: { 'X-Test': 'summary' }, env: { TEST: 'value' }, baseUrl };
+    const getApiKeyAndHeaders = vi.fn(async () => auth);
+    const streamSimple = vi.fn<StreamSimpleFn>(() => {
+      const response = fauxAssistantMessage('Summary');
+      const stream = createAssistantMessageEventStream();
+      stream.push({ type: 'done', reason: 'stop', message: response });
+      stream.end(response);
+      return stream;
+    });
+    h.ctx.modelRegistry = { getApiKeyAndHeaders, streamSimple } as unknown as ExtensionContext['modelRegistry'];
+    const signal = new AbortController().signal;
+
+    const [result] = await h.fire('session_before_compact', { preparation, signal });
+
+    expect(result).toMatchObject({ compaction: { summary: expect.stringContaining('Summary') } });
+    expect(getApiKeyAndHeaders).toHaveBeenCalledWith(model);
+    // Both history and split-turn prefix summaries must use the same settings.
+    expect(streamSimple).toHaveBeenCalledTimes(2);
+    for (const [requestModel, , options] of streamSimple.mock.calls) {
+      expect(requestModel.baseUrl).toBe(baseUrl ?? model.baseUrl);
+      expect(options).toMatchObject({ apiKey: auth.apiKey, headers: auth.headers, env: auth.env, signal });
+      expect(options?.reasoning).toBe(reasoning && thinkingLevel !== 'off' ? thinkingLevel : undefined);
+    }
+    expect(h.ctx.model).toBe(model);
+    expect(model.baseUrl).toBe('https://api.individual.githubcopilot.com');
+  });
+
+  it('includes the last compaction error when rejecting a replacement note, without unlocking the handoff', async () => {
+    const h = makeHarness();
+    await h.call('original note');
+    const error = 'github-copilot API error (401): 401 Unauthorized';
+    h.ctx.modelRegistry = {
+      getApiKeyAndHeaders: async () => ({ ok: false, error }),
+    } as unknown as ExtensionContext['modelRegistry'];
+    expect((await h.fire('session_before_compact'))[0]).toEqual({ cancel: true });
+    expect(h.state()).toMatchObject({
+      phase: 'failed',
+      note: 'original note',
+      lastError: expect.stringContaining(error),
+    });
+
+    await expect(h.call('replacement note')).rejects.toThrow(error);
+    expect(h.state()).toMatchObject({ phase: 'failed', note: 'original note' });
+    expect(h.active()).toEqual([TOOL_NAME]);
+    await h.call('original note');
+    expect(h.state()?.phase).toBe('pending');
+    expect(h.state()?.lastError).toBeUndefined();
   });
 });
 
