@@ -27,6 +27,7 @@
     "reader.ts",
     "reader-styles.ts",
     "assets",
+    "requests.ts",
     "server.ts",
     "smoke.mjs",
     "styles.ts",
