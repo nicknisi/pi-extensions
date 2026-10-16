@@ -176,6 +176,7 @@ export function buildSummaryStreamFn(instruction: string, streamSimple: StreamSi
 export interface RunSelfCompactionOptions {
   preparation: CompactionPreparation;
   model: Model<string>;
+  thinkingLevel?: Parameters<typeof compact>[6];
   streamSimple: StreamSimpleFn;
   apiKey?: string | undefined;
   headers?: Record<string, string> | undefined;
@@ -205,7 +206,7 @@ export async function runSelfCompaction(options: RunSelfCompactionOptions): Prom
     options.headers,
     options.customInstructions,
     options.signal,
-    undefined,
+    options.thinkingLevel,
     streamFn,
     options.env,
   );

@@ -360,7 +360,8 @@ export default function (
         return {
           ok: false,
           error:
-            'A different self_compact handoff is already pending; complete or recover it before replacing the note.',
+            'A different self_compact handoff is already pending; complete or recover it before replacing the note.' +
+            (existing.lastError ? ` Last compaction error: ${existing.lastError}` : ''),
         };
       }
       if (existing.phase === 'failed') {
@@ -1123,6 +1124,7 @@ export default function (
     try {
       const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
       if (!auth.ok) throw new Error(`self-compact: cannot compact without provider auth: ${auth.error}`);
+      const requestModel = auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model;
       const headers: Record<string, string> | undefined = auth.headers
         ? Object.fromEntries(
             Object.entries(auth.headers).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
@@ -1130,7 +1132,8 @@ export default function (
         : undefined;
       const result = await runSelfCompaction({
         preparation: event.preparation,
-        model,
+        model: requestModel,
+        thinkingLevel: pi.getThinkingLevel(),
         streamSimple: (m, context, options) => ctx.modelRegistry.streamSimple(m, context, options),
         apiKey: auth.apiKey,
         headers,
