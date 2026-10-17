@@ -17,6 +17,7 @@
  * meta.name/description.
  */
 
+import { createHash } from 'node:crypto';
 import vm from 'node:vm';
 
 // ── Public types ───────────────────────────────────────────────────────────
@@ -63,6 +64,8 @@ export interface EngineSpawnOptions {
   outputSchema?: unknown;
   /** Run the child in an isolated git worktree; its change set is captured to a `.patch`. */
   worktree?: boolean;
+  /** Per-agent abort (stop or restart one agent). Not part of the replay key. */
+  signal?: AbortSignal;
 }
 
 export type EngineSpawnFn = (opts: EngineSpawnOptions) => Promise<EngineSpawnResult>;
@@ -153,6 +156,70 @@ export interface RunScriptOptions {
    * rather than invent one.
    */
   ask?: EngineAskFn;
+  /** Relaunch replay; omit for a fresh run with no journal. */
+  replay?: Replay;
+  /** Called once per agent() call with its live state object. */
+  onAgent?: (state: AgentState) => void;
+}
+
+/** Live, mutable view of one agent() call, for progress UIs. */
+export interface AgentState {
+  /** Start order within the run — also the replay position. */
+  seq: number;
+  label?: string;
+  /** The phase() in effect when the agent started. */
+  phase?: string;
+  prompt: string;
+  status: 'waiting' | 'running' | 'done' | 'failed' | 'cached';
+  attempts: number;
+  usage: EngineSpawnUsage;
+  startedAt: number;
+  endedAt?: number;
+  /** Final text (successful agents) — bounded by the child's own output. */
+  result?: string;
+  error?: string;
+  /** Abort this agent; it settles as failed (null inside parallel/pipeline). */
+  stop(): void;
+  /** Abort the current attempt and start again from the same prompt. */
+  restart(): void;
+}
+
+/** One settled agent, as recorded for relaunch. */
+export interface JournalEntry {
+  seq: number;
+  key: string;
+  result: EngineSpawnResult;
+}
+
+/**
+ * Relaunch replay. take() is called synchronously in start order: agents whose
+ * position and inputs match a prior successful run return its saved result;
+ * the first mismatch, failure, or gap — and every agent after it — runs again.
+ */
+export interface Replay {
+  take(seq: number, key: string): EngineSpawnOk | undefined;
+  record(entry: JournalEntry): void;
+}
+
+export function createReplay(prior: JournalEntry[], record: (entry: JournalEntry) => void = () => {}): Replay {
+  const bySeq = new Map(prior.map((e) => [e.seq, e]));
+  let diverged = false;
+  return {
+    take(seq, key) {
+      if (diverged) return undefined;
+      const entry = bySeq.get(seq);
+      if (entry?.key === key && entry.result.ok) return entry.result;
+      diverged = true;
+      return undefined;
+    },
+    record,
+  };
+}
+
+/** Replay key: everything that determines what an agent does. */
+export function agentKey(opts: EngineSpawnOptions): string {
+  const { signal: _signal, ...rest } = opts;
+  return createHash('sha256').update(JSON.stringify(rest)).digest('hex');
 }
 
 export interface RunScriptResult {
@@ -229,7 +296,9 @@ export async function runScript(opts: RunScriptOptions): Promise<RunScriptResult
     opts.onLog?.(t);
   };
 
+  let currentPhase: string | undefined;
   const phase = (name: string): void => {
+    currentPhase = name;
     const line = `── ${name}`;
     logs.push(line);
     opts.onLog?.(line);
@@ -258,8 +327,7 @@ export async function runScript(opts: RunScriptOptions): Promise<RunScriptResult
     if (typeof agentOpts.agentType === 'string') {
       log(`(agentType '${agentOpts.agentType}' accepted but ignored — no agent-type registry)`);
     }
-    // Pause gate: hold here (between steps) until resumed. Rejects on abort.
-    await opts.gate?.wait();
+    const seq = agentCount - 1;
     const spawnOpts: EngineSpawnOptions = {
       prompt,
       ...(typeof agentOpts.label === 'string' ? { agent: agentOpts.label } : {}),
@@ -277,16 +345,70 @@ export async function runScript(opts: RunScriptOptions): Promise<RunScriptResult
       ...(agentOpts.schema !== undefined ? { outputSchema: agentOpts.schema } : {}),
       ...(agentOpts.worktree === true ? { worktree: true } : {}),
     };
-    let res = await spawn(spawnOpts);
-    for (let restart = 1; !res.ok && res.kind === 'stalled' && restart <= MAX_STALL_RESTARTS; restart++) {
-      addUsage(usage, res.usage);
-      log(`${spawnOpts.agent ?? 'agent'} stalled; restarting from the same prompt (retry ${restart})`);
-      res = await spawn(spawnOpts);
+    // Replay lookup must run before the first await so it happens in start order.
+    const key = opts.replay ? agentKey(spawnOpts) : '';
+    const cached = opts.replay?.take(seq, key);
+
+    let attempt: AbortController | undefined;
+    let stopped = false;
+    let restartRequested = false;
+    const state: AgentState = {
+      seq,
+      ...(spawnOpts.agent !== undefined ? { label: spawnOpts.agent } : {}),
+      ...(currentPhase !== undefined ? { phase: currentPhase } : {}),
+      prompt,
+      status: 'waiting',
+      attempts: 0,
+      usage: zeroUsage(),
+      startedAt: Date.now(),
+      stop() {
+        stopped = true;
+        attempt?.abort();
+      },
+      restart() {
+        if (state.status !== 'running') return;
+        restartRequested = true;
+        attempt?.abort();
+      },
+    };
+    opts.onAgent?.(state);
+
+    const settle = (res: EngineSpawnResult, status: AgentState['status']): void => {
+      state.status = status;
+      state.endedAt = Date.now();
+      if (res.ok) state.result = res.text;
+      else state.error = `${res.kind}: ${res.error}`;
+      opts.replay?.record({ seq, key, result: res });
+    };
+
+    let res: EngineSpawnResult;
+    if (cached) {
+      settle(cached, 'cached');
+      res = cached;
+    } else {
+      // Pause gate: hold here (between steps) until resumed. Rejects on abort.
+      await opts.gate?.wait();
+      state.status = 'running';
+      for (let restarts = 0; ; restarts++) {
+        attempt = new AbortController();
+        if (stopped) attempt.abort();
+        state.attempts++;
+        res = await spawn({ ...spawnOpts, signal: attempt.signal });
+        addUsage(usage, res.usage);
+        addUsage(state.usage, res.usage);
+        const retry = !res.ok && !stopped && (res.kind === 'stalled' || (res.kind === 'aborted' && restartRequested));
+        restartRequested = false;
+        if (!retry || restarts >= MAX_STALL_RESTARTS) break;
+        log(
+          `${spawnOpts.agent ?? 'agent'} ${res.ok ? '' : res.kind}; restarting from the same prompt (retry ${restarts + 1})`,
+        );
+      }
+      if (!res.ok && res.kind === 'stalled') {
+        res = { ...res, error: `agent stalled on all ${state.attempts} attempts (${res.error})` };
+      }
+      settle(res, res.ok ? 'done' : 'failed');
     }
-    addUsage(usage, res.usage);
-    if (!res.ok && res.kind === 'stalled') {
-      throw new AgentFailure('stalled', `agent stalled on all ${MAX_STALL_RESTARTS + 1} attempts (${res.error})`);
-    }
+
     if (!res.ok) throw new AgentFailure(res.kind, res.error);
     // A worktree run that changed files produces a `.patch`; surface it
     // alongside the value so the script can hand the path to a judge or

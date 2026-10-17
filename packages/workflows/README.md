@@ -8,10 +8,10 @@ Three pieces compose the workflow platform: `@nicknisi/pi-shared`'s **subagent r
 
 ## What it adds
 
-- **`workflow` tool** (model-facing) — actions: `run` (inline JS `script` OR `name` of a saved workflow file), `list`, `status <runId>`, `stop <runId>`, `pause`, `resume`.
-- **`/wf` command** (human-facing) — `/wf list | /wf run <name> [argsJson] | /wf status <runId> | /wf stop <runId> | /wf pause | /wf resume`.
+- **`workflow` tool** (model-facing) — actions: `run` (inline JS `script`, `name` of a saved workflow file, or `relaunch` of an earlier run), `list`, `status [runId]`, `stop <runId>`, `pause [runId]`, `resume [runId]`. Runs start in the background and return a `wf-xxxxxxxx` id at once; the result arrives as a message that starts a new turn.
+- **`/wf` command** (human-facing) — `/wf list | /wf run <name> [argsJson] | /wf relaunch <id> | /wf status [id] | /wf stop <id> | /wf pause [id] | /wf resume [id]`.
 - **Human gates inside scripts** — `checkpoint(label?)` pauses the run on a confirm dialog (reject/dismiss stops the run); `ask(question, options?)` asks mid-run (select with options, yes/no without, `undefined` when dismissed).
-- **Footer status** — while a run is active the footer shows `wf <name> [running|paused] <last phase>`.
+- **Footer status** — while a run is active the footer shows `wf <name> [running|paused] <last phase> · <done>/<agents>` (or `wf <n> runs` for several).
 - **`autoplan` skill** — teaches the model the "autoplan this" trigger: run the saved `autoplan` workflow with args derived from the conversation, then respect the run's decision outcome. Disable with `"skills": ["-skills/autoplan"]` on the package entry.
 
 ## The script contract
@@ -43,7 +43,7 @@ return { answered: results.length, results };
 
 `agent()` opts: `model` (`'provider/id'`), `tools` (allowlist — default read-only `['read','grep','find','ls']`; pass `['read','bash','edit','write']` for builders), `label` (child agent label), `systemPrompt`, `schema` (validated; parsed JSON lands in `result.data`), `effort` (thinking level), `timeoutMs`, `stallMs` (restart window, below), `maxTurns`, `worktree` (run the child in an isolated git worktree; on settle the change set is captured to a `.patch` and `agent()` returns `{ value, patchPath, runId }` instead of the bare value — opt-in, so non-worktree calls are unchanged), `agentType` (accepted but ignored — no agent-type registry; resolve `systemPrompt` in the script itself).
 
-`agent()` awaits the run's pause gate before every spawn: `pause` lets the in-flight step finish, then holds the run before the next one; `resume` releases it. Pause/resume are session-scoped (`/wf pause`, `/wf resume`, or the tool actions) — they apply to every active run, in practice one. Stopping or timing out a run aborts the gate, so a parked run rejects instead of hanging.
+`agent()` awaits the run's pause gate before every spawn: `pause` lets the in-flight step finish, then holds the run before the next one; `resume` releases it. Pause/resume take a workflow id, or apply to every active run without one. Stopping or timing out a run aborts the gate, so a parked run rejects instead of hanging.
 
 The script executes **in the host process with full Node access** — `process`, `require`, and `fs` are all reachable, the same trust boundary as the `bash` tool. Keep the returned value small: summaries, counts, key findings — never raw file dumps.
 
@@ -57,6 +57,14 @@ The script executes **in the host process with full Node access** — `process`,
 | Stalled agents                           | An agent with no output for 5 minutes (time inside its tool calls excluded) restarts from the same prompt, at most 5 times; then `agent()` fails with `stalled: agent stalled on all 6 attempts`. Set `stallMs` per call or `PI_WORKFLOW_STALL_MS` (0 disables). Files a stalled attempt changed stay changed. |
 | Structured output                        | With `schema`, the agent is told the JSON Schema; an invalid answer is corrected in-session (5 attempts in total) before `agent()` fails with `schema_invalid`.                                                                                                                                                |
 
+## Background runs and relaunch
+
+`run` starts the workflow in the background and returns its id (`wf-xxxxxxxx`) immediately, so the session stays responsive. When the run ends, its result (or error) is delivered as a `workflows:result` message; for model-started runs that message starts a new turn so the model can act on it. Pass `background: false` when a caller needs the value inside the same tool call (for example a codemode script). Without a UI (print mode, which exits when the turn ends) runs default to the foreground. There is no wall-clock cap unless you pass `timeoutMs`. Background runs stop when the session ends.
+
+Every run writes its script, `run.json` (label, args, status), and `journal.jsonl` to `~/.pi/agent/workflow-runs/<id>/` (or `$PI_SUBAGENTS_DIR/workflow-runs/`); run dirs older than 7 days are swept. The journal records each settled agent in start order with a hash of everything that determines its work (prompt, model, tools, system prompt, schema, …).
+
+`run` with `relaunch: '<id>'` (or `/wf relaunch <id>`) re-runs a stopped or failed workflow with the same script and args. Agents replay in start order: each completed agent whose inputs match returns its saved result without running; the first agent that differs, failed, or never finished — and every agent after it — runs again. Pass `script` along with `relaunch` to relaunch an edited version. Keep scripts deterministic (no `Date.now()` or `Math.random()` in prompts; pass timestamps through `args`) so a relaunch starts the same agents in the same order.
+
 ## Saved workflows
 
 Plain files. The registry is `ls` — no database, no manifest, no config keys.
@@ -68,7 +76,7 @@ Names are bare file stems (`research`, not `research.js`, never a path — `..` 
 
 ## Runs are visible
 
-Every `agent()` call spawns through `@nicknisi/pi-shared`'s subagent runtime with `artifactsDir` set to `~/.pi/agent/subagent-runs/` (or `$PI_SUBAGENTS_DIR/runs/`), namespace `workflows`, and the owning Pi session recorded. Children use the parent session's model registry and, when a call names no model, its current model (see [subagents](../subagents/README.md#models-children-use-the-parents-registry)). Active children therefore appear in that session's default `fleet` view; settled and machine-wide records remain available through the fleet's explicit `all` scope. `status <runId>` and `stop <runId>` here read from / cancel via the same runtime's run records — no parallel store. `stop` cancels in-flight spawns through a live `runId → AbortController` registry (mirroring subagents' cascading-cancellation); a run belonging to a different host process is reported as not cancellable from here.
+Every `agent()` call spawns through `@nicknisi/pi-shared`'s subagent runtime with `artifactsDir` set to `~/.pi/agent/subagent-runs/` (or `$PI_SUBAGENTS_DIR/runs/`), namespace `workflows`, and the owning Pi session recorded. Children use the parent session's model registry and, when a call names no model, its current model (see [subagents](../subagents/README.md#models-children-use-the-parents-registry)). Active children therefore appear in that session's default `fleet` view; settled and machine-wide records remain available through the fleet's explicit `all` scope. `status`/`stop` accept a workflow id (`wf-…`, the whole run) or an agent run id (one child), read from / cancelling via the same runtime's run records — no parallel store. `stop` cancels in-flight spawns through a live `runId → AbortController` registry (mirroring subagents' cascading-cancellation); a run belonging to a different host process is reported as not cancellable from here.
 
 ## Migration from `@quintinshaw/pi-dynamic-workflows`
 
@@ -106,7 +114,9 @@ The `examples/` directory ships standalone, copy-and-adapt workflow scripts — 
 
 - The script runs in the host process with full Node access — the same trust boundary as the `bash` tool. Your model, your session.
 - `checkpoint`/`ask` need an interactive UI host. In a headless/RPC host `checkpoint` degrades to a logged no-op and `ask` throws — scripts that require an answer fail loudly instead of inventing one.
-- Pause/resume are session-scoped and best-effort for tool-initiated runs: slash commands may queue behind an in-flight turn, so a `pause` issued mid-turn engages at the next `agent()` boundary after it's processed. For a guaranteed human gate, put `checkpoint`/`ask` in the script itself.
+- Pause/resume are best-effort for tool-initiated runs: slash commands may queue behind an in-flight turn, so a `pause` issued mid-turn engages at the next `agent()` boundary after it's processed. For a guaranteed human gate, put `checkpoint`/`ask` in the script itself.
+- `checkpoint`/`ask` dialogs in a background run can appear while you're typing.
+- Relaunch replays results, not side effects: files a completed agent changed stay changed, and a replayed agent doesn't run again. Relaunch works for runs in `~/.pi/agent/workflow-runs/`, including runs from an earlier pi process.
 - Project-local workflows (`.pi/workflows/`) load only in trusted projects; untrusted projects are limited to global workflows so a cloned repo cannot silently inject orchestration scripts.
 - `agent()` cannot spawn children of its own (the ecosystem recursion guard refuses nested orchestration). For dependent multi-stage work where stages spawn, use the `@nicknisi/pi-shared` `runWorkflow` engine directly.
 - `stop` cancels only runs spawned by this host process; persisted runs from other hosts show in `status` but are not cancellable here.
