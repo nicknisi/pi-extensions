@@ -54,6 +54,13 @@ import {
   type WorkflowRun,
   type WorkflowRuns,
 } from './runs.js';
+import {
+  hasUltracodeKeyword,
+  ULTRACODE_GUIDANCE,
+  ULTRACODE_KEYWORD_GUIDANCE,
+  ULTRACODE_SECTION,
+  ultracodeDefault,
+} from './ultracode.js';
 import { WorkflowsView, type ViewResult } from './view.js';
 
 // Resolved at use: PI_SUBAGENTS_DIR (see @nicknisi/pi-shared) relocates every runtime write.
@@ -405,6 +412,64 @@ export default function workflows(pi: ExtensionAPI): void {
       ctx.ui.notify(err instanceof Error ? err.message : String(err), 'error');
     }
   }
+
+  // ── Ultracode: the model decides when a task warrants a workflow ──────
+  pi.registerFlag('ultracode', {
+    type: 'boolean',
+    description: 'Start with ultracode on (workflows for every substantive task)',
+  });
+  let ultracode = false;
+  let keywordTask = false;
+  const ensureWorkflowTool = () => {
+    const active = pi.getActiveTools();
+    if (!active.includes('workflow')) pi.setActiveTools([...active, 'workflow']);
+  };
+  const ultracodeStatus = (ctx: ExtensionContext) => {
+    if (ctx.hasUI) ctx.ui.setStatus('ultracode', ultracode ? 'ultracode' : undefined);
+  };
+  pi.on('session_start', (_event, ctx) => {
+    ultracode = pi.getFlag('ultracode') === true || ultracodeDefault(getAgentDir());
+    if (ultracode) ensureWorkflowTool();
+    ultracodeStatus(ctx);
+  });
+  // The keyword only counts in a prompt a person typed (not print mode or extension-sent text).
+  pi.on('input', (event, ctx) => {
+    if (event.source !== 'extension' && (ctx.mode === 'tui' || ctx.mode === 'rpc') && hasUltracodeKeyword(event.text)) {
+      keywordTask = true;
+    }
+    return { action: 'continue' };
+  });
+  pi.on('before_agent_start', (event) => {
+    const { sections } = event.systemPromptOptions;
+    if (ultracode) sections[ULTRACODE_SECTION] = ULTRACODE_GUIDANCE;
+    else delete sections[ULTRACODE_SECTION];
+    // Runs started by custom messages (e.g. a workflow result) never consume the keyword.
+    if ((event as { messageType?: string }).messageType === 'custom' || !keywordTask) return;
+    keywordTask = false;
+    ensureWorkflowTool();
+    return { message: { customType: 'workflows:ultracode', content: ULTRACODE_KEYWORD_GUIDANCE, display: false } };
+  });
+  pi.registerCommand('ultracode', {
+    description: 'Toggle ultracode: plan a workflow for every substantive task this session (/ultracode on|off)',
+    getArgumentCompletions: (prefix) =>
+      ['on', 'off'].filter((s) => s.startsWith(prefix.trim())).map((s) => ({ value: s, label: s })),
+    handler: async (args, ctx) => {
+      const arg = args.trim().toLowerCase();
+      if (arg && arg !== 'on' && arg !== 'off') {
+        ctx.ui.notify('Usage: /ultracode [on|off]', 'warning');
+        return;
+      }
+      ultracode = arg ? arg === 'on' : !ultracode;
+      if (ultracode) ensureWorkflowTool();
+      ultracodeStatus(ctx);
+      ctx.ui.notify(
+        ultracode
+          ? 'Ultracode on: substantive tasks run as workflows. Each request uses more tokens and takes longer.'
+          : 'Ultracode off.',
+        'info',
+      );
+    },
+  });
 
   pi.registerCommand('workflows', {
     description: 'Watch workflow runs: phases, agents, results. Enter open • p pause • x stop • r restart • s save',

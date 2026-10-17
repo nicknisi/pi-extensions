@@ -20,6 +20,7 @@
     "engine.ts",
     "runs.ts",
     "view.ts",
+    "ultracode.ts",
     "examples",
     "skills"
   ],

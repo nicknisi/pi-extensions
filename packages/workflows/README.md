@@ -9,6 +9,7 @@ Three pieces compose the workflow platform: `@nicknisi/pi-shared`'s **subagent r
 ## What it adds
 
 - **`workflow` tool** (model-facing) — actions: `run` (inline JS `script`, `name` of a saved workflow file, or `relaunch` of an earlier run), `list`, `status [runId]`, `stop <runId>`, `pause [runId]`, `resume [runId]`. Runs start in the background and return a `wf-xxxxxxxx` id at once; the result arrives as a message that starts a new turn.
+- **Ultracode** — `/ultracode` (or `--ultracode`, or `"ultracode": true` in `~/.pi/agent/configs/workflows.json`) makes the model plan a workflow for every substantive task; the word `ultracode` in a prompt you type opts just that task in. See [Ultracode](#ultracode).
 - **`/workflows` command** — live progress view (runs → phases → agents → agent detail). See [Watch a run](#watch-a-run).
 - **Saved workflows as commands** — every saved workflow also runs as `/<name> [args]` (unless the name is taken by another command).
 - **`/wf` command** (human-facing) — `/wf list | /wf run <name> [argsJson] | /wf relaunch <id> | /wf save <id> [name] | /wf status [id] | /wf stop <id> | /wf pause [id] | /wf resume [id]`.
@@ -58,6 +59,20 @@ The script executes **in the host process with full Node access** — `process`,
 | Items per `parallel()`/`pipeline()` call | 4,096 — a longer list throws instead of silently dropping work.                                                                                                                                                                                                                                                |
 | Stalled agents                           | An agent with no output for 5 minutes (time inside its tool calls excluded) restarts from the same prompt, at most 5 times; then `agent()` fails with `stalled: agent stalled on all 6 attempts`. Set `stallMs` per call or `PI_WORKFLOW_STALL_MS` (0 disables). Files a stalled attempt changed stay changed. |
 | Structured output                        | With `schema`, the agent is told the JSON Schema; an invalid answer is corrected in-session (5 attempts in total) before `agent()` fails with `schema_invalid`.                                                                                                                                                |
+
+## Ultracode
+
+Two ways to get workflows without writing the script yourself, matching Claude Code:
+
+- **One task:** include the word `ultracode` in a prompt you type (`ultracode: audit every route under src/routes/ for missing auth`). That turn gets an instruction to run the task as a workflow. The keyword counts only in prompts typed in the terminal UI or sent by an RPC client — not in print mode (`pi -p`), slash commands, or text other extensions send.
+- **Whole session:** `/ultracode` toggles it (`/ultracode on|off`). While on, the system prompt asks the model to plan and run a workflow for every substantive task (understand → change → verify, one agent per independent item, independent verification of findings) and to skip trivial requests. The footer shows `ultracode`. Start a session with it on with `pi --ultracode`, or make it the default:
+
+```json
+// ~/.pi/agent/configs/workflows.json
+{ "ultracode": true }
+```
+
+Ultracode only changes how the model structures work; it doesn't change your thinking level or model. Every request uses more tokens and takes longer, so turn it off for routine work. Either route activates the `workflow` tool if `tool_search` was keeping it deferred.
 
 ## Background runs and relaunch
 
