@@ -353,4 +353,9 @@ export class WorkflowsView implements Component, Focusable {
     this.cachedWidth = undefined;
     this.cachedLines = undefined;
   }
+
+  /** pi calls this however the overlay closes (Esc, session switch, shutdown). */
+  dispose(): void {
+    clearInterval(this.tick);
+  }
 }
