@@ -49,11 +49,13 @@ The script executes **in the host process with full Node access** — `process`,
 
 ## Limits
 
-| Limit                                    | Value                                                                                                                        |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| Concurrent agents                        | 16 by default, fewer on machines with fewer CPUs. Set `PI_WORKFLOW_MAX_CONCURRENT` (1–256) to change it. Extra agents queue. |
-| Agents per run                           | 1,000 — a runaway guard; the next `agent()` throws.                                                                          |
-| Items per `parallel()`/`pipeline()` call | 4,096 — a longer list throws instead of silently dropping work.                                                              |
+| Limit                                    | Value                                                                                                                                                                                                                                                                                                          |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Concurrent agents                        | 16 by default, fewer on machines with fewer CPUs. Set `PI_WORKFLOW_MAX_CONCURRENT` (1–256) to change it. Extra agents queue.                                                                                                                                                                                   |
+| Agents per run                           | 1,000 — a runaway guard; the next `agent()` throws.                                                                                                                                                                                                                                                            |
+| Items per `parallel()`/`pipeline()` call | 4,096 — a longer list throws instead of silently dropping work.                                                                                                                                                                                                                                                |
+| Stalled agents                           | An agent with no output for 5 minutes (time inside its tool calls excluded) restarts from the same prompt, at most 5 times; then `agent()` fails with `stalled: agent stalled on all 6 attempts`. Set `stallMs` per call or `PI_WORKFLOW_STALL_MS` (0 disables). Files a stalled attempt changed stay changed. |
+| Structured output                        | With `schema`, the agent is told the JSON Schema; an invalid answer is corrected in-session (5 attempts in total) before `agent()` fails with `schema_invalid`.                                                                                                                                                |
 
 ## Saved workflows
 
