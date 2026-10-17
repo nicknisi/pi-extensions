@@ -56,21 +56,23 @@ function gitRepo(): string {
 }
 
 describe('createSharedSlots', () => {
-  it('admits each waiter against its own ceiling', async () => {
+  it('admits each waiter against its own ceiling, first come first served', async () => {
     const slots = createSharedSlots();
     for (let i = 0; i < 8; i++) await slots.acquire(16);
-    let small = false;
-    let big = false;
-    void slots.acquire(8).then(() => (small = true));
-    void slots.acquire(16).then(() => (big = true));
+    const order: string[] = [];
+    void slots.acquire(16).then(() => order.push('big-1')); // 8 < 16, no queue: admitted at once
     await Promise.resolve();
-    expect(big).toBe(true); // 8 active < 16: admitted at once
-    expect(small).toBe(false); // 9 active ≥ 8: waits
-    slots.release();
-    slots.release();
+    void slots.acquire(8).then(() => order.push('small')); // 9 ≥ 8: waits
+    void slots.acquire(16).then(() => order.push('big-2')); // queued behind 'small', not ahead of it
     await Promise.resolve();
-    expect(small).toBe(true); // dropped to 7 < 8: admitted
-    expect(slots.active()).toBe(8);
+    expect(order).toEqual(['big-1']);
+    slots.release(); // 8: still ≥ 8, the head ('small') keeps waiting and so does everyone behind it
+    await Promise.resolve();
+    expect(order).toEqual(['big-1']);
+    slots.release(); // 7 < 8: 'small' in, then 8 < 16: 'big-2' in
+    await Promise.resolve();
+    expect(order).toEqual(['big-1', 'small', 'big-2']);
+    expect(slots.active()).toBe(9);
   });
 });
 

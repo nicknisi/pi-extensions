@@ -265,15 +265,16 @@ export const ARTIFACT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const GLOBAL_MAX_CHILDREN = 8;
 
 /**
- * Counting semaphore where each acquirer brings its own ceiling: a waiter is
- * admitted once the shared active count drops below ITS limit.
+ * FIFO counting semaphore where each acquirer brings its own ceiling: the
+ * head waiter is admitted once the shared active count drops below ITS limit.
+ * Strict FIFO so a low-limit waiter can't be starved by high-limit arrivals.
  */
 export function createSharedSlots(): { acquire(limit: number): Promise<void>; release(): void; active(): number } {
   let active = 0;
   const waiters: Array<{ limit: number; resolve: () => void }> = [];
   return {
     acquire(limit) {
-      if (active < limit) {
+      if (waiters.length === 0 && active < limit) {
         active++;
         return Promise.resolve();
       }
@@ -281,11 +282,10 @@ export function createSharedSlots(): { acquire(limit: number): Promise<void>; re
     },
     release() {
       active--;
-      const i = waiters.findIndex((w) => active < w.limit);
-      if (i === -1) return;
-      const [next] = waiters.splice(i, 1);
-      active++;
-      next!.resolve();
+      while (waiters.length > 0 && active < waiters[0]!.limit) {
+        active++;
+        waiters.shift()!.resolve();
+      }
     },
     active: () => active,
   };
