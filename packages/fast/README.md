@@ -12,6 +12,7 @@ Fast mode trades higher usage cost for faster output. It does not change the sel
   - Anthropic: adds `speed: "fast"` to Messages API payloads. For the research-preview models (Opus 5 and Opus 4.8) it also appends the `fast-mode-2026-02-01` beta to the payload's `betas`, keeping every beta pi computed.
 - **Rate-limit fallback:** a Fast-mode `429`/`529` switches the session to standard speed for 60 seconds, so pi's automatic retry resends at standard speed.
   - OpenAI Codex: adds `service_tier: "fast"` to OAuth-backed Codex Responses payloads.
+- **Subagents and workflows:** children spawned by `dispatch`, `workflow`, and other `@nicknisi/pi-shared` runtime users follow this session's Fast mode live and share its rate-limit cooldown.
 - **Config:** a global default plus an optional trusted project override.
 
 No tools, keybindings, widgets, overlays, or custom message/entry types.
@@ -133,13 +134,14 @@ Provider documentation:
 - `@earendil-works/pi-coding-agent` (peer, `*`) — extension hooks, model/auth context, config directory helpers, slash commands, notifications, and footer status.
 - Node built-ins: `node:fs` and `node:path` for config loading.
 
-No npm runtime dependencies or workspace dependencies.
+- `@nicknisi/pi-shared` (`workspace:*`) — `childExtensions()`, the registry that loads Fast mode's request hook into subagent children.
 
 ## Caveats
 
 - Provider payload fields and beta headers are provider-specific wire contracts. Pi exposes the interception hooks, but a provider can change its accepted values independently of Pi.
 - The extension relies on `before_provider_request` replacing the entire payload when it returns a value, on pi sending Anthropic betas through the payload's `betas` array, and on `message_end` carrying the provider error for failed requests.
 - `/fast` is session-local and is not persisted. Set `enabled` in config for a persistent default.
+- Children follow the most recently started session in the process. With one pi session per process (the normal CLI case) that's always the right one; an SDK host running several sessions in one process shares a single child hook.
 - The footer confirms that the extension considers Fast mode active; it does not inspect the provider response's reported tier/speed. Provider-side downgrade, missing preview entitlement, capacity errors, and billing remain authoritative.
 
 ## Development

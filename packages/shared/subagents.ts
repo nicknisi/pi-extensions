@@ -36,6 +36,7 @@ import {
   DefaultResourceLoader,
   defineTool,
   type ExtensionContext,
+  type ExtensionFactory,
   getAgentDir,
   type ModelRegistry,
   ModelRuntime,
@@ -301,6 +302,21 @@ export function createSharedSlots(): { acquire(limit: number): Promise<void>; re
 }
 
 const globalSlots = createSharedSlots();
+
+// ── Child extensions ──────────────────────────────────────────────────────
+// Children are hermetic, but some host behavior must reach them (Fast mode's
+// request hook). Extensions register an inline factory here and every child
+// loads it. Process-global via Symbol.for: each extension loads its own copy
+// of this module, so a module-level map would not be shared.
+
+const CHILD_EXTENSIONS = Symbol.for('@nicknisi/pi-shared/child-extensions');
+
+/** Inline extensions loaded into every subagent child, keyed by name (re-register to replace). */
+export function childExtensions(): Map<string, ExtensionFactory> {
+  const g = globalThis as { [CHILD_EXTENSIONS]?: Map<string, ExtensionFactory> };
+  g[CHILD_EXTENSIONS] ??= new Map();
+  return g[CHILD_EXTENSIONS];
+}
 
 function fail(runId: string, kind: SpawnFailureKind, error: string, startedAt: number): SpawnFailure {
   return {
@@ -910,6 +926,7 @@ export function createSubagentRuntime(options: {
       noThemes: true,
       noContextFiles: !opts.includeContextFiles,
       additionalExtensionPaths: opts.extensionPaths ?? [],
+      extensionFactories: [...childExtensions()].map(([name, factory]) => ({ name, factory, hidden: true })),
       additionalSkillPaths: opts.skillPaths ?? [],
       ...(opts.systemPrompt !== undefined && opts.replaceSystemPrompt ? { systemPrompt: opts.systemPrompt } : {}),
       appendSystemPrompt: [
