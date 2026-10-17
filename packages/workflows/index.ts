@@ -71,6 +71,12 @@ export function workflowMaxConcurrent(env: NodeJS.ProcessEnv = process.env, cpus
   return Math.max(1, Math.min(16, cpus));
 }
 
+/** Stall window for workflow agents: 5 minutes; PI_WORKFLOW_STALL_MS overrides (0 disables). */
+export function workflowStallMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.PI_WORKFLOW_STALL_MS);
+  return env.PI_WORKFLOW_STALL_MS !== undefined && Number.isFinite(raw) && raw >= 0 ? raw : 5 * 60 * 1000;
+}
+
 // ── Live runId → AbortController, so `stop` can cancel in-flight spawns. ──
 // Mirrors @nicknisi/pi-subagents' cascading-cancellation registry. Each
 // agent() call spawns detached and registers its controller here; stop(runId)
@@ -208,6 +214,7 @@ function makeSpawnFn(
       ...(opts.systemPrompt !== undefined ? { systemPrompt: opts.systemPrompt } : {}),
       ...(opts.thinkingLevel !== undefined ? { thinkingLevel: opts.thinkingLevel } : {}),
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+      ...(opts.stallMs !== undefined ? { stallMs: opts.stallMs } : {}),
       ...(opts.maxTurns !== undefined ? { maxTurns: opts.maxTurns } : {}),
       ...(opts.outputSchema !== undefined ? { outputSchema: opts.outputSchema as never } : {}),
       ...(opts.worktree === true ? { worktree: true } : {}),
@@ -379,7 +386,7 @@ export default function workflows(pi: ExtensionAPI): void {
       'ask(question, options?).',
       'agent() opts: model, tools (default read-only [read, grep, find, ls]; pass tools explicitly for',
       'builders), label, systemPrompt, schema (validated; agent() returns parsed data, otherwise text),',
-      'effort (thinking level), timeoutMs, maxTurns, worktree (when a patch is produced, agent() returns',
+      'effort (thinking level), timeoutMs, stallMs (restart after this long without output; default 5 min), maxTurns, worktree (when a patch is produced, agent() returns',
       '{ value, patchPath, runId }). A failed agent() becomes null inside parallel()/pipeline() (logged;',
       'later pipeline stages skip it); awaited directly it throws `${kind}: ${error}`.',
       'parallel(thunks) takes zero-arg thunks: pass () => agent(...), not agent(...). Up to',
@@ -576,6 +583,7 @@ export default function workflows(pi: ExtensionAPI): void {
             args: params.args,
             spawn: spawnFn,
             cwd: ctx.cwd,
+            stallMs: workflowStallMs(),
             onLog: controls.onLog,
             gate: controls.gate,
             checkpoint: controls.checkpoint,
@@ -694,6 +702,7 @@ async function cmdWf(
         args: parsedArgs,
         spawn: spawnFn,
         cwd: ctx.cwd,
+        stallMs: workflowStallMs(),
         onLog: controls.onLog,
         gate: controls.gate,
         checkpoint: controls.checkpoint,

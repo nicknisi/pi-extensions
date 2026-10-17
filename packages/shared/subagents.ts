@@ -131,6 +131,11 @@ export interface SpawnOptions {
   cwd?: string;
   /** Wall-clock limit. Default 15 minutes; pass 0 to disable. */
   timeoutMs?: number;
+  /**
+   * Abort with kind 'stalled' after this many ms without any child output.
+   * Time spent inside the child's own tool calls doesn't count. Default: off.
+   */
+  stallMs?: number;
   /** Aborts the child session (session.abort()) when fired. */
   signal?: AbortSignal;
   /** Receives cumulative usage after each completed assistant response. */
@@ -172,7 +177,7 @@ export interface SpawnUsage {
   cost?: number | undefined;
 }
 
-export type SpawnFailureKind = 'crashed' | 'empty' | 'schema_invalid' | 'aborted';
+export type SpawnFailureKind = 'crashed' | 'empty' | 'schema_invalid' | 'aborted' | 'stalled';
 
 export type SpawnFailure = {
   ok: false;
@@ -250,6 +255,8 @@ const MAX_RETAINED_RUNS = 200;
 const MAX_ARTIFACT_OUTPUT_CHARS = 64 * 1024;
 const MAX_ARTIFACT_FILES_READ = 500;
 const MAX_TRANSCRIPT_ENTRIES = 20;
+/** Attempts at a schema-valid final message (the first answer plus in-session corrections). */
+const SCHEMA_ATTEMPTS = 5;
 /** Persisted artifacts (and their worktrees) are GC'd after this age. */
 export const ARTIFACT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -411,6 +418,23 @@ function extractJson(text: string): { ok: true; value: unknown } | { ok: false }
     }
   }
   return { ok: false };
+}
+
+/** Why `text` fails `schema`, or undefined when it parses and validates. */
+function schemaProblem(schema: TSchema, text: string): string | undefined {
+  const parsed = extractJson(text);
+  if (!parsed.ok) return 'Final message did not contain parseable JSON';
+  const validated = validateOutput(schema, parsed.value);
+  return validated.ok ? undefined : validated.error;
+}
+
+function schemaInstructions(schema: TSchema): string {
+  return [
+    'When you finish, your final message must be only a JSON value (optionally in a ```json fence) that validates against this JSON Schema:',
+    '```json',
+    JSON.stringify(schema, null, 2),
+    '```',
+  ].join('\n');
 }
 
 function validateOutput(schema: TSchema, raw: unknown): { ok: true; data: unknown } | { ok: false; error: string } {
@@ -885,11 +909,11 @@ export function createSubagentRuntime(options: {
       noContextFiles: !opts.includeContextFiles,
       additionalExtensionPaths: opts.extensionPaths ?? [],
       additionalSkillPaths: opts.skillPaths ?? [],
-      ...(opts.systemPrompt !== undefined
-        ? opts.replaceSystemPrompt
-          ? { systemPrompt: opts.systemPrompt }
-          : { appendSystemPrompt: [opts.systemPrompt] }
-        : {}),
+      ...(opts.systemPrompt !== undefined && opts.replaceSystemPrompt ? { systemPrompt: opts.systemPrompt } : {}),
+      appendSystemPrompt: [
+        ...(opts.systemPrompt !== undefined && !opts.replaceSystemPrompt ? [opts.systemPrompt] : []),
+        ...(opts.outputSchema ? [schemaInstructions(opts.outputSchema)] : []),
+      ],
     });
     await loader.reload();
 
@@ -924,6 +948,25 @@ export function createSubagentRuntime(options: {
           }, timeoutMs)
         : undefined;
 
+    // Stall watchdog: re-armed on every child event, paused while a tool runs.
+    const stallMs = opts.stallMs ?? 0;
+    let stalled = false;
+    let settled = false;
+    let toolsRunning = 0;
+    let stallTimer: ReturnType<typeof setTimeout> | undefined;
+    const armStall = () => {
+      if (stallMs <= 0 || settled) return;
+      clearTimeout(stallTimer);
+      stallTimer =
+        toolsRunning > 0
+          ? undefined
+          : setTimeout(() => {
+              stalled = true;
+              abortOnce(`Stalled: no output for ${stallMs}ms`);
+            }, stallMs);
+    };
+    armStall();
+
     let turnCount = 0;
     let toolCallCount = 0;
     const transcript: TranscriptEntry[] = [];
@@ -940,7 +983,12 @@ export function createSubagentRuntime(options: {
           }
           break;
         }
+        case 'tool_execution_end': {
+          toolsRunning = Math.max(0, toolsRunning - 1);
+          break;
+        }
         case 'tool_execution_start': {
+          toolsRunning++;
           toolCallCount++;
           const toolName =
             typeof (event as { toolName?: unknown }).toolName === 'string'
@@ -970,15 +1018,28 @@ export function createSubagentRuntime(options: {
       // Mirror onto the record so /fleet can show live activity mid-run
       // (transcript/usage otherwise only exist after settle).
       record.transcript = [...transcript];
+      armStall();
     });
 
     let promptError: unknown;
     try {
       await session.prompt(opts.prompt);
+      // A non-empty answer that fails the schema gets corrected in-session
+      // (the context is already cached) instead of failing the run outright.
+      for (let attempt = 1; opts.outputSchema && attempt < SCHEMA_ATTEMPTS && abortReason === undefined; attempt++) {
+        const text = lastAssistantText(session.messages as readonly any[]);
+        const problem = text ? schemaProblem(opts.outputSchema, text) : undefined;
+        if (!problem) break;
+        await session.prompt(
+          `Your final message must be only JSON that validates against the required schema. Problem: ${problem}. Reply with only the corrected JSON.`,
+        );
+      }
     } catch (err) {
       promptError = err;
     } finally {
       if (timer) clearTimeout(timer);
+      settled = true;
+      clearTimeout(stallTimer);
       opts.signal?.removeEventListener('abort', onSignalAbort);
     }
 
@@ -1045,7 +1106,7 @@ export function createSubagentRuntime(options: {
       return finish({
         ok: false,
         runId,
-        kind: 'aborted',
+        kind: stalled ? 'stalled' : 'aborted',
         error: abortReason,
         text,
         usage,

@@ -299,6 +299,35 @@ describe('engine: agent opts + failures', () => {
     expect(r.value).toBe('crashed: boom');
   });
 
+  it('restarts a stalled agent from the same prompt, then gives up after 6 attempts', async () => {
+    const stall = {
+      ok: false as const,
+      kind: 'stalled',
+      error: 'Stalled',
+      text: '',
+      usage: { inputTokens: 1, outputTokens: 0, totalTokens: 1 },
+    };
+    let calls = 0;
+    const flaky: EngineSpawnFn = async (opts) => {
+      calls++;
+      expect(opts.stallMs).toBe(1234);
+      return calls < 3 ? stall : { ok: true, text: 'done', usage: { inputTokens: 1, outputTokens: 0, totalTokens: 1 } };
+    };
+    const r = await runScript({ script: 'return await agent("x");', spawn: flaky, cwd: '/tmp', stallMs: 1234 });
+    expect(r.value).toBe('done');
+    expect(r.usage.totalTokens).toBe(3);
+    expect(r.logs.filter((l) => l.includes('stalled; restarting'))).toHaveLength(2);
+
+    let attempts = 0;
+    const r2 = await runScript({
+      script: 'try { await agent("x", { stallMs: 1234 }); } catch (e) { return e.message; }',
+      spawn: async () => (attempts++, stall),
+      cwd: '/tmp',
+    });
+    expect(attempts).toBe(6);
+    expect(r2.value).toContain('stalled on all 6 attempts');
+  });
+
   it('agent returns res.data when a schema/data payload is present', async () => {
     const spawn: EngineSpawnFn = async () => ({
       ok: true,
