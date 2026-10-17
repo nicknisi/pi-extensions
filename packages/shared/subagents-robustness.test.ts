@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Type } from 'typebox';
 
 // Each prompt() call runs the next scripted turn against a fake child session.
-type Turn = (emit: (event: any) => void, reply: (text: string) => void, aborted: Promise<void>) => Promise<void>;
+type Turn = (
+  emit: (event: any) => void,
+  reply: (text: string) => void,
+  aborted: Promise<void>,
+  push: (message: any) => void,
+) => Promise<void>;
 
 const harness = vi.hoisted(() => ({
   turns: [] as Turn[],
@@ -40,7 +45,11 @@ vi.mock('@earendil-works/pi-coding-agent', () => ({
         async prompt(text: string) {
           harness.prompts.push(text);
           const turn = harness.turns.shift();
-          if (turn) await turn(emit, reply, aborted);
+          const push = (message: any) => {
+            messages.push(message);
+            emit({ type: 'message_end', message });
+          };
+          if (turn) await turn(emit, reply, aborted, push);
         },
         abort: vi.fn(async () => abort()),
         dispose: vi.fn(),
@@ -134,5 +143,32 @@ describe('subagent runtime robustness', () => {
     });
     expect(result).toMatchObject({ ok: false, kind: 'schema_invalid' });
     expect(harness.prompts).toHaveLength(5);
+  });
+
+  it("doesn't prompt a child that was aborted before it started", async () => {
+    harness.turns.push(async (_emit, reply) => reply('should not run'));
+    const controller = new AbortController();
+    controller.abort();
+    const result = await createSubagentRuntime({ namespace: 'pre-abort-test' }).spawn({
+      prompt: 'too late',
+      timeoutMs: 0,
+      signal: controller.signal,
+    });
+    expect(result).toMatchObject({ ok: false, kind: 'aborted' });
+    expect(harness.prompts).toEqual([]);
+  });
+
+  it("doesn't re-prompt for the schema after a provider error", async () => {
+    harness.turns.push(async (_emit, reply, _aborted, push) => {
+      reply('Let me look at the files first.');
+      push({ role: 'assistant', content: [], stopReason: 'error', usage: { input: 0, output: 0, totalTokens: 0 } });
+    });
+    const result = await createSubagentRuntime({ namespace: 'schema-error-test' }).spawn({
+      prompt: 'count',
+      timeoutMs: 0,
+      outputSchema: Type.Object({ count: Type.Number() }),
+    });
+    expect(result).toMatchObject({ ok: false });
+    expect(harness.prompts).toHaveLength(1);
   });
 });

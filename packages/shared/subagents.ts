@@ -955,12 +955,14 @@ export function createSubagentRuntime(options: {
     let toolsRunning = 0;
     let stallTimer: ReturnType<typeof setTimeout> | undefined;
     const armStall = () => {
-      if (stallMs <= 0 || settled) return;
+      if (stallMs <= 0 || settled || abortReason !== undefined) return;
       clearTimeout(stallTimer);
       stallTimer =
         toolsRunning > 0
           ? undefined
           : setTimeout(() => {
+              // Already aborting for another reason (timeout, caller): not a stall.
+              if (abortReason !== undefined) return;
               stalled = true;
               abortOnce(`Stalled: no output for ${stallMs}ms`);
             }, stallMs);
@@ -1023,10 +1025,16 @@ export function createSubagentRuntime(options: {
 
     let promptError: unknown;
     try {
-      await session.prompt(opts.prompt);
+      // session.abort() is a no-op on an idle session, so a child aborted
+      // before it started (stopped while queued) must not prompt at all.
+      if (abortReason === undefined) await session.prompt(opts.prompt);
       // A non-empty answer that fails the schema gets corrected in-session
       // (the context is already cached) instead of failing the run outright.
       for (let attempt = 1; opts.outputSchema && attempt < SCHEMA_ATTEMPTS && abortReason === undefined; attempt++) {
+        const last = (session.messages as readonly any[]).at(-1);
+        // A provider error or abort isn't a schema problem; don't re-prompt into it.
+        if (childSessionError(session)) break;
+        if (last?.role === 'assistant' && (last.stopReason === 'error' || last.stopReason === 'aborted')) break;
         const text = lastAssistantText(session.messages as readonly any[]);
         const problem = text ? schemaProblem(opts.outputSchema, text) : undefined;
         if (!problem) break;
