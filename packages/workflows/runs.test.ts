@@ -199,3 +199,74 @@ describe('sweepWorkflowRuns', () => {
     expect(fs.readdirSync(root).sort()).toEqual(['keep-me', 'wf-00000002']);
   });
 });
+
+describe('relaunch and stop edge cases', () => {
+  it('a relaunch that fails before replaying keeps the saved journal', async () => {
+    const root = tmpRoot();
+    const runs: WorkflowRuns = new Map();
+    const run = startRun(runs, {
+      root,
+      script: SCRIPT,
+      args: undefined,
+      label: 'demo',
+      cwd: '/tmp',
+      spawn: () => recordingSpawn([]),
+    });
+    await run.done;
+    const broken = startRun(runs, {
+      root,
+      script: 'this is not javascript (',
+      args: undefined,
+      label: 'demo',
+      cwd: '/tmp',
+      relaunch: run.id,
+      spawn: () => recordingSpawn([]),
+    });
+    await broken.done;
+    expect(broken.status).toBe('failed');
+    expect(readJournal(run.dir)).toHaveLength(4);
+  });
+
+  it('a stopped run neither spawns queued agents nor writes late journal lines', async () => {
+    const root = tmpRoot();
+    const runs: WorkflowRuns = new Map();
+    const prompts: string[] = [];
+    const run = startRun(runs, {
+      root,
+      script: `try { await agent('hang first'); } catch {} return await agent('never');`,
+      args: undefined,
+      label: 'inline',
+      cwd: '/tmp',
+      spawn: (runSignal) => async (opts) =>
+        recordingSpawn(prompts)({ ...opts, signal: AbortSignal.any([runSignal, opts.signal!]) }),
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    run.controller.abort();
+    await run.done;
+    const atStop = readJournal(run.dir);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(prompts).toEqual(['hang first']);
+    expect(readJournal(run.dir)).toEqual(atStop);
+    expect(atStop.every((e) => !e.result.ok)).toBe(true);
+  });
+
+  it('manual restarts never count toward the stall-restart limit', async () => {
+    const runs: WorkflowRuns = new Map();
+    let calls = 0;
+    const run = startRun(runs, {
+      root: tmpRoot(),
+      script: `return await agent('hang until restarted');`,
+      args: undefined,
+      label: 'inline',
+      cwd: '/tmp',
+      spawn: () => async (opts) => (++calls <= 7 ? recordingSpawn([])(opts) : ok('finally')),
+    });
+    for (let i = 0; i < 7; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+      run.agents[0]!.restart();
+    }
+    await run.done;
+    expect(run.summary).toBe('finally');
+    expect(run.agents[0]!.attempts).toBe(8);
+  });
+});

@@ -218,7 +218,8 @@ export function createReplay(prior: JournalEntry[], record: (entry: JournalEntry
 
 /** Replay key: everything that determines what an agent does. */
 export function agentKey(opts: EngineSpawnOptions): string {
-  const { signal: _signal, ...rest } = opts;
+  // The stall window changes when an agent restarts, not what it does.
+  const { signal: _signal, stallMs: _stallMs, ...rest } = opts;
   return createHash('sha256').update(JSON.stringify(rest)).digest('hex');
 }
 
@@ -381,26 +382,33 @@ export async function runScript(opts: RunScriptOptions): Promise<RunScriptResult
       opts.replay?.record({ seq, key, result: res });
     };
 
+    // Pause gate: hold here (between steps) until resumed. Rejects once the
+    // run is stopped, so a stopped script can't keep replaying or spawning.
+    await opts.gate?.wait();
     let res: EngineSpawnResult;
     if (cached) {
       settle(cached, 'cached');
       res = cached;
     } else {
-      // Pause gate: hold here (between steps) until resumed. Rejects on abort.
-      await opts.gate?.wait();
       state.status = 'running';
-      for (let restarts = 0; ; restarts++) {
+      let stallRestarts = 0;
+      for (;;) {
+        if (stopped) {
+          res = { ok: false, kind: 'aborted', error: 'Stopped', text: '', usage: zeroUsage() };
+          break;
+        }
         attempt = new AbortController();
-        if (stopped) attempt.abort();
         state.attempts++;
         res = await spawn({ ...spawnOpts, signal: attempt.signal });
         addUsage(usage, res.usage);
         addUsage(state.usage, res.usage);
-        const retry = !res.ok && !stopped && (res.kind === 'stalled' || (res.kind === 'aborted' && restartRequested));
+        const manualRestart = !res.ok && res.kind === 'aborted' && restartRequested && !stopped;
         restartRequested = false;
-        if (!retry || restarts >= MAX_STALL_RESTARTS) break;
+        const stallRestart = !res.ok && res.kind === 'stalled' && !stopped && stallRestarts < MAX_STALL_RESTARTS;
+        if (!manualRestart && !stallRestart) break;
+        if (stallRestart) stallRestarts++;
         log(
-          `${spawnOpts.agent ?? 'agent'} ${res.ok ? '' : res.kind}; restarting from the same prompt (retry ${restarts + 1})`,
+          `${spawnOpts.agent ?? 'agent'} ${manualRestart ? 'restarted' : 'stalled'}; starting again from the same prompt`,
         );
       }
       if (!res.ok && res.kind === 'stalled') {

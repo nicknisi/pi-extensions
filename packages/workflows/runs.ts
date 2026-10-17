@@ -227,7 +227,9 @@ export function startRun(runs: WorkflowRuns, opts: StartRunOptions): WorkflowRun
   const prior = opts.relaunch ? readJournal(dir) : [];
   const journalFile = path.join(dir, 'journal.jsonl');
   fs.writeFileSync(path.join(dir, 'script.js'), opts.script);
-  fs.writeFileSync(journalFile, '');
+  // Keep the prior entries: a relaunch that fails or stops early must not
+  // lose the saved results it never reached. Later lines for a seq win.
+  fs.writeFileSync(journalFile, prior.map((entry) => `${JSON.stringify(entry)}\n`).join(''));
 
   const controller = new AbortController();
   const gate = createRunGate();
@@ -286,15 +288,23 @@ export function startRun(runs: WorkflowRuns, opts: StartRunOptions): WorkflowRun
   persist();
   runs.set(id, run);
 
+  // Once the run has settled (stopped, failed, finished), a script still
+  // unwinding in the background must not open dialogs or touch the journal.
+  let closed = false;
   const checkpoint = opts.ui
     ? async (label?: string): Promise<void> => {
+        if (closed || controller.signal.aborted) throw new Error('Stopped');
         const ok = await opts.ui!.confirm('Workflow checkpoint', label ? `${label} — continue?` : 'Continue?');
         if (!ok) throw new Error(`checkpoint${label ? ` '${label}'` : ''} rejected`);
       }
     : undefined;
   const ask: EngineAskFn | undefined = opts.ui
-    ? async (question, options) =>
-        options && options.length > 0 ? opts.ui!.select(question, options) : opts.ui!.confirm('Workflow', question)
+    ? async (question, options) => {
+        if (closed || controller.signal.aborted) throw new Error('Stopped');
+        return options && options.length > 0
+          ? opts.ui!.select(question, options)
+          : opts.ui!.confirm('Workflow', question);
+      }
     : undefined;
 
   // Stopping the run must also unblock the script promise: in-flight agents
@@ -319,6 +329,7 @@ export function startRun(runs: WorkflowRuns, opts: StartRunOptions): WorkflowRun
       ...(checkpoint ? { checkpoint } : {}),
       ...(ask ? { ask } : {}),
       replay: createReplay(prior, (entry) => {
+        if (closed) return;
         try {
           fs.appendFileSync(journalFile, `${JSON.stringify(entry)}\n`);
         } catch {
@@ -351,6 +362,7 @@ export function startRun(runs: WorkflowRuns, opts: StartRunOptions): WorkflowRun
       run.summary = err instanceof Error ? err.message : String(err);
     })
     .finally(() => {
+      closed = true;
       if (timer) clearTimeout(timer);
       opts.signal?.removeEventListener('abort', onExternalAbort);
       // Stop whatever is still in flight (a script that threw mid-fan-out).
