@@ -142,12 +142,59 @@ function spawnCancellable(
   return Object.assign(done, { runId }) as Promise<SpawnResult>;
 }
 
+/** Prompt-cache hold for fan-outs: 5s by default; PI_WORKFLOW_PREFIX_STAGGER_MS overrides (0 disables). */
+export function workflowStaggerMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.PI_WORKFLOW_PREFIX_STAGGER_MS);
+  return env.PI_WORKFLOW_PREFIX_STAGGER_MS !== undefined && Number.isFinite(raw) && raw >= 0 ? raw : 5000;
+}
+
+// Anthropic's default cache TTL is 5 minutes; treat a prefix as warm a bit less.
+const PREFIX_WARM_MS = 4 * 60 * 1000;
+
+/**
+ * Siblings that share a prompt prefix (same model, effort, tools, system
+ * prompt, schema) should read one cache write instead of each paying for
+ * their own. The first agent with a cold prefix starts at once; matching
+ * agents wait until its response starts (when the cache entry becomes
+ * readable), at most `capMs`. A prefix used recently is warm: no wait.
+ */
+export function createPrefixStagger(capMs: number, now: () => number = Date.now) {
+  const warming = new Map<string, Promise<void>>();
+  const warmUntil = new Map<string, number>();
+  return async function stagger<T>(key: string, start: (onResponseStart: () => void) => Promise<T>): Promise<T> {
+    const markWarm = () => warmUntil.set(key, now() + PREFIX_WARM_MS);
+    if (capMs <= 0 || (warmUntil.get(key) ?? 0) > now()) return start(markWarm);
+    const pending = warming.get(key);
+    if (pending) {
+      await pending;
+      return start(markWarm);
+    }
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const timer = setTimeout(() => release(), capMs);
+    warming.set(key, gate);
+    void gate.then(() => {
+      clearTimeout(timer);
+      warming.delete(key);
+    });
+    try {
+      return await start(() => {
+        markWarm();
+        release();
+      });
+    } finally {
+      release();
+    }
+  };
+}
+
 function makeSpawnFn(
   cancellables: Cancellables,
   runtime: SubagentRuntime,
   cwd: string,
   ownerSession: string | undefined,
   externalSignal: AbortSignal | undefined,
+  stagger: ReturnType<typeof createPrefixStagger> = createPrefixStagger(0),
 ): EngineSpawnFn {
   return async (opts: EngineSpawnOptions): Promise<EngineSpawnResult> => {
     const spawnOpts: SpawnOptions = {
@@ -171,7 +218,19 @@ function makeSpawnFn(
     // Stop the child when either the whole run or this one agent is stopped.
     const signal =
       externalSignal && opts.signal ? AbortSignal.any([externalSignal, opts.signal]) : (opts.signal ?? externalSignal);
-    const res = await spawnCancellable(cancellables, runtime, spawnOpts, signal);
+    // Worktree agents each get their own cwd, so they never share a prefix.
+    const prefix = JSON.stringify([
+      spawnOpts.model,
+      spawnOpts.thinkingLevel,
+      spawnOpts.tools,
+      spawnOpts.systemPrompt,
+      spawnOpts.outputSchema,
+    ]);
+    const res = opts.worktree
+      ? await spawnCancellable(cancellables, runtime, spawnOpts, signal)
+      : await stagger(prefix, (onResponseStart) =>
+          spawnCancellable(cancellables, runtime, { ...spawnOpts, onResponseStart }, signal),
+        );
     // Surface the worktree `.patch` path (recorded on the run record after
     // settle) so workflow scripts can return it for the `/patches` apply flow.
     if (res.ok) {
@@ -515,7 +574,8 @@ export default function workflows(pi: ExtensionAPI): void {
       stallMs: workflowStallMs(),
       timeoutMs: opts.timeoutMs,
       signal: opts.signal,
-      spawn: (runSignal) => makeSpawnFn(cancellables, runtime, ctx.cwd, ownerSession, runSignal),
+      spawn: (runSignal) =>
+        makeSpawnFn(cancellables, runtime, ctx.cwd, ownerSession, runSignal, createPrefixStagger(workflowStaggerMs())),
       ...(ctx.hasUI ? { ui: ctx.ui } : {}),
       onChange: footer,
     });
