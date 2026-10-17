@@ -141,6 +141,7 @@ Provider documentation:
 - Provider payload fields and beta headers are provider-specific wire contracts. Pi exposes the interception hooks, but a provider can change its accepted values independently of Pi.
 - The extension relies on `before_provider_request` replacing the entire payload when it returns a value, on pi sending Anthropic betas through the payload's `betas` array, and on `message_end` carrying the provider error for failed requests.
 - `/fast` is session-local and is not persisted. Set `enabled` in config for a persistent default.
+- Children follow the most recently started session in the process. With one pi session per process (the normal CLI case) that's always the right one; an SDK host running several sessions in one process shares a single child hook.
 - The footer confirms that the extension considers Fast mode active; it does not inspect the provider response's reported tier/speed. Provider-side downgrade, missing preview entitlement, capacity errors, and billing remain authoritative.
 
 ## Development
