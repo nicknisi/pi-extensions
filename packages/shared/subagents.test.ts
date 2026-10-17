@@ -9,7 +9,13 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ARTIFACT_RETENTION_MS, sweepRunArtifacts, writeSessionMirror, type RunArtifact } from './subagents.js';
+import {
+  ARTIFACT_RETENTION_MS,
+  createSharedSlots,
+  sweepRunArtifacts,
+  writeSessionMirror,
+  type RunArtifact,
+} from './subagents.js';
 import { addWorktree, captureHandoff, findRepoRoot, removeWorktree } from './worktree.js';
 
 const tmpdirs: string[] = [];
@@ -48,6 +54,27 @@ function gitRepo(): string {
   git('-c', 'user.email=test@test', '-c', 'user.name=test', 'commit', '-q', '--allow-empty', '-m', 'init');
   return repo;
 }
+
+describe('createSharedSlots', () => {
+  it('admits each waiter against its own ceiling, first come first served', async () => {
+    const slots = createSharedSlots();
+    for (let i = 0; i < 8; i++) await slots.acquire(16);
+    const order: string[] = [];
+    void slots.acquire(16).then(() => order.push('big-1')); // 8 < 16, no queue: admitted at once
+    await Promise.resolve();
+    void slots.acquire(8).then(() => order.push('small')); // 9 ≥ 8: waits
+    void slots.acquire(16).then(() => order.push('big-2')); // queued behind 'small', not ahead of it
+    await Promise.resolve();
+    expect(order).toEqual(['big-1']);
+    slots.release(); // 8: still ≥ 8, the head ('small') keeps waiting and so does everyone behind it
+    await Promise.resolve();
+    expect(order).toEqual(['big-1']);
+    slots.release(); // 7 < 8: 'small' in, then 8 < 16: 'big-2' in
+    await Promise.resolve();
+    expect(order).toEqual(['big-1', 'small', 'big-2']);
+    expect(slots.active()).toBe(9);
+  });
+});
 
 describe('sweepRunArtifacts', () => {
   it('deletes records older than the retention window, plus patch siblings', () => {
