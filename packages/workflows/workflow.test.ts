@@ -542,3 +542,18 @@ describe('workflowMaxConcurrent', () => {
     expect(workflowMaxConcurrent({ PI_WORKFLOW_MAX_CONCURRENT: 'lots' }, 6)).toBe(6);
   });
 });
+
+describe('saveWorkflowScript', () => {
+  it('writes <name>.js and rejects path-like names', async () => {
+    const { saveWorkflowScript } = await import('./index.js');
+    const dir = tmpRoot();
+    const file = saveWorkflowScript(
+      "export const meta = { name: 'x', description: 'y' };\nreturn 1;",
+      'audit-routes',
+      dir,
+    );
+    expect(file).toBe(path.join(dir, 'audit-routes.js'));
+    expect(fs.readFileSync(file, 'utf8').endsWith('\n')).toBe(true);
+    expect(() => saveWorkflowScript('return 1;', '../escape', dir)).toThrow('Invalid workflow name');
+  });
+});

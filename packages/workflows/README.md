@@ -9,7 +9,9 @@ Three pieces compose the workflow platform: `@nicknisi/pi-shared`'s **subagent r
 ## What it adds
 
 - **`workflow` tool** (model-facing) — actions: `run` (inline JS `script`, `name` of a saved workflow file, or `relaunch` of an earlier run), `list`, `status [runId]`, `stop <runId>`, `pause [runId]`, `resume [runId]`. Runs start in the background and return a `wf-xxxxxxxx` id at once; the result arrives as a message that starts a new turn.
-- **`/wf` command** (human-facing) — `/wf list | /wf run <name> [argsJson] | /wf relaunch <id> | /wf status [id] | /wf stop <id> | /wf pause [id] | /wf resume [id]`.
+- **`/workflows` command** — live progress view (runs → phases → agents → agent detail). See [Watch a run](#watch-a-run).
+- **Saved workflows as commands** — every saved workflow also runs as `/<name> [args]` (unless the name is taken by another command).
+- **`/wf` command** (human-facing) — `/wf list | /wf run <name> [argsJson] | /wf relaunch <id> | /wf save <id> [name] | /wf status [id] | /wf stop <id> | /wf pause [id] | /wf resume [id]`.
 - **Human gates inside scripts** — `checkpoint(label?)` pauses the run on a confirm dialog (reject/dismiss stops the run); `ask(question, options?)` asks mid-run (select with options, yes/no without, `undefined` when dismissed).
 - **Footer status** — while a run is active the footer shows `wf <name> [running|paused] <last phase> · <done>/<agents>` (or `wf <n> runs` for several).
 - **`autoplan` skill** — teaches the model the "autoplan this" trigger: run the saved `autoplan` workflow with args derived from the conversation, then respect the run's decision outcome. Disable with `"skills": ["-skills/autoplan"]` on the package entry.
@@ -65,6 +67,24 @@ Every run writes its script, `run.json` (label, args, status), and `journal.json
 
 `run` with `relaunch: '<id>'` (or `/wf relaunch <id>`) re-runs a stopped or failed workflow with the same script and args. Agents replay in start order: each completed agent whose inputs match returns its saved result without running; the first agent that differs, failed, or never finished — and every agent after it — runs again. Pass `script` along with `relaunch` to relaunch an edited version. Keep scripts deterministic (no `Date.now()` or `Math.random()` in prompts; pass timestamps through `args`) so a relaunch starts the same agents in the same order.
 
+## Watch a run
+
+`/workflows` opens a live view of this session's runs; with a single run it opens that run directly (`/workflows <id>` picks one). Each run shows its phases with agent counts; drill into a phase to see its agents (status, tokens, attempts) and into an agent to read its prompt, error, and result.
+
+| Key           | Action                                                                                             |
+| ------------- | -------------------------------------------------------------------------------------------------- |
+| `↑` / `↓`     | Select a run, phase, or agent                                                                      |
+| `Enter` / `→` | Drill in                                                                                           |
+| `Esc` / `←`   | Back out one level (closes at the top)                                                             |
+| `j` / `k`     | Scroll the agent detail                                                                            |
+| `f`           | Filter a phase's agents: all → running → done → failed                                             |
+| `p`           | Pause or resume the run                                                                            |
+| `x`           | Stop the selected agent (it becomes `null` in its wave), or the whole run from the run/phase level |
+| `r`           | Restart the selected running agent from the same prompt                                            |
+| `s`           | Save the run's script as a workflow command                                                        |
+
+Outside the terminal UI, `/workflows` prints the same status as `/wf status`.
+
 ## Saved workflows
 
 Plain files. The registry is `ls` — no database, no manifest, no config keys.
@@ -72,7 +92,11 @@ Plain files. The registry is `ls` — no database, no manifest, no config keys.
 - `~/.pi/agent/workflows/*.js` — global.
 - `.pi/workflows/*.js` — project-local, **trusted projects only**. Untrusted projects see only global workflows.
 
-Names are bare file stems (`research`, not `research.js`, never a path — `..` and `/` are rejected to prevent escaping the workflows dirs). Global shadows a same-named project workflow. Files are read on demand, so `/reload` needs no workflow-specific wiring.
+Names are bare file stems (`research`, not `research.js`, never a path — `..` and `/` are rejected to prevent escaping the workflows dirs). Global shadows a same-named project workflow. Files are read on demand.
+
+Each saved workflow is also registered as `/<name> [args]` at session start (arguments are parsed as JSON when possible, otherwise passed as a string). A name already used by another command keeps that command; run the workflow with `/wf run <name>` instead. `/reload` picks up new files.
+
+To save a run you liked, press `s` in `/workflows` or run `/wf save <id> [name]`. Without a name you're asked for one and, in a trusted project, whether to save to `.pi/workflows/` (shared with the repo) or `~/.pi/agent/workflows/` (only you). The command is available immediately.
 
 ## Runs are visible
 

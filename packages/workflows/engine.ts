@@ -160,6 +160,8 @@ export interface RunScriptOptions {
   replay?: Replay;
   /** Called once per agent() call with its live state object. */
   onAgent?: (state: AgentState) => void;
+  /** Called with the script's `meta` as soon as it compiles. */
+  onMeta?: (meta: ScriptMeta | undefined) => void;
 }
 
 /** Live, mutable view of one agent() call, for progress UIs. */
@@ -481,6 +483,7 @@ export async function runScript(opts: RunScriptOptions): Promise<RunScriptResult
   // Compile + run. compileScript is extracted so callers (tests, future
   // tooling) can compile + read `meta` without a real spawn.
   const compiled = compileScript(script);
+  opts.onMeta?.(compiled.meta);
   const value = await compiled.fn(args, agent, parallel, pipeline, phase, log, budget, cwd, checkpoint, ask);
   return { value, meta: compiled.meta, logs, usage, durationMs: Date.now() - startedAt };
 }
