@@ -7,9 +7,10 @@ Fast mode trades higher usage cost for faster output. It does not change the sel
 ## What it adds
 
 - **Command:** `/fast` — toggle Fast mode for the current Pi session.
-- **Footer status:** `fast` while Fast mode is enabled and the selected model is eligible. Disable it with `showStatus`.
+- **Footer status:** `fast` while Fast mode is enabled and the selected model is eligible, `fast (cooldown)` while a rate limit has dropped it to standard speed. Disable it with `showStatus`.
 - **Provider request hooks:**
-  - Anthropic: merges the `fast-mode-2026-02-01` beta into `anthropic-beta` and adds `speed: "fast"` to Messages API payloads.
+  - Anthropic: adds `speed: "fast"` to Messages API payloads. For the research-preview models (Opus 5 and Opus 4.8) it also appends the `fast-mode-2026-02-01` beta to the payload's `betas`, keeping every beta pi computed.
+- **Rate-limit fallback:** a Fast-mode `429`/`529` switches the session to standard speed for 60 seconds, so pi's automatic retry resends at standard speed.
   - OpenAI Codex: adds `service_tier: "fast"` to OAuth-backed Codex Responses payloads.
 - **Config:** a global default plus an optional trusted project override.
 
@@ -50,14 +51,14 @@ Arguments are intentionally not accepted. Use `/fast`, not `/fast on` or `/fast 
 
 Support is intentionally explicit so the extension does not send premium-tier fields to models whose APIs reject or ignore them.
 
-| Provider       | Required Pi API          | Supported model IDs                                                  | Injected request setting |
-| -------------- | ------------------------ | -------------------------------------------------------------------- | ------------------------ |
-| `anthropic`    | `anthropic-messages`     | `claude-opus-5`, `claude-opus-4-8`                                   | `speed: "fast"`          |
-| `openai-codex` | `openai-codex-responses` | `gpt-5.4`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra` | `service_tier: "fast"`   |
+| Provider       | Required Pi API          | Supported model IDs                                                                                                           | Injected request setting |
+| -------------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| `anthropic`    | `anthropic-messages`     | `claude-opus-5-5`, `claude-opus-5`, `claude-opus-4-8`                                                                         | `speed: "fast"`          |
+| `openai-codex` | `openai-codex-responses` | `gpt-5.4`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-6-astra`, `gpt-6-luna`, `gpt-6-sol`, `gpt-6.1-sol` | `service_tier: "fast"`   |
 
 OpenAI Codex eligibility also requires ChatGPT OAuth (`/login` in Pi). API-key-backed `openai` models use a different provider and are not modified by this extension.
 
-Anthropic Fast mode is a research preview that must be enabled for the account. It is available through the first-party Claude API, not Amazon Bedrock, Google Cloud, or Microsoft Foundry. The extension can add the request fields, but it cannot grant preview access.
+Anthropic Fast mode on Claude Opus 5.5 is generally available on the first-party Claude API: no beta header or access request, with a default Fast-mode rate limit in the Start, Build, and Scale usage tiers. On Opus 5 and Opus 4.8 it is a research preview that must be enabled for the account; without access, the API answers Fast requests with `429`. It is not available on Amazon Bedrock, Google Cloud, or Claude Platform on AWS.
 
 Claude Opus 4.6 and 4.7 are deliberately excluded. Anthropic no longer offers Fast mode on those models: 4.6 silently runs at standard speed, while 4.7 rejects `speed: "fast"`.
 
@@ -107,23 +108,23 @@ The extension is conservative about request mutation:
 
 1. It checks the active provider, API, model ID, and—on Codex—OAuth auth.
 2. It verifies that the provider payload's `model` exactly matches Pi's selected model.
-3. It returns a complete cloned payload with one added field; Pi's `before_provider_request` hook treats returned values as full replacements.
+3. It returns a complete cloned payload with the added fields; Pi's `before_provider_request` hook treats returned values as full replacements.
 4. If a payload already contains `speed` or `service_tier`, that explicit value wins and the extension leaves the payload unchanged.
 
-For Anthropic, beta headers are merged case-insensitively and deduplicated. The extension preserves beta values already present in request/model headers and reconstructs Pi's OAuth, interleaved-thinking, and fine-grained-tool-streaming betas when the selected model needs them. This avoids the common failure where assigning `anthropic-beta` for Fast mode accidentally removes a beta required by Pi's provider implementation.
+For Anthropic, pi puts its betas in the payload's `betas` array, and the SDK turns that array into the `anthropic-beta` header. The extension appends the Fast beta to that array rather than setting the header: any `anthropic-beta` header an extension sets replaces pi's computed list, which would drop betas pi needs (such as the mid-conversation effort betas on Opus 5).
 
 ## Cost and performance caveats
 
 - **Higher cost or credit use.** Fast mode is a premium service tier. Review the linked provider pricing before enabling it by default.
 - **Anthropic prompt caches are speed-specific.** Switching between standard and Fast mode causes a prompt-cache miss because the two speeds do not share cached prefixes.
-- **Anthropic capacity is separate.** Fast mode has dedicated rate limits and may return `429` or `529`; this extension does not retry at standard speed automatically.
+- **Anthropic capacity is separate.** Fast mode has dedicated rate limits and may return `429` or `529`. The extension then uses standard speed for 60 seconds (failed requests don't expose `retry-after`) and relies on pi's automatic retry (`retry.enabled`, on by default) to resend the failed request.
 - **Codex credit multipliers vary by model.** OpenAI currently documents 2.5× ChatGPT credit use for GPT-5.5/5.6 and 2× for GPT-5.4. API Priority/Fast processing has separate token pricing.
 - **Faster output is not lower time-to-first-token.** Anthropic describes the gain as output tokens per second; OpenAI's Codex documentation describes a supported-model speed increase.
 - **Model support changes.** The allowlists match the provider documentation and Pi catalog at release time. A newly released model remains ineligible until this package is updated deliberately.
 
 Provider documentation:
 
-- [Anthropic Fast mode (research preview)](https://platform.claude.com/docs/en/build-with-claude/fast-mode)
+- [Anthropic Fast mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode)
 - [OpenAI API Fast mode](https://developers.openai.com/api/docs/guides/fast-mode)
 - [Codex speed and credit usage](https://developers.openai.com/codex/speed)
 
@@ -137,7 +138,7 @@ No npm runtime dependencies or workspace dependencies.
 ## Caveats
 
 - Provider payload fields and beta headers are provider-specific wire contracts. Pi exposes the interception hooks, but a provider can change its accepted values independently of Pi.
-- The extension relies on `before_provider_headers` mutating headers in place and `before_provider_request` replacing the entire payload when it returns a value.
+- The extension relies on `before_provider_request` replacing the entire payload when it returns a value, on pi sending Anthropic betas through the payload's `betas` array, and on `message_end` carrying the provider error for failed requests.
 - `/fast` is session-local and is not persisted. Set `enabled` in config for a persistent default.
 - The footer confirms that the extension considers Fast mode active; it does not inspect the provider response's reported tier/speed. Provider-side downgrade, missing preview entitlement, capacity errors, and billing remain authoritative.
 
