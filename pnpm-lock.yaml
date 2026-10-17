@@ -110,7 +110,11 @@ importers:
 
   packages/composer: {}
 
-  packages/fast: {}
+  packages/fast:
+    dependencies:
+      '@nicknisi/pi-shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/handoff: {}
 

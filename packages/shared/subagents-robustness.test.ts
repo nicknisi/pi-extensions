@@ -74,7 +74,7 @@ vi.mock('@earendil-works/pi-coding-agent', () => ({
   SettingsManager: { inMemory: vi.fn(() => ({})) },
 }));
 
-import { createSubagentRuntime } from './subagents.js';
+import { childExtensions, createSubagentRuntime } from './subagents.js';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -170,5 +170,21 @@ describe('subagent runtime robustness', () => {
     });
     expect(result).toMatchObject({ ok: false });
     expect(harness.prompts).toHaveLength(1);
+  });
+
+  it('loads registered child extensions into every child', async () => {
+    const factory = () => {};
+    childExtensions().set('test-child-ext', factory);
+    try {
+      harness.turns.push(async (_emit, reply) => reply('ok'));
+      await createSubagentRuntime({ namespace: 'child-ext-test' }).spawn({ prompt: 'hi', timeoutMs: 0 });
+      expect(harness.loaderOptions[0].extensionFactories).toContainEqual({
+        name: 'test-child-ext',
+        factory,
+        hidden: true,
+      });
+    } finally {
+      childExtensions().delete('test-child-ext');
+    }
   });
 });

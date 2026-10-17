@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { childExtensions } from '@nicknisi/pi-shared';
 import { loadFastConfig, type FastConfig } from './config.js';
 import {
   ANTHROPIC_FAST_SPEED,
@@ -16,8 +17,6 @@ const EXTENSION_ID = 'fast';
 
 type SessionState = FastState & {
   config: FastConfig;
-  /** Whether the most recent provider request was sent at Fast speed. */
-  lastRequestFast?: boolean;
 };
 
 function createState(ctx: ExtensionContext): SessionState {
@@ -78,6 +77,40 @@ function getStatusMessage(ctx: ExtensionContext, state: SessionState): string {
   return `Fast mode is ${describeFastMode(state)}. Current model: ${eligibility.modelKey}.${injected}`;
 }
 
+/**
+ * Inject Fast mode into a session's provider requests, and fall back to
+ * standard speed after a Fast-mode 429/529 (pi's automatic retry then resends
+ * at standard speed). Used for the main session and for subagent children.
+ */
+function attachRequestHooks(
+  target: ExtensionAPI,
+  stateFor: (ctx: ExtensionContext) => FastState | undefined,
+  hooks: {
+    afterRequest?: (ctx: ExtensionContext) => void;
+    onCooldown?: (until: number, ctx: ExtensionContext) => void;
+  } = {},
+): void {
+  let lastRequestFast = false;
+  target.on('before_provider_request', (event, ctx) => {
+    const state = stateFor(ctx);
+    if (!state || !ctx.model) return;
+    const eligibility = getFastEligibility(ctx.model, usingOAuth(ctx));
+    const nextPayload = injectFastPayload(event.payload, ctx.model, eligibility, state);
+    lastRequestFast = nextPayload !== undefined;
+    hooks.afterRequest?.(ctx);
+    return nextPayload;
+  });
+  target.on('message_end', (event, ctx) => {
+    const state = stateFor(ctx);
+    const message = event.message;
+    if (!state || !lastRequestFast || message.role !== 'assistant' || message.stopReason !== 'error') return;
+    const until = noteFastError(state, message.errorMessage ?? '');
+    if (until === undefined) return;
+    lastRequestFast = false;
+    hooks.onCooldown?.(until, ctx);
+  });
+}
+
 export default function fastExtension(pi: ExtensionAPI) {
   let state: SessionState | undefined;
 
@@ -95,33 +128,27 @@ export default function fastExtension(pi: ExtensionAPI) {
     updateStatus(ctx, getState(ctx));
   });
 
-  pi.on('before_provider_request', (event, ctx) => {
-    const currentState = getState(ctx);
-    if (!ctx.model) return;
-
-    const eligibility = getFastEligibility(ctx.model, usingOAuth(ctx));
-    const nextPayload = injectFastPayload(event.payload, ctx.model, eligibility, currentState);
-    currentState.lastRequestFast = nextPayload !== undefined;
-    updateStatus(ctx, currentState);
-    return nextPayload;
+  attachRequestHooks(pi, (ctx) => getState(ctx), {
+    afterRequest: (ctx) => updateStatus(ctx, getState(ctx)),
+    onCooldown: (until, ctx) => {
+      updateStatus(ctx, getState(ctx));
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          `Fast mode rate limited; using standard speed until ${new Date(until).toLocaleTimeString()}.`,
+          'warning',
+        );
+      }
+    },
   });
 
-  // Fast mode has its own rate limits. On a Fast-mode 429/529, use standard
-  // speed for a while; pi's automatic retry then resends at standard speed.
-  pi.on('message_end', (event, ctx) => {
-    const currentState = getState(ctx);
-    const message = event.message;
-    if (!currentState.lastRequestFast || message.role !== 'assistant' || message.stopReason !== 'error') return;
-    const until = noteFastError(currentState, message.errorMessage ?? '');
-    if (until === undefined) return;
-    currentState.lastRequestFast = false;
-    updateStatus(ctx, currentState);
-    if (ctx.hasUI) {
-      ctx.ui.notify(
-        `Fast mode rate limited; using standard speed until ${new Date(until).toLocaleTimeString()}.`,
-        'warning',
-      );
-    }
+  // Subagent and workflow children follow this session's /fast state live
+  // (and share its rate-limit cooldown).
+  const childFactory = (child: ExtensionAPI) => attachRequestHooks(child, () => state);
+  pi.on('session_start', () => {
+    childExtensions().set(EXTENSION_ID, childFactory);
+  });
+  pi.on('session_shutdown', () => {
+    if (childExtensions().get(EXTENSION_ID) === childFactory) childExtensions().delete(EXTENSION_ID);
   });
 
   pi.registerCommand('fast', {
