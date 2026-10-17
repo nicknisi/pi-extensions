@@ -9,7 +9,13 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ARTIFACT_RETENTION_MS, sweepRunArtifacts, writeSessionMirror, type RunArtifact } from './subagents.js';
+import {
+  ARTIFACT_RETENTION_MS,
+  createSharedSlots,
+  sweepRunArtifacts,
+  writeSessionMirror,
+  type RunArtifact,
+} from './subagents.js';
 import { addWorktree, captureHandoff, findRepoRoot, removeWorktree } from './worktree.js';
 
 const tmpdirs: string[] = [];
@@ -48,6 +54,25 @@ function gitRepo(): string {
   git('-c', 'user.email=test@test', '-c', 'user.name=test', 'commit', '-q', '--allow-empty', '-m', 'init');
   return repo;
 }
+
+describe('createSharedSlots', () => {
+  it('admits each waiter against its own ceiling', async () => {
+    const slots = createSharedSlots();
+    for (let i = 0; i < 8; i++) await slots.acquire(16);
+    let small = false;
+    let big = false;
+    void slots.acquire(8).then(() => (small = true));
+    void slots.acquire(16).then(() => (big = true));
+    await Promise.resolve();
+    expect(big).toBe(true); // 8 active < 16: admitted at once
+    expect(small).toBe(false); // 9 active ≥ 8: waits
+    slots.release();
+    slots.release();
+    await Promise.resolve();
+    expect(small).toBe(true); // dropped to 7 < 8: admitted
+    expect(slots.active()).toBe(8);
+  });
+});
 
 describe('sweepRunArtifacts', () => {
   it('deletes records older than the retention window, plus patch siblings', () => {

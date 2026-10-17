@@ -120,6 +120,75 @@ describe('engine: parallel + pipeline', () => {
     expect(r.value).toEqual([3, 5]);
   });
 
+  it('a failed agent inside parallel() becomes null and the wave carries on', async () => {
+    const spawn: EngineSpawnFn = async (opts) =>
+      opts.prompt === 'bad'
+        ? {
+            ok: false,
+            kind: 'crashed',
+            error: 'boom',
+            text: '',
+            usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+          }
+        : { ok: true, text: `echo: ${opts.prompt}`, usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } };
+    const r = await runScript({
+      script: 'return await parallel([() => agent("a"), () => agent("bad"), () => agent("c")]);',
+      spawn,
+      cwd: '/tmp',
+    });
+    expect(r.value).toEqual(['echo: a', null, 'echo: c']);
+    expect(r.logs.some((l) => l.includes('crashed: boom'))).toBe(true);
+  });
+
+  it('pipeline keeps a failed item null and skips its later stages', async () => {
+    const seen: string[] = [];
+    const spawn: EngineSpawnFn = async (opts) => {
+      seen.push(opts.prompt);
+      return opts.prompt === 'audit 2'
+        ? {
+            ok: false,
+            kind: 'empty',
+            error: 'no output',
+            text: '',
+            usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+          }
+        : { ok: true, text: opts.prompt, usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } };
+    };
+    const r = await runScript({
+      script: 'return await pipeline([1, 2], (n) => agent(`audit ${n}`), (t) => agent(`verify ${t}`));',
+      spawn,
+      cwd: '/tmp',
+    });
+    expect(r.value).toEqual(['verify audit 1', null]);
+    expect(seen).not.toContain('verify null');
+  });
+
+  it('non-agent errors inside parallel() still fail the run', async () => {
+    await expect(
+      runScript({
+        script: 'return await parallel([() => Promise.reject(new Error("script bug"))]);',
+        spawn: fakeSpawn(),
+        cwd: '/tmp',
+      }),
+    ).rejects.toThrow('script bug');
+  });
+
+  it('rejects oversized parallel()/pipeline() lists instead of dropping work', async () => {
+    await expect(
+      runScript({
+        script: 'return await pipeline(new Array(4097).fill(0), async (n) => n);',
+        spawn: fakeSpawn(),
+        cwd: '/tmp',
+      }),
+    ).rejects.toThrow('at most 4096');
+  });
+
+  it('caps agents per run', async () => {
+    await expect(
+      runScript({ script: 'for (let i = 0; i < 1001; i++) await agent("x");', spawn: fakeSpawn(), cwd: '/tmp' }),
+    ).rejects.toThrow('agent cap reached');
+  });
+
   it('pipeline with zero items returns an empty array (no stranded stage)', async () => {
     const r = await runScript({
       script: 'const out = await pipeline([], async (n) => n); return out;',
@@ -431,5 +500,16 @@ describe('saved-workflow discovery', () => {
   it('returns empty list when no dirs exist', async () => {
     const { listWorkflows } = await loadDiscovery();
     expect(listWorkflows(projectDir, true)).toEqual([]);
+  });
+});
+
+describe('workflowMaxConcurrent', () => {
+  it('defaults to 16, fewer on small machines, and honors PI_WORKFLOW_MAX_CONCURRENT (1–256)', async () => {
+    const { workflowMaxConcurrent } = await import('./index.js');
+    expect(workflowMaxConcurrent({}, 32)).toBe(16);
+    expect(workflowMaxConcurrent({}, 6)).toBe(6);
+    expect(workflowMaxConcurrent({ PI_WORKFLOW_MAX_CONCURRENT: '64' }, 6)).toBe(64);
+    expect(workflowMaxConcurrent({ PI_WORKFLOW_MAX_CONCURRENT: '9999' }, 6)).toBe(256);
+    expect(workflowMaxConcurrent({ PI_WORKFLOW_MAX_CONCURRENT: 'lots' }, 6)).toBe(6);
   });
 });

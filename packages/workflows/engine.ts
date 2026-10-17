@@ -165,6 +165,21 @@ const STRIP_META = /export\s+const\s+meta\s*=/;
 const DEFAULT_TOOLS = ['read', 'grep', 'find', 'ls'];
 const MAX_LOG_ENTRIES = 200;
 const MAX_LOG_CHARS = 2000;
+/** Runaway guard: agent() calls allowed in one run. */
+export const MAX_AGENTS_PER_RUN = 1000;
+/** parallel()/pipeline() reject longer lists instead of silently dropping work. */
+export const MAX_ITEMS_PER_CALL = 4096;
+
+/** An agent() call that settled with a failure (crash, empty, schema, abort). */
+export class AgentFailure extends Error {
+  constructor(
+    readonly kind: string,
+    detail: string,
+  ) {
+    super(`${kind}: ${detail}`);
+    this.name = 'AgentFailure';
+  }
+}
 
 function truncate(line: string, max: number): string {
   return line.length <= max ? line : `${line.slice(0, max)}…[truncated at ${max} chars]`;
@@ -229,7 +244,11 @@ export async function runScript(opts: RunScriptOptions): Promise<RunScriptResult
   // agent(prompt, opts) backed by the injected spawn. A failure kind becomes
   // a throw so a script's safeAgent wrapper converts it into a typed stage
   // failure (matching ~/Developer/ideation/workflows/engine-host.mjs).
+  let agentCount = 0;
   const agent = async (prompt: string, agentOpts: Record<string, unknown> = {}): Promise<unknown> => {
+    if (++agentCount > MAX_AGENTS_PER_RUN) {
+      throw new Error(`agent cap reached: a run may start at most ${MAX_AGENTS_PER_RUN} agents`);
+    }
     if (typeof agentOpts.agentType === 'string') {
       log(`(agentType '${agentOpts.agentType}' accepted but ignored — no agent-type registry)`);
     }
@@ -249,7 +268,7 @@ export async function runScript(opts: RunScriptOptions): Promise<RunScriptResult
     };
     const res = await spawn(spawnOpts);
     addUsage(usage, res.usage);
-    if (!res.ok) throw new Error(`${res.kind}: ${res.error}`);
+    if (!res.ok) throw new AgentFailure(res.kind, res.error);
     // A worktree run that changed files produces a `.patch`; surface it
     // alongside the value so the script can hand the path to a judge or
     // return it for the `/patches` apply flow. Opt-in: only when patchPath is
@@ -277,14 +296,35 @@ export async function runScript(opts: RunScriptOptions): Promise<RunScriptResult
     return opts.ask(question, options);
   };
 
-  const parallel = <T>(thunks: Array<() => Promise<T>>): Promise<T[]> => Promise.all(thunks.map((t) => t()));
+  // A failed agent inside parallel()/pipeline() becomes null so one failure
+  // doesn't collapse the wave; awaited directly, agent() still throws.
+  const parallel = <T>(thunks: Array<() => Promise<T>>): Promise<Array<T | null>> => {
+    if (thunks.length > MAX_ITEMS_PER_CALL) {
+      throw new Error(`parallel() takes at most ${MAX_ITEMS_PER_CALL} items (got ${thunks.length})`);
+    }
+    return Promise.all(
+      thunks.map((t) =>
+        t().catch((err: unknown) => {
+          if (!(err instanceof AgentFailure)) throw err;
+          log(`agent failed (null in results): ${err.message}`);
+          return null;
+        }),
+      ),
+    );
+  };
 
   // pipeline(items, ...stages): each stage maps over the previous stage's
-  // outputs in parallel, producing the next array. A fold over Promise.all.
+  // outputs in parallel, producing the next array. Items that became null
+  // (a failed agent) skip the remaining stages and stay null.
   const pipeline = async <T, U>(items: T[], ...stages: Array<(item: T, index: number) => Promise<U>>): Promise<U[]> => {
+    if (items.length > MAX_ITEMS_PER_CALL) {
+      throw new Error(`pipeline() takes at most ${MAX_ITEMS_PER_CALL} items (got ${items.length})`);
+    }
     let values: unknown[] = [...items];
-    for (const stage of stages) {
-      values = await parallel((values as T[]).map((v, i) => () => stage(v, i)));
+    for (const [stageIndex, stage] of stages.entries()) {
+      values = await parallel(
+        (values as T[]).map((v, i) => () => (stageIndex > 0 && v === null ? Promise.resolve(null) : stage(v, i))),
+      );
     }
     return values as U[];
   };

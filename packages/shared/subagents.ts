@@ -260,27 +260,38 @@ export const ARTIFACT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 // runtimes created inside ONE extension instance (e.g. codemode spawning a
 // workflow that spawns children) — and it caps each runtime's own acquire()
 // below it anyway, so 3 runtimes x 4 = 12 cannot stack within one extension.
-// Cross-extension stacking is bounded by the per-runtime limit.
+// Cross-extension stacking is bounded by the per-runtime limit. A runtime
+// that opts into a higher maxConcurrent (workflows) raises its own ceiling.
 const GLOBAL_MAX_CHILDREN = 8;
-let globalActive = 0;
-const globalWaiters: Array<() => void> = [];
 
-function acquireGlobal(): Promise<void> {
-  if (globalActive < GLOBAL_MAX_CHILDREN) {
-    globalActive++;
-    return Promise.resolve();
-  }
-  return new Promise<void>((resolve) => globalWaiters.push(resolve));
+/**
+ * Counting semaphore where each acquirer brings its own ceiling: a waiter is
+ * admitted once the shared active count drops below ITS limit.
+ */
+export function createSharedSlots(): { acquire(limit: number): Promise<void>; release(): void; active(): number } {
+  let active = 0;
+  const waiters: Array<{ limit: number; resolve: () => void }> = [];
+  return {
+    acquire(limit) {
+      if (active < limit) {
+        active++;
+        return Promise.resolve();
+      }
+      return new Promise<void>((resolve) => waiters.push({ limit, resolve }));
+    },
+    release() {
+      active--;
+      const i = waiters.findIndex((w) => active < w.limit);
+      if (i === -1) return;
+      const [next] = waiters.splice(i, 1);
+      active++;
+      next!.resolve();
+    },
+    active: () => active,
+  };
 }
 
-function releaseGlobal(): void {
-  globalActive--;
-  const next = globalWaiters.shift();
-  if (next) {
-    globalActive++;
-    next();
-  }
-}
+const globalSlots = createSharedSlots();
 
 function fail(runId: string, kind: SpawnFailureKind, error: string, startedAt: number): SpawnFailure {
   return {
@@ -644,6 +655,7 @@ export function createSubagentRuntime(options: {
 }): SubagentRuntime {
   const namespace = options.namespace;
   const maxConcurrent = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
+  const globalLimit = Math.max(GLOBAL_MAX_CHILDREN, maxConcurrent);
   const artifactsDir = options.artifactsDir;
   const toolNamespace = namespace.replace(/[^a-zA-Z0-9]/g, '_');
 
@@ -766,7 +778,7 @@ export function createSubagentRuntime(options: {
     }
 
     await acquire();
-    await acquireGlobal();
+    await globalSlots.acquire(globalLimit);
     record.status = 'running';
     record.hostPid = process.pid;
     persist(record);
@@ -774,7 +786,7 @@ export function createSubagentRuntime(options: {
       return await runChild(runId, opts, startedAt, record);
     } finally {
       release();
-      releaseGlobal();
+      globalSlots.release();
     }
   }
 
