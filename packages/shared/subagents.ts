@@ -140,6 +140,8 @@ export interface SpawnOptions {
   signal?: AbortSignal;
   /** Receives cumulative usage after each completed assistant response. */
   onUsage?: (usage: SpawnUsage) => void;
+  /** Called once, when the child's first model response starts arriving. */
+  onResponseStart?: () => void;
   /** Abort after this many agent turns (budget exceeded → kind 'aborted'). */
   maxTurns?: number;
   /** Abort after this many tool executions (budget exceeded → kind 'aborted'). */
@@ -971,6 +973,7 @@ export function createSubagentRuntime(options: {
 
     let turnCount = 0;
     let toolCallCount = 0;
+    let responseStarted = false;
     const transcript: TranscriptEntry[] = [];
     const liveUsage: SpawnUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
     const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
@@ -999,6 +1002,17 @@ export function createSubagentRuntime(options: {
           transcript.push({ kind: 'tool', label: toolName });
           if (opts.maxToolCalls !== undefined && toolCallCount > opts.maxToolCalls) {
             abortOnce(`Tool-call budget exceeded (${opts.maxToolCalls})`);
+          }
+          break;
+        }
+        case 'message_start': {
+          if (event.message.role === 'assistant' && !responseStarted) {
+            responseStarted = true;
+            try {
+              opts.onResponseStart?.();
+            } catch {
+              // Progress observers must never fail the child run.
+            }
           }
           break;
         }
