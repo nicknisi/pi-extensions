@@ -4,9 +4,10 @@ import {
   ANTHROPIC_FAST_SPEED,
   describeFastMode,
   getFastEligibility,
-  injectAnthropicFastHeader,
   injectFastPayload,
+  isCoolingDown,
   isFastEnabled,
+  noteFastError,
   OPENAI_FAST_SERVICE_TIER,
   type FastState,
 } from './fast.js';
@@ -15,6 +16,8 @@ const EXTENSION_ID = 'fast';
 
 type SessionState = FastState & {
   config: FastConfig;
+  /** Whether the most recent provider request was sent at Fast speed. */
+  lastRequestFast?: boolean;
 };
 
 function createState(ctx: ExtensionContext): SessionState {
@@ -35,17 +38,6 @@ function usingOAuth(ctx: ExtensionContext): boolean {
   return ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false;
 }
 
-async function isAnthropicOAuth(ctx: ExtensionContext): Promise<boolean> {
-  try {
-    const resolution = await ctx.modelRegistry.getProviderAuth('anthropic');
-    if (typeof resolution?.auth.apiKey === 'string') return resolution.auth.apiKey.includes('sk-ant-oat');
-  } catch {
-    // Fall back to the registry's synchronous credential snapshot.
-  }
-
-  return usingOAuth(ctx);
-}
-
 function updateStatus(ctx: ExtensionContext, state: SessionState): void {
   if (!ctx.hasUI) return;
   if (!state.config.showStatus) {
@@ -54,7 +46,8 @@ function updateStatus(ctx: ExtensionContext, state: SessionState): void {
   }
 
   const eligibility = getFastEligibility(ctx.model, usingOAuth(ctx));
-  ctx.ui.setStatus(EXTENSION_ID, isFastEnabled(state) && eligibility.eligible ? 'fast' : undefined);
+  if (!isFastEnabled(state) || !eligibility.eligible) ctx.ui.setStatus(EXTENSION_ID, undefined);
+  else ctx.ui.setStatus(EXTENSION_ID, isCoolingDown(state) ? 'fast (cooldown)' : 'fast');
 }
 
 function getStatusMessage(ctx: ExtensionContext, state: SessionState): string {
@@ -72,7 +65,10 @@ function getStatusMessage(ctx: ExtensionContext, state: SessionState): string {
       eligibility.provider === 'anthropic'
         ? `speed=${ANTHROPIC_FAST_SPEED}`
         : `service_tier=${OPENAI_FAST_SERVICE_TIER}`;
-    return `Fast mode is ${describeFastMode(state)} and active for ${eligibility.modelKey}; requests will use ${wireSetting}.${injected}`;
+    const cooldown = isCoolingDown(state)
+      ? ` Rate limited: standard speed until ${new Date(state.cooldownUntil!).toLocaleTimeString()}.`
+      : '';
+    return `Fast mode is ${describeFastMode(state)} and active for ${eligibility.modelKey}; requests will use ${wireSetting}.${cooldown}${injected}`;
   }
 
   if (enabled) {
@@ -99,29 +95,33 @@ export default function fastExtension(pi: ExtensionAPI) {
     updateStatus(ctx, getState(ctx));
   });
 
-  pi.on('before_provider_headers', async (event, ctx) => {
-    const currentState = getState(ctx);
-    if (!isFastEnabled(currentState)) return;
-
-    const eligibility = getFastEligibility(ctx.model, usingOAuth(ctx));
-    if (!eligibility.eligible || eligibility.provider !== 'anthropic' || !ctx.model) return;
-
-    injectAnthropicFastHeader(event.headers, {
-      modelHeaders: ctx.model.headers,
-      compat: ctx.model.compat,
-      usingOAuth: await isAnthropicOAuth(ctx),
-      hasActiveTools: pi.getActiveTools().length > 0,
-    });
-  });
-
   pi.on('before_provider_request', (event, ctx) => {
     const currentState = getState(ctx);
     if (!ctx.model) return;
 
     const eligibility = getFastEligibility(ctx.model, usingOAuth(ctx));
     const nextPayload = injectFastPayload(event.payload, ctx.model, eligibility, currentState);
+    currentState.lastRequestFast = nextPayload !== undefined;
     updateStatus(ctx, currentState);
     return nextPayload;
+  });
+
+  // Fast mode has its own rate limits. On a Fast-mode 429/529, use standard
+  // speed for a while; pi's automatic retry then resends at standard speed.
+  pi.on('message_end', (event, ctx) => {
+    const currentState = getState(ctx);
+    const message = event.message;
+    if (!currentState.lastRequestFast || message.role !== 'assistant' || message.stopReason !== 'error') return;
+    const until = noteFastError(currentState, message.errorMessage ?? '');
+    if (until === undefined) return;
+    currentState.lastRequestFast = false;
+    updateStatus(ctx, currentState);
+    if (ctx.hasUI) {
+      ctx.ui.notify(
+        `Fast mode rate limited; using standard speed until ${new Date(until).toLocaleTimeString()}.`,
+        'warning',
+      );
+    }
   });
 
   pi.registerCommand('fast', {
