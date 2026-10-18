@@ -28,9 +28,10 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { CONFIG_DIR_NAME, getAgentDir } from '@earendil-works/pi-coding-agent';
 import {
+  ARTIFACT_RETENTION_MS,
   createSubagentRuntime,
   subagentsDir,
   readRunArtifacts,
@@ -42,24 +43,23 @@ import {
   declareUnlessSearchable,
 } from '@nicknisi/pi-shared';
 import { Type } from 'typebox';
+import type { EngineSpawnFn, EngineSpawnOptions, EngineSpawnResult } from './engine.js';
 import {
-  createRunGate,
-  runScript,
-  type EngineAskFn,
-  type EngineSpawnFn,
-  type EngineSpawnOptions,
-  type EngineSpawnResult,
-  type RunGate,
-  type RunScriptResult,
-} from './engine.js';
+  formatRunLine,
+  formatRunResult,
+  formatRunStatus,
+  readStoredRun,
+  startRun,
+  sweepWorkflowRuns,
+  type WorkflowRun,
+  type WorkflowRuns,
+} from './runs.js';
 
 // Resolved at use: PI_SUBAGENTS_DIR (see @nicknisi/pi-shared) relocates every runtime write.
 const artifactsRoot = () => subagentsDir('runs') ?? path.join(getAgentDir(), 'subagent-runs');
+// Workflow run dirs (script, run.json, journal) for status and relaunch.
+const workflowRunsRoot = () => subagentsDir('workflow-runs') ?? path.join(getAgentDir(), 'workflow-runs');
 const NAMESPACE = 'workflows';
-const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
-const MAX_TIMEOUT_MS = 30 * 60 * 1000;
-const MAX_RESULT_CHARS = 16 * 1024;
-const MAX_LOG_CHARS = 2000;
 
 /**
  * Concurrent workflow agents: 16 by default, fewer on machines with fewer
@@ -86,94 +86,31 @@ export function workflowStallMs(env: NodeJS.ProcessEnv = process.env): number {
 // process must never share (or cross-abort) each other's runs.
 type Cancellables = Map<string, AbortController>;
 
-// ── Active workflow runs (this session), for pause/resume + footer status. ──
-// A run has no id of its own (runIds belong to child spawns), so pause/resume
-// are session-scoped: they apply to every in-flight run. In practice one.
-interface ActiveRun {
-  label: string;
-  gate: RunGate;
-  /** Refresh the footer status line to reflect pause/phase state. */
-  refresh: () => void;
-}
-type ActiveRuns = Set<ActiveRun>;
+// ── Footer status ──────────────────────────────────────────────────────────
 
-function pauseAll(activeRuns: ActiveRuns): number {
-  for (const run of activeRuns) {
-    run.gate.pause();
-    run.refresh();
-  }
-  return activeRuns.size;
-}
-
-function resumeAll(activeRuns: ActiveRuns): number {
-  for (const run of activeRuns) {
-    run.gate.resume();
-    run.refresh();
-  }
-  return activeRuns.size;
+function refreshFooter(
+  runs: WorkflowRuns,
+  setStatus: ((id: string, text: string | undefined) => void) | undefined,
+): void {
+  if (!setStatus) return;
+  const active = [...runs.values()].filter((r) => r.status === 'running');
+  if (active.length === 0) return setStatus('workflows', undefined);
+  if (active.length > 1) return setStatus('workflows', `wf ${active.length} runs`);
+  const run = active[0]!;
+  const done = run.agents.filter((a) => a.status === 'done' || a.status === 'cached').length;
+  const phase = run.phases.at(-1);
+  setStatus(
+    'workflows',
+    `wf ${run.label} [${run.gate.paused ? 'paused' : 'running'}]${phase ? ` ${phase}` : ''} · ${done}/${run.agents.length}`,
+  );
 }
 
-interface UiLike {
-  setStatus: (id: string, text: string | undefined) => void;
-  confirm: (title: string, message: string) => Promise<boolean>;
-  select: (title: string, options: string[]) => Promise<string | undefined>;
-}
-
-/**
- * Per-run scaffolding: gate (pause/resume/abort), footer status that tracks
- * phase() markers, and the checkpoint/ask host functions backed by pi's UI.
- * checkpoint is a confirm dialog — aborting it rejects so a dismissed gate
- * stops the run instead of silently continuing.
- */
-function makeRunControls(
-  label: string,
-  ui: UiLike,
-  activeRuns: ActiveRuns,
-): {
-  gate: RunGate;
-  onLog: (line: string) => void;
-  checkpoint: (checkpointLabel?: string) => Promise<void>;
-  ask: EngineAskFn;
-  dispose: () => void;
-} {
-  const gate = createRunGate();
-  let lastPhase = '';
-  const run: ActiveRun = {
-    label,
-    gate,
-    refresh: () => {
-      const state = gate.paused ? 'paused' : 'running';
-      ui.setStatus('workflows', `wf ${label} [${state}]${lastPhase ? ` ${lastPhase}` : ''}`);
-    },
-  };
-  const checkpoint = async (checkpointLabel?: string): Promise<void> => {
-    const ok = await ui.confirm(
-      'Workflow checkpoint',
-      checkpointLabel ? `${checkpointLabel} — continue?` : 'Continue?',
-    );
-    if (!ok) throw new Error(`checkpoint${checkpointLabel ? ` '${checkpointLabel}'` : ''} rejected`);
-  };
-  const ask: EngineAskFn = async (question, options) => {
-    if (options && options.length > 0) return ui.select(question, options);
-    return ui.confirm('Workflow', question);
-  };
-  activeRuns.add(run);
-  run.refresh();
-  return {
-    gate,
-    checkpoint,
-    ask,
-    onLog: (line) => {
-      if (line.startsWith('── ')) {
-        lastPhase = line.slice(3);
-        run.refresh();
-      }
-    },
-    dispose: () => {
-      activeRuns.delete(run);
-      ui.setStatus('workflows', undefined);
-    },
-  };
+/** Resolve a workflow run id (full or unique prefix) among this session's runs. */
+function findWorkflowRun(runs: WorkflowRuns, id: string): WorkflowRun | undefined {
+  if (runs.has(id)) return runs.get(id);
+  if (!id.startsWith('wf-') || id.length < 5) return undefined;
+  const matches = [...runs.values()].filter((r) => r.id.startsWith(id));
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 function spawnCancellable(
@@ -223,7 +160,10 @@ function makeSpawnFn(
     // default (read/bash/edit/write) would apply otherwise.
     if (opts.tools !== undefined) spawnOpts.tools = opts.tools;
     else spawnOpts.tools = ['read', 'grep', 'find', 'ls'];
-    const res = await spawnCancellable(cancellables, runtime, spawnOpts, externalSignal);
+    // Stop the child when either the whole run or this one agent is stopped.
+    const signal =
+      externalSignal && opts.signal ? AbortSignal.any([externalSignal, opts.signal]) : (opts.signal ?? externalSignal);
+    const res = await spawnCancellable(cancellables, runtime, spawnOpts, signal);
     // Surface the worktree `.patch` path (recorded on the run record after
     // settle) so workflow scripts can return it for the `/patches` apply flow.
     if (res.ok) {
@@ -309,16 +249,6 @@ function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max)}\n…[truncated at ${max} chars]`;
 }
 
-function formatValue(value: unknown): string {
-  if (typeof value === 'string') return truncate(value, MAX_RESULT_CHARS);
-  if (value === undefined) return '(undefined — did the script forget to return a value?)';
-  try {
-    return truncate(JSON.stringify(value, null, 2) ?? String(value), MAX_RESULT_CHARS);
-  } catch {
-    return truncate(String(value), MAX_RESULT_CHARS);
-  }
-}
-
 function formatRun(run: RunArtifact): string {
   const id = run.runId.slice(0, 8);
   const ns = run.namespace;
@@ -334,23 +264,56 @@ function formatRun(run: RunArtifact): string {
   return line;
 }
 
-function formatRunResult(result: RunScriptResult, label: string): string {
-  const header = `✓ ${label}${result.meta?.name ? ` — ${result.meta.name}` : ''} (${Math.round(result.durationMs / 1000)}s)`;
-  const desc = result.meta?.description ? `\n${result.meta.description}` : '';
-  const budget = result.usage.totalTokens > 0 ? `\nbudget: spent ${result.usage.totalTokens} tok` : '';
-  const body = `\n${formatValue(result.value)}`;
-  const logsBlock =
-    result.logs.length > 0
-      ? `\n\nlogs (${result.logs.length}):\n${result.logs.map((l) => `  ${truncate(l, MAX_LOG_CHARS)}`).join('\n')}`
-      : '';
-  return `${header}${desc}${budget}${body}${logsBlock}`;
+// ── Extension ─────────────────────────────────────────────────────────────
+
+type TextResult = { content: Array<{ type: 'text'; text: string }>; details: Record<string, unknown> };
+const text = (t: string, details: Record<string, unknown> = {}): TextResult => ({
+  content: [{ type: 'text' as const, text: t }],
+  details,
+});
+
+interface RunRequest {
+  script?: string | undefined;
+  name?: string | undefined;
+  args?: unknown;
+  relaunch?: string | undefined;
 }
 
-// ── Extension ─────────────────────────────────────────────────────────────
+/** Resolve what to run: a saved workflow, an inline script, or a relaunch. */
+function resolveRunRequest(
+  req: RunRequest,
+  cwd: string,
+  trusted: boolean,
+  runs: WorkflowRuns,
+): { script: string; args: unknown; label: string; relaunch?: string } | { error: string } {
+  if (req.relaunch) {
+    const id = findWorkflowRun(runs, req.relaunch)?.id ?? req.relaunch;
+    if (runs.get(id)?.status === 'running') return { error: `Workflow ${id} is still running; stop it first.` };
+    const stored = readStoredRun(workflowRunsRoot(), id);
+    if (!stored) return { error: `No workflow run '${req.relaunch}' to relaunch.` };
+    return {
+      script: req.script ?? stored.script,
+      args: req.args !== undefined ? req.args : stored.args,
+      label: stored.label,
+      relaunch: id,
+    };
+  }
+  if (req.name) {
+    const file = findWorkflowFile(req.name, cwd, trusted);
+    if (!file) return { error: `No workflow '${req.name}' in ~/.pi/agent/workflows or ${CONFIG_DIR_NAME}/workflows.` };
+    try {
+      return { script: fs.readFileSync(file, 'utf8'), args: req.args, label: req.name };
+    } catch (err) {
+      return { error: `Failed to read workflow: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+  if (req.script) return { script: req.script, args: req.args, label: 'inline' };
+  return { error: 'run requires `script` (inline JS), `name` (saved workflow), or `relaunch` (a workflow run id).' };
+}
 
 export default function workflows(pi: ExtensionAPI): void {
   const cancellables: Cancellables = new Map();
-  const activeRuns: ActiveRuns = new Set();
+  const runs: WorkflowRuns = new Map();
   // Children share the parent session's model registry and default model.
   let parentCtx: ExtensionContext | undefined;
   const runtime = createSubagentRuntime({
@@ -360,11 +323,113 @@ export default function workflows(pi: ExtensionAPI): void {
     parent: () => parentCtx,
   });
   sweepRunArtifactsOnce(artifactsRoot());
+  let swept = false;
   pi.on('session_start', (_event, ctx) => {
     parentCtx = ctx;
+    if (!swept) {
+      swept = true;
+      sweepWorkflowRuns(workflowRunsRoot(), ARTIFACT_RETENTION_MS);
+    }
+  });
+  pi.on('session_start', () => declareUnlessSearchable(pi, ['workflow']));
+  // Background runs belong to the session: stop them when it ends.
+  pi.on('session_shutdown', () => {
+    for (const run of runs.values()) if (run.status === 'running') run.controller.abort();
   });
 
-  pi.on('session_start', () => declareUnlessSearchable(pi, ['workflow']));
+  const footer = () => refreshFooter(runs, parentCtx?.hasUI ? (id, t) => parentCtx?.ui.setStatus(id, t) : undefined);
+
+  /** Start a run; `onSettled` fires once with the finished run. */
+  function launch(
+    ctx: ExtensionContext,
+    req: { script: string; args: unknown; label: string; relaunch?: string | undefined },
+    opts: { timeoutMs?: number | undefined; signal?: AbortSignal | undefined; onSettled?: (run: WorkflowRun) => void },
+  ): WorkflowRun {
+    const ownerSession = ctx.sessionManager.getSessionFile();
+    const run = startRun(runs, {
+      root: workflowRunsRoot(),
+      script: req.script,
+      args: req.args,
+      label: req.label,
+      cwd: ctx.cwd,
+      relaunch: req.relaunch,
+      stallMs: workflowStallMs(),
+      timeoutMs: opts.timeoutMs,
+      signal: opts.signal,
+      spawn: (runSignal) => makeSpawnFn(cancellables, runtime, ctx.cwd, ownerSession, runSignal),
+      ...(ctx.hasUI ? { ui: ctx.ui } : {}),
+      onChange: footer,
+    });
+    footer();
+    void run.done.then(() => {
+      footer();
+      try {
+        opts.onSettled?.(run);
+      } catch (err) {
+        // sendMessage throws once the session is ending; a lost notice beats a crash.
+        console.error(`[workflows] ${run.id} completion notice failed:`, err);
+      }
+    });
+    return run;
+  }
+
+  /** Deliver a background run's result into the conversation. */
+  function deliver(run: WorkflowRun, triggerTurn: boolean): void {
+    pi.sendMessage(
+      {
+        customType: 'workflows:result',
+        content: `Workflow ${formatRunResult(run)}`,
+        display: true,
+        details: { id: run.id, status: run.status },
+      },
+      triggerTurn ? { triggerTurn: true, deliverAs: 'followUp' } : {},
+    );
+  }
+
+  function pauseOrResume(action: 'pause' | 'resume', id: string | undefined): string {
+    const targets = id
+      ? [findWorkflowRun(runs, id)].filter((r): r is WorkflowRun => r !== undefined)
+      : [...runs.values()].filter((r) => r.status === 'running');
+    if (id && targets.length === 0) return `No workflow run '${id}' in this session.`;
+    if (targets.length === 0) return 'No active workflow run in this session.';
+    for (const run of targets) {
+      if (action === 'pause') run.gate.pause();
+      else run.gate.resume();
+    }
+    footer();
+    return `${action === 'pause' ? 'Paused' : 'Resumed'} ${targets.map((r) => r.id).join(', ')}.`;
+  }
+
+  function status(id: string | undefined): string {
+    if (!id) {
+      const all = [...runs.values()];
+      return all.length === 0
+        ? 'No workflow runs in this session.'
+        : `Workflow runs (${all.length}):\n${all.map((r) => `  ${formatRunLine(r)}`).join('\n')}`;
+    }
+    const run = findWorkflowRun(runs, id);
+    if (run) return run.status === 'running' ? formatRunStatus(run) : `${formatRunStatus(run)}\n\n${run.summary ?? ''}`;
+    const record = findRun(runtime, id);
+    return record ? formatRun(record) : `No run '${id.slice(0, 11)}' (workflow id, agent run id, or prefix).`;
+  }
+
+  function stop(id: string): string {
+    const run = findWorkflowRun(runs, id);
+    if (run) {
+      if (run.status !== 'running') return `Workflow ${run.id} already ${run.status}.`;
+      run.controller.abort();
+      return `Stopping workflow ${run.id}. Relaunch it later with relaunch=${run.id}.`;
+    }
+    const controller = resolveCancellable(cancellables, runtime, id);
+    if (controller) {
+      controller.abort();
+      return `Cancelled agent run ${id.slice(0, 8)}.`;
+    }
+    const record = findRun(runtime, id);
+    return record && (record.status === 'running' || record.status === 'queued')
+      ? `Run ${id.slice(0, 8)} isn't cancellable from here (it belongs to a different host process).`
+      : `No running workflow or agent '${id.slice(0, 11)}'.`;
+  }
 
   pi.registerTool({
     name: 'workflow',
@@ -373,20 +438,27 @@ export default function workflows(pi: ExtensionAPI): void {
     // Scripts run host-process JS and child agents may edit files or reach the network.
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     description: [
-      'Run a JavaScript workflow script that orchestrates subagents, or manage runs. Actions: run,',
-      'list (saved workflow files), status (run record by runId), stop, pause, resume (hold active',
-      'runs before their next agent step). For run, pass EITHER script (inline JS) OR name (a saved',
-      'file stem from ~/.pi/agent/workflows/*.js or .pi/workflows/*.js), plus optional args (any JSON,',
+      'Run a JavaScript workflow script that orchestrates many subagents, or manage runs.',
+      'Runs start in the background and return a workflow id (wf-xxxxxxxx) at once; the result',
+      'arrives later as a message, so end your turn after starting one unless there is other work.',
+      'Pass background: false only when you need the value inside this tool call (e.g. from codemode).',
+      'Actions: run, list (saved workflow files), status (runId = workflow id or agent run id; omit',
+      'for all runs), stop (runId), pause/resume (runId optional; hold runs before their next agent).',
+      'For run, pass ONE of script (inline JS), name (a saved file stem from ~/.pi/agent/workflows/*.js',
+      'or .pi/workflows/*.js), or relaunch (a stopped/failed workflow id: completed agents replay',
+      'from its journal; pass script too to relaunch an edited version), plus optional args (any JSON,',
       'exposed as the `args` global). Prefer a saved workflow when one fits.',
       'Script contract: the body is wrapped in an async function, so return the result with a',
       'top-level `return`. Keep it small (summaries, counts, findings; never raw file contents). The',
       'FIRST statement should be `export const meta = { name, description }`. Injected globals:',
-      'agent(prompt, opts), parallel(thunks), pipeline(items, ...stages), phase(name) (logging marker',
-      'only), log(...args), args, budget ({ total, spent, remaining }), cwd, checkpoint(label?),',
-      'ask(question, options?).',
+      'agent(prompt, opts), parallel(thunks), pipeline(items, ...stages), phase(name) (groups the agents',
+      'that follow in status output), log(...args), args, budget ({ total, spent, remaining }), cwd,',
+      'checkpoint(label?), ask(question, options?). Keep scripts deterministic (no Date.now()/Math.random()',
+      'in prompts) so relaunch can replay them.',
       'agent() opts: model, tools (default read-only [read, grep, find, ls]; pass tools explicitly for',
-      'builders), label, systemPrompt, schema (validated; agent() returns parsed data, otherwise text),',
-      'effort (thinking level), timeoutMs, stallMs (restart after this long without output; default 5 min), maxTurns, worktree (when a patch is produced, agent() returns',
+      'builders), label, systemPrompt, schema (the agent is told it; agent() returns parsed data,',
+      'otherwise text), effort (thinking level), timeoutMs, stallMs (restart after this long without',
+      'output; default 5 min), maxTurns, worktree (when a patch is produced, agent() returns',
       '{ value, patchPath, runId }). A failed agent() becomes null inside parallel()/pipeline() (logged;',
       'later pipeline stages skip it); awaited directly it throws `${kind}: ${error}`.',
       'parallel(thunks) takes zero-arg thunks: pass () => agent(...), not agent(...). Up to',
@@ -394,8 +466,7 @@ export default function workflows(pi: ExtensionAPI): void {
       'checkpoint(label?) gates the run on a human confirm (dismiss or reject throws and stops the',
       'run). ask(question, options?) asks the human mid-run: select when options are given, yes/no',
       'otherwise, undefined when dismissed. Use them before destructive or expensive steps.',
-      'Every agent() spawn is a child in the subagent fleet (fleet tool, or status/stop here). The',
-      'script runs in the host process with full Node access, the same trust boundary as bash.',
+      'The script runs in the host process with full Node access, the same trust boundary as bash.',
     ].join(' '),
     promptSnippet: 'Run a JS workflow script orchestrating subagents',
     parameters: Type.Object({
@@ -412,11 +483,21 @@ export default function workflows(pi: ExtensionAPI): void {
       ),
       script: Type.Optional(Type.String({ description: 'Inline JS workflow script (action: run).' })),
       name: Type.Optional(Type.String({ description: 'Saved workflow file stem (action: run).' })),
+      relaunch: Type.Optional(
+        Type.String({ description: 'Workflow id to relaunch; completed agents replay (action: run).' }),
+      ),
       args: Type.Optional(
         Type.Any({ description: "Any JSON value passed as the script's `args` global (action: run)." }),
       ),
-      runId: Type.Optional(Type.String({ description: 'Run id (action: status | stop).' })),
-      timeoutMs: Type.Optional(Type.Number({ description: 'Wall-clock cap for run. Default 10 min, max 30 min.' })),
+      background: Type.Optional(
+        Type.Boolean({
+          description: 'Default true (false without a UI). false waits for the result inside this call (action: run).',
+        }),
+      ),
+      runId: Type.Optional(
+        Type.String({ description: 'Workflow id (wf-…) or agent run id (action: status | stop | pause | resume).' }),
+      ),
+      timeoutMs: Type.Optional(Type.Number({ description: 'Optional wall-clock cap for the run. Default none.' })),
     }),
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
@@ -424,351 +505,109 @@ export default function workflows(pi: ExtensionAPI): void {
 
       if (action === 'list') {
         const items = listWorkflows(ctx.cwd, ctx.isProjectTrusted());
-        if (items.length === 0) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: 'No saved workflows. Drop .js files in ~/.pi/agent/workflows/ or .pi/workflows/.',
-              },
-            ],
-            details: {},
-          };
-        }
-        const lines = items.map((w) => {
-          const tail = w.description ? ` — ${w.description}` : '';
-          return `  ${w.name} [${w.scope}]${tail}`;
-        });
-        return {
-          content: [{ type: 'text' as const, text: `Saved workflows (${items.length}):\n${lines.join('\n')}` }],
-          details: { count: items.length },
-        };
+        if (items.length === 0)
+          return text('No saved workflows. Drop .js files in ~/.pi/agent/workflows/ or .pi/workflows/.');
+        const lines = items.map((w) => `  ${w.name} [${w.scope}]${w.description ? ` — ${w.description}` : ''}`);
+        return text(`Saved workflows (${items.length}):\n${lines.join('\n')}`, { count: items.length });
       }
-
-      if (action === 'status') {
-        const runId = params.runId;
-        if (!runId) {
-          return { content: [{ type: 'text' as const, text: 'status requires runId.' }], details: {} };
-        }
-        const record = findRun(runtime, runId);
-        if (!record) {
-          return {
-            content: [{ type: 'text' as const, text: `No run '${runId.slice(0, 8)}' (full or prefix).` }],
-            details: {},
-          };
-        }
-        return {
-          content: [{ type: 'text' as const, text: formatRun(record) }],
-          details: { runId: record.runId, status: record.status },
-        };
-      }
-
-      if (action === 'pause' || action === 'resume') {
-        const n = action === 'pause' ? pauseAll(activeRuns) : resumeAll(activeRuns);
-        const text =
-          n === 0
-            ? 'No active workflow run in this session.'
-            : `${action === 'pause' ? 'Paused' : 'Resumed'} ${n} active run${n === 1 ? '' : 's'}.`;
-        return { content: [{ type: 'text' as const, text }], details: { affected: n } };
-      }
-
-      if (action === 'stop') {
-        const runId = params.runId;
-        if (!runId) {
-          return { content: [{ type: 'text' as const, text: 'stop requires runId.' }], details: {} };
-        }
-        const controller = resolveCancellable(cancellables, runtime, runId);
-        if (!controller) {
-          const record = findRun(runtime, runId);
-          const msg =
-            record && (record.status === 'running' || record.status === 'queued')
-              ? `Run ${runId.slice(0, 8)} isn't cancellable from here (it belongs to a different host process).`
-              : `Run ${runId.slice(0, 8)} already finished.`;
-          return { content: [{ type: 'text' as const, text: msg }], details: {} };
-        }
-        controller.abort();
-        return {
-          content: [{ type: 'text' as const, text: `Cancelled run ${runId.slice(0, 8)}.` }],
-          details: { runId },
-        };
-      }
+      if (action === 'status') return text(status(params.runId));
+      if (action === 'pause' || action === 'resume') return text(pauseOrResume(action, params.runId));
+      if (action === 'stop') return text(params.runId ? stop(params.runId) : 'stop requires runId.');
 
       // action === 'run'
-      const timeoutMs = Math.min(Math.max(params.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1000), MAX_TIMEOUT_MS);
-      let src: string;
-      let label: string;
-      if (params.name) {
-        const file = findWorkflowFile(params.name, ctx.cwd, ctx.isProjectTrusted());
-        if (!file) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `No workflow '${params.name}' in ~/.pi/agent/workflows or ${CONFIG_DIR_NAME}/workflows.`,
-              },
-            ],
-            details: {},
-          };
-        }
-        try {
-          src = fs.readFileSync(file, 'utf8');
-        } catch (err) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Failed to read workflow: ${err instanceof Error ? err.message : String(err)}`,
-              },
-            ],
-            details: {},
-          };
-        }
-        label = params.name;
-      } else if (params.script) {
-        src = params.script;
-        label = 'inline';
-      } else {
-        return {
-          content: [
-            { type: 'text' as const, text: 'run requires either `script` (inline JS) or `name` (saved workflow).' },
-          ],
-          details: {},
-        };
-      }
-
-      // One controller for BOTH abort sources: the tool's signal AND the
-      // timeout. spawnCancellable wires it into every child spawn, so firing
-      // it actually cancels in-flight work (previously the timeout controller
-      // was connected to nothing — dead code).
-      const controller = new AbortController();
-      let timedOut = false;
-      const onToolAbort = () => controller.abort();
-      if (signal) {
-        if (signal.aborted) controller.abort();
-        else signal.addEventListener('abort', onToolAbort, { once: true });
-      }
-      const timer = setTimeout(() => {
-        timedOut = true;
-        controller.abort();
-      }, timeoutMs);
-      const spawnFn = makeSpawnFn(
-        cancellables,
-        runtime,
-        ctx.cwd,
-        ctx.sessionManager.getSessionFile(),
-        controller.signal,
-      );
-      const controls = makeRunControls(label, ctx.ui, activeRuns);
-      // A parked run (gate.wait / checkpoint) must not leak when the tool is
-      // aborted or times out — aborting the gate rejects its waiters.
-      controller.signal.addEventListener('abort', () => controls.gate.abort(), { once: true });
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        controller.signal.addEventListener(
-          'abort',
-          () =>
-            reject(
-              new Error(
-                timedOut
-                  ? `Timed out after ${timeoutMs}ms (in-flight subagents were aborted)`
-                  : 'Aborted by the host session',
-              ),
-            ),
-          { once: true },
-        );
+      const req = resolveRunRequest(params, ctx.cwd, ctx.isProjectTrusted(), runs);
+      if ('error' in req) return text(req.error);
+      // Print mode exits when the turn ends, which would kill a background run.
+      const background = params.background ?? ctx.hasUI;
+      // Background runs deliberately ignore the tool signal: pi may abort it
+      // after execute returns, which would kill the run.
+      const run = launch(ctx, req, {
+        timeoutMs: params.timeoutMs,
+        ...(background ? { onSettled: (r: WorkflowRun) => deliver(r, true) } : { signal: signal ?? undefined }),
       });
-      try {
-        const result = await Promise.race([
-          runScript({
-            script: src,
-            args: params.args,
-            spawn: spawnFn,
-            cwd: ctx.cwd,
-            stallMs: workflowStallMs(),
-            onLog: controls.onLog,
-            gate: controls.gate,
-            checkpoint: controls.checkpoint,
-            ask: controls.ask,
-          }),
-          timeoutPromise,
-        ]);
-        const text = formatRunResult(result, label);
-        return {
-          content: [{ type: 'text' as const, text }],
-          details: {
-            label,
-            meta: result.meta,
-            logs: result.logs,
-            usage: result.usage,
-            durationMs: result.durationMs,
-          },
-        };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return {
-          content: [{ type: 'text' as const, text: `${label} failed:\n\n${msg}` }],
-          details: { label, error: msg },
-        };
-      } finally {
-        clearTimeout(timer);
-        signal?.removeEventListener('abort', onToolAbort);
-        controls.dispose();
+      if (background) {
+        const replay = req.relaunch ? ' Completed agents from the earlier run replay from its journal.' : '';
+        return text(
+          `Started workflow ${run.id} (${run.label}) in the background.${replay} Its result arrives as a message when it finishes. Check it with workflow status runId=${run.id}; stop it with workflow stop runId=${run.id}.`,
+          { id: run.id, label: run.label, background: true },
+        );
       }
+      await run.done;
+      return text(`Workflow ${formatRunResult(run)}`, { id: run.id, label: run.label, status: run.status });
     },
   });
 
   // ── /wf — thin human-facing wrapper ───────────────────────────────────
   pi.registerCommand('wf', {
     description:
-      'Workflows: /wf list | /wf run <name> [argsJson] | /wf status <runId> | /wf stop <runId> | /wf pause | /wf resume. Saved workflows live in ~/.pi/agent/workflows/*.js (global) and .pi/workflows/*.js (project, trusted only).',
+      'Workflows: /wf list | /wf run <name> [argsJson] | /wf relaunch <id> | /wf status [id] | /wf stop <id> | /wf pause [id] | /wf resume [id]. Saved workflows live in ~/.pi/agent/workflows/*.js (global) and .pi/workflows/*.js (project, trusted only).',
     getArgumentCompletions: (argumentPrefix) => {
       if (argumentPrefix.includes(' ')) return null;
       const prefix = argumentPrefix.trim();
-      const subs = ['list', 'run', 'status', 'stop', 'pause', 'resume'].filter((s) => s.startsWith(prefix));
+      const subs = ['list', 'run', 'relaunch', 'status', 'stop', 'pause', 'resume'].filter((s) => s.startsWith(prefix));
       if (subs.length === 0) return null;
       return subs.map((s) => ({ value: s + ' ', label: s }));
     },
     handler: async (args, ctx) => {
-      await cmdWf(args, ctx, runtime, cancellables, activeRuns);
+      const parts = args.trim().split(/\s+/).filter(Boolean);
+      const sub = parts[0];
+      const usage =
+        'Usage: /wf list | /wf run <name> [argsJson] | /wf relaunch <id> | /wf status [id] | /wf stop <id> | /wf pause [id] | /wf resume [id]';
+      if (!sub || sub === 'list') {
+        const items = listWorkflows(ctx.cwd, ctx.isProjectTrusted());
+        if (items.length === 0) {
+          ctx.ui.notify('No saved workflows. Drop .js files in ~/.pi/agent/workflows/ or .pi/workflows/.', 'info');
+          return;
+        }
+        const lines = items.map((w) => `  ${w.name} [${w.scope}]${w.description ? ` — ${w.description}` : ''}`);
+        ctx.ui.notify(`Saved workflows (${items.length}):\n${lines.join('\n')}`, 'info');
+        return;
+      }
+      if (sub === 'run' || sub === 'relaunch') {
+        const target = parts[1];
+        if (!target) {
+          ctx.ui.notify(usage, 'warning');
+          return;
+        }
+        const argsJson = parts.slice(2).join(' ');
+        let parsedArgs: unknown = undefined;
+        if (argsJson) {
+          try {
+            parsedArgs = JSON.parse(argsJson);
+          } catch {
+            // Fall back to the raw string — many scripts treat args as a string.
+            parsedArgs = argsJson;
+          }
+        }
+        const req = resolveRunRequest(
+          sub === 'run' ? { name: target, args: parsedArgs } : { relaunch: target, args: parsedArgs },
+          ctx.cwd,
+          ctx.isProjectTrusted(),
+          runs,
+        );
+        if ('error' in req) {
+          ctx.ui.notify(req.error, 'error');
+          return;
+        }
+        const run = launch(ctx, req, { onSettled: (r) => deliver(r, false) });
+        ctx.ui.notify(`Started workflow ${run.id} (${run.label}). Check it with /wf status ${run.id}.`, 'info');
+        return;
+      }
+      if (sub === 'pause' || sub === 'resume') {
+        ctx.ui.notify(pauseOrResume(sub, parts[1]), 'info');
+        return;
+      }
+      if (sub === 'status') {
+        ctx.ui.notify(status(parts[1]), 'info');
+        return;
+      }
+      if (sub === 'stop') {
+        ctx.ui.notify(parts[1] ? stop(parts[1]) : usage, parts[1] ? 'info' : 'warning');
+        return;
+      }
+      ctx.ui.notify(usage, 'warning');
     },
   });
-}
-
-// ── /wf handler (shared, typed against the runtime) ───────────────────────
-
-async function cmdWf(
-  args: string,
-  ctx: ExtensionCommandContext,
-  runtime: SubagentRuntime,
-  cancellables: Cancellables,
-  activeRuns: ActiveRuns,
-): Promise<void> {
-  const parts = args.trim().split(/\s+/).filter(Boolean);
-  const sub = parts[0];
-
-  if (!sub || sub === 'list') {
-    const items = listWorkflows(ctx.cwd, ctx.isProjectTrusted());
-    if (items.length === 0) {
-      ctx.ui.notify('No saved workflows. Drop .js files in ~/.pi/agent/workflows/ or .pi/workflows/.', 'info');
-      return;
-    }
-    const lines = items.map((w) => `  ${w.name} [${w.scope}]${w.description ? ` — ${w.description}` : ''}`);
-    ctx.ui.notify(`Saved workflows (${items.length}):\n${lines.join('\n')}`, 'info');
-    return;
-  }
-
-  if (sub === 'run') {
-    const name = parts[1];
-    if (!name) {
-      ctx.ui.notify('Usage: /wf run <name> [argsJson]', 'warning');
-      return;
-    }
-    const file = findWorkflowFile(name, ctx.cwd, ctx.isProjectTrusted());
-    if (!file) {
-      ctx.ui.notify(`No workflow '${name}' in ~/.pi/agent/workflows or ${CONFIG_DIR_NAME}/workflows`, 'error');
-      return;
-    }
-    let src: string;
-    try {
-      src = fs.readFileSync(file, 'utf8');
-    } catch (err) {
-      ctx.ui.notify(`Failed to read workflow: ${err instanceof Error ? err.message : String(err)}`, 'error');
-      return;
-    }
-    const argsJson = parts.slice(2).join(' ');
-    let parsedArgs: unknown = undefined;
-    if (argsJson) {
-      try {
-        parsedArgs = JSON.parse(argsJson);
-      } catch {
-        // Fall back to the raw string — many scripts treat args as a string.
-        parsedArgs = argsJson;
-      }
-    }
-    const controls = makeRunControls(name, ctx.ui, activeRuns);
-    if (ctx.signal) {
-      if (ctx.signal.aborted) controls.gate.abort();
-      else ctx.signal.addEventListener('abort', () => controls.gate.abort(), { once: true });
-    }
-    try {
-      const spawnFn = makeSpawnFn(
-        cancellables,
-        runtime,
-        ctx.cwd,
-        ctx.sessionManager.getSessionFile(),
-        ctx.signal ?? undefined,
-      );
-      const result = await runScript({
-        script: src,
-        args: parsedArgs,
-        spawn: spawnFn,
-        cwd: ctx.cwd,
-        stallMs: workflowStallMs(),
-        onLog: controls.onLog,
-        gate: controls.gate,
-        checkpoint: controls.checkpoint,
-        ask: controls.ask,
-      });
-      ctx.ui.notify(formatRunResult(result, name), 'info');
-    } catch (err) {
-      ctx.ui.notify(`${name} failed: ${err instanceof Error ? err.message : String(err)}`, 'error');
-    } finally {
-      controls.dispose();
-    }
-    return;
-  }
-
-  if (sub === 'pause' || sub === 'resume') {
-    const n = sub === 'pause' ? pauseAll(activeRuns) : resumeAll(activeRuns);
-    ctx.ui.notify(
-      n === 0
-        ? 'No active workflow run in this session.'
-        : `${sub === 'pause' ? 'Paused' : 'Resumed'} ${n} run${n === 1 ? '' : 's'}.`,
-      n === 0 ? 'warning' : 'info',
-    );
-    return;
-  }
-
-  if (sub === 'status') {
-    const runId = parts[1];
-    if (!runId) {
-      ctx.ui.notify('Usage: /wf status <runId>', 'warning');
-      return;
-    }
-    const record = findRun(runtime, runId);
-    if (!record) {
-      ctx.ui.notify(`No run '${runId.slice(0, 8)}' (full or prefix).`, 'warning');
-      return;
-    }
-    ctx.ui.notify(formatRun(record), 'info');
-    return;
-  }
-
-  if (sub === 'stop') {
-    const runId = parts[1];
-    if (!runId) {
-      ctx.ui.notify('Usage: /wf stop <runId>', 'warning');
-      return;
-    }
-    const controller = resolveCancellable(cancellables, runtime, runId);
-    if (!controller) {
-      const record = findRun(runtime, runId);
-      ctx.ui.notify(
-        record && (record.status === 'running' || record.status === 'queued')
-          ? `Run ${runId.slice(0, 8)} isn't cancellable from here (different host process).`
-          : `Run ${runId.slice(0, 8)} already finished.`,
-        'warning',
-      );
-      return;
-    }
-    controller.abort();
-    ctx.ui.notify(`Cancelled run ${runId.slice(0, 8)}`, 'info');
-    return;
-  }
-
-  ctx.ui.notify(
-    'Usage: /wf list | /wf run <name> [argsJson] | /wf status <runId> | /wf stop <runId> | /wf pause | /wf resume',
-    'warning',
-  );
 }
 
 // ── Run lookup / cancellation resolution ──────────────────────────────────

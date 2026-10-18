@@ -316,7 +316,7 @@ describe('engine: agent opts + failures', () => {
     const r = await runScript({ script: 'return await agent("x");', spawn: flaky, cwd: '/tmp', stallMs: 1234 });
     expect(r.value).toBe('done');
     expect(r.usage.totalTokens).toBe(3);
-    expect(r.logs.filter((l) => l.includes('stalled; restarting'))).toHaveLength(2);
+    expect(r.logs.filter((l) => l.includes('stalled; starting again'))).toHaveLength(2);
 
     let attempts = 0;
     const r2 = await runScript({
