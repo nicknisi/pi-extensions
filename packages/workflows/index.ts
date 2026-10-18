@@ -54,6 +54,7 @@ import {
   type WorkflowRun,
   type WorkflowRuns,
 } from './runs.js';
+import { WorkflowsView, type ViewResult } from './view.js';
 
 // Resolved at use: PI_SUBAGENTS_DIR (see @nicknisi/pi-shared) relocates every runtime write.
 const artifactsRoot = () => subagentsDir('runs') ?? path.join(getAgentDir(), 'subagent-runs');
@@ -95,7 +96,7 @@ function refreshFooter(
   if (!setStatus) return;
   const active = [...runs.values()].filter((r) => r.status === 'running');
   if (active.length === 0) return setStatus('workflows', undefined);
-  if (active.length > 1) return setStatus('workflows', `wf ${active.length} runs`);
+  if (active.length > 1) return setStatus('workflows', `wf ${active.length} runs · /workflows`);
   const run = active[0]!;
   const done = run.agents.filter((a) => a.status === 'done' || a.status === 'cached').length;
   const phase = run.phases.at(-1);
@@ -243,6 +244,15 @@ export function listWorkflows(cwd: string, trusted: boolean): SavedWorkflow[] {
   return out;
 }
 
+/** Write a run's script as a saved workflow. Returns the file path. */
+export function saveWorkflowScript(script: string, name: string, dir: string): string {
+  if (!isValidName(name)) throw new Error(`Invalid workflow name '${name}': use letters, digits, '-' or '_'.`);
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${name}.js`);
+  fs.writeFileSync(file, script.endsWith('\n') ? script : `${script}\n`);
+  return file;
+}
+
 // ── Formatting helpers ────────────────────────────────────────────────────
 
 function truncate(text: string, max: number): string {
@@ -332,6 +342,90 @@ export default function workflows(pi: ExtensionAPI): void {
     }
   });
   pi.on('session_start', () => declareUnlessSearchable(pi, ['workflow']));
+  // Saved workflows run as /<name>, like Claude Code's saved workflow commands.
+  const savedCommands = new Set<string>();
+  function registerSavedCommand(name: string, description: string | undefined): void {
+    if (savedCommands.has(name)) return;
+    if (pi.getCommands().some((c) => c.name === name)) return; // never shadow another command
+    savedCommands.add(name);
+    pi.registerCommand(name, {
+      description: `Workflow: ${description ?? name} (saved workflow; arguments become \`args\`)`,
+      handler: async (rawArgs, ctx) => {
+        let args: unknown = undefined;
+        if (rawArgs.trim()) {
+          try {
+            args = JSON.parse(rawArgs);
+          } catch {
+            args = rawArgs.trim();
+          }
+        }
+        const req = resolveRunRequest({ name, args }, ctx.cwd, ctx.isProjectTrusted(), runs);
+        if ('error' in req) {
+          ctx.ui.notify(req.error, 'error');
+          return;
+        }
+        const run = launch(ctx, req, { onSettled: (r) => deliver(r, false) });
+        ctx.ui.notify(`Started workflow ${run.id} (${name}). Watch it with /workflows.`, 'info');
+      },
+    });
+  }
+  pi.on('session_start', (_event, ctx) => {
+    for (const w of listWorkflows(ctx.cwd, ctx.isProjectTrusted())) registerSavedCommand(w.name, w.description);
+  });
+
+  /** Ask for a name and location (unless given), then save a run's script as a workflow command. */
+  async function saveRun(ctx: ExtensionContext, id: string, presetName?: string): Promise<void> {
+    const run = findWorkflowRun(runs, id);
+    const stored = readStoredRun(workflowRunsRoot(), run?.id ?? id);
+    if (!stored) {
+      ctx.ui.notify(`No workflow run '${id}' to save.`, 'error');
+      return;
+    }
+    const suggested = (run?.meta?.name ?? stored.meta?.name ?? '').replace(/[^a-zA-Z0-9_-]+/g, '-');
+    const name = presetName ?? (await ctx.ui.input('Save workflow as', suggested || 'my-workflow'))?.trim();
+    if (!name) return;
+    let dir = path.join(getAgentDir(), 'workflows');
+    if (!presetName && ctx.isProjectTrusted()) {
+      const project = `${CONFIG_DIR_NAME}/workflows/ in this project (shared with the repo)`;
+      const choice = await ctx.ui.select('Save where?', [project, '~/.pi/agent/workflows/ (every project, only you)']);
+      if (!choice) return;
+      if (choice === project) dir = path.join(ctx.cwd, CONFIG_DIR_NAME, 'workflows');
+    }
+    if (
+      fs.existsSync(path.join(dir, `${name}.js`)) &&
+      !(await ctx.ui.confirm('Overwrite?', `${name}.js already exists.`))
+    ) {
+      return;
+    }
+    try {
+      const file = saveWorkflowScript(stored.script, name, dir);
+      registerSavedCommand(name, stored.meta?.description);
+      ctx.ui.notify(`Saved ${file}. Run it with /${name} or /wf run ${name}.`, 'info');
+    } catch (err) {
+      ctx.ui.notify(err instanceof Error ? err.message : String(err), 'error');
+    }
+  }
+
+  pi.registerCommand('workflows', {
+    description: 'Watch workflow runs: phases, agents, results. Enter open • p pause • x stop • r restart • s save',
+    handler: async (args, ctx) => {
+      if (runs.size === 0) {
+        ctx.ui.notify('No workflow runs in this session.', 'info');
+        return;
+      }
+      const initial = args.trim() ? findWorkflowRun(runs, args.trim())?.id : undefined;
+      if (ctx.mode !== 'tui') {
+        ctx.ui.notify(status(initial), 'info');
+        return;
+      }
+      const result = await ctx.ui.custom<ViewResult>(
+        (tui, theme, _kb, done) => new WorkflowsView(() => [...runs.values()], initial, tui, theme, done, footer),
+        { overlay: true, overlayOptions: { width: '85%', maxHeight: '75%', anchor: 'center' } },
+      );
+      if (result?.save) await saveRun(ctx, result.save);
+    },
+  });
+
   // Background runs belong to the session: stop them when it ends.
   pi.on('session_shutdown', () => {
     for (const run of runs.values()) if (run.status === 'running') run.controller.abort();
@@ -452,7 +546,7 @@ export default function workflows(pi: ExtensionAPI): void {
       'top-level `return`. Keep it small (summaries, counts, findings; never raw file contents). The',
       'FIRST statement should be `export const meta = { name, description }`. Injected globals:',
       'agent(prompt, opts), parallel(thunks), pipeline(items, ...stages), phase(name) (groups the agents',
-      'that follow in status output), log(...args), args, budget ({ total, spent, remaining }), cwd,',
+      'that follow in /workflows), log(...args), args, budget ({ total, spent, remaining }), cwd,',
       'checkpoint(label?), ask(question, options?). Keep scripts deterministic (no Date.now()/Math.random()',
       'in prompts) so relaunch can replay them.',
       'agent() opts: model, tools (default read-only [read, grep, find, ls]; pass tools explicitly for',
@@ -528,7 +622,7 @@ export default function workflows(pi: ExtensionAPI): void {
       if (background) {
         const replay = req.relaunch ? ' Completed agents from the earlier run replay from its journal.' : '';
         return text(
-          `Started workflow ${run.id} (${run.label}) in the background.${replay} Its result arrives as a message when it finishes. Check it with workflow status runId=${run.id}; stop it with workflow stop runId=${run.id}.`,
+          `Started workflow ${run.id} (${run.meta?.name ?? run.label}) in the background.${replay} Its result arrives as a message when it finishes. Watch it with /workflows; stop it with workflow stop runId=${run.id}.`,
           { id: run.id, label: run.label, background: true },
         );
       }
@@ -540,11 +634,13 @@ export default function workflows(pi: ExtensionAPI): void {
   // ── /wf — thin human-facing wrapper ───────────────────────────────────
   pi.registerCommand('wf', {
     description:
-      'Workflows: /wf list | /wf run <name> [argsJson] | /wf relaunch <id> | /wf status [id] | /wf stop <id> | /wf pause [id] | /wf resume [id]. Saved workflows live in ~/.pi/agent/workflows/*.js (global) and .pi/workflows/*.js (project, trusted only).',
+      'Workflows: /wf list | /wf run <name> [argsJson] | /wf relaunch <id> | /wf save <id> [name] | /wf status [id] | /wf stop <id> | /wf pause [id] | /wf resume [id]. Saved workflows live in ~/.pi/agent/workflows/*.js (global) and .pi/workflows/*.js (project, trusted only).',
     getArgumentCompletions: (argumentPrefix) => {
       if (argumentPrefix.includes(' ')) return null;
       const prefix = argumentPrefix.trim();
-      const subs = ['list', 'run', 'relaunch', 'status', 'stop', 'pause', 'resume'].filter((s) => s.startsWith(prefix));
+      const subs = ['list', 'run', 'relaunch', 'save', 'status', 'stop', 'pause', 'resume'].filter((s) =>
+        s.startsWith(prefix),
+      );
       if (subs.length === 0) return null;
       return subs.map((s) => ({ value: s + ' ', label: s }));
     },
@@ -552,7 +648,7 @@ export default function workflows(pi: ExtensionAPI): void {
       const parts = args.trim().split(/\s+/).filter(Boolean);
       const sub = parts[0];
       const usage =
-        'Usage: /wf list | /wf run <name> [argsJson] | /wf relaunch <id> | /wf status [id] | /wf stop <id> | /wf pause [id] | /wf resume [id]';
+        'Usage: /wf list | /wf run <name> [argsJson] | /wf relaunch <id> | /wf save <id> [name] | /wf status [id] | /wf stop <id> | /wf pause [id] | /wf resume [id]';
       if (!sub || sub === 'list') {
         const items = listWorkflows(ctx.cwd, ctx.isProjectTrusted());
         if (items.length === 0) {
@@ -590,7 +686,12 @@ export default function workflows(pi: ExtensionAPI): void {
           return;
         }
         const run = launch(ctx, req, { onSettled: (r) => deliver(r, false) });
-        ctx.ui.notify(`Started workflow ${run.id} (${run.label}). Check it with /wf status ${run.id}.`, 'info');
+        ctx.ui.notify(`Started workflow ${run.id} (${run.label}). Watch it with /workflows.`, 'info');
+        return;
+      }
+      if (sub === 'save') {
+        if (!parts[1]) ctx.ui.notify('Usage: /wf save <id> [name]', 'warning');
+        else await saveRun(ctx, parts[1], parts[2]);
         return;
       }
       if (sub === 'pause' || sub === 'resume') {

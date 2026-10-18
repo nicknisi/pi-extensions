@@ -19,6 +19,7 @@
     "index.ts",
     "engine.ts",
     "runs.ts",
+    "view.ts",
     "examples",
     "skills"
   ],
@@ -34,6 +35,7 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
   "pi": {

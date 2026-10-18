@@ -337,6 +337,11 @@ export function startRun(runs: WorkflowRuns, opts: StartRunOptions): WorkflowRun
         }
         changed();
       }),
+      onMeta: (meta) => {
+        run.meta = meta;
+        persist();
+        changed();
+      },
       onAgent: (state) => {
         run.agents.push(state);
         changed();
