@@ -57,6 +57,8 @@ export interface EngineSpawnOptions {
   systemPrompt?: string;
   thinkingLevel?: string;
   timeoutMs?: number;
+  /** Abort (kind 'stalled') after this long without child output; tool time excluded. */
+  stallMs?: number;
   maxTurns?: number;
   outputSchema?: unknown;
   /** Run the child in an isolated git worktree; its change set is captured to a `.patch`. */
@@ -135,6 +137,8 @@ export interface RunScriptOptions {
   spawn: EngineSpawnFn;
   cwd: string;
   budgetTotal?: number;
+  /** Default stall window for agents that don't pass `stallMs`. */
+  stallMs?: number;
   onLog?: (line: string) => void;
   /** Pause gate; agent() awaits it before every spawn. */
   gate?: RunGate;
@@ -169,6 +173,8 @@ const MAX_LOG_CHARS = 2000;
 export const MAX_AGENTS_PER_RUN = 1000;
 /** parallel()/pipeline() reject longer lists instead of silently dropping work. */
 export const MAX_ITEMS_PER_CALL = 4096;
+/** A stalled agent restarts from the same prompt at most this many times. */
+export const MAX_STALL_RESTARTS = 5;
 
 /** An agent() call that settled with a failure (crash, empty, schema, abort). */
 export class AgentFailure extends Error {
@@ -262,12 +268,25 @@ export async function runScript(opts: RunScriptOptions): Promise<RunScriptResult
       ...(typeof agentOpts.systemPrompt === 'string' ? { systemPrompt: agentOpts.systemPrompt } : {}),
       ...(typeof agentOpts.effort === 'string' ? { thinkingLevel: agentOpts.effort } : {}),
       ...(typeof agentOpts.timeoutMs === 'number' ? { timeoutMs: agentOpts.timeoutMs } : {}),
+      ...(typeof agentOpts.stallMs === 'number'
+        ? { stallMs: agentOpts.stallMs }
+        : opts.stallMs !== undefined
+          ? { stallMs: opts.stallMs }
+          : {}),
       ...(typeof agentOpts.maxTurns === 'number' ? { maxTurns: agentOpts.maxTurns } : {}),
       ...(agentOpts.schema !== undefined ? { outputSchema: agentOpts.schema } : {}),
       ...(agentOpts.worktree === true ? { worktree: true } : {}),
     };
-    const res = await spawn(spawnOpts);
+    let res = await spawn(spawnOpts);
+    for (let restart = 1; !res.ok && res.kind === 'stalled' && restart <= MAX_STALL_RESTARTS; restart++) {
+      addUsage(usage, res.usage);
+      log(`${spawnOpts.agent ?? 'agent'} stalled; restarting from the same prompt (retry ${restart})`);
+      res = await spawn(spawnOpts);
+    }
     addUsage(usage, res.usage);
+    if (!res.ok && res.kind === 'stalled') {
+      throw new AgentFailure('stalled', `agent stalled on all ${MAX_STALL_RESTARTS + 1} attempts (${res.error})`);
+    }
     if (!res.ok) throw new AgentFailure(res.kind, res.error);
     // A worktree run that changed files produces a `.patch`; surface it
     // alongside the value so the script can hand the path to a judge or
