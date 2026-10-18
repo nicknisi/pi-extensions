@@ -35,6 +35,17 @@ export interface Letter {
   kind: LetterKind;
   body: string;
   replyTo?: string;
+  /**
+   * `false` delivers quietly: the letter still lands in the receiving
+   * session's context, but does not trigger a model turn. Absent or `true`
+   * wakes the session as before. An ask is never quiet: core `deposit`
+   * refuses `wake: false` on kind `ask`, and delivery wakes an ask
+   * regardless, because without a turn the receiver could never answer.
+   * Backward compatible: letters are stored as whole-JSON files and readers
+   * only require `id`/`body`, so old readers ignore the field and old
+   * writers never set it.
+   */
+  wake?: boolean;
   ts: number;
 }
 
@@ -375,6 +386,8 @@ interface DeliveryAcknowledgement {
   acknowledgedAt: number;
 }
 
+/** Content digest for delivery proof. `wake` is delivery mode, not content,
+ * and is excluded so old and new receivers compute matching digests. */
 function letterDigest(letter: Letter): string {
   return createHash('sha256')
     .update(

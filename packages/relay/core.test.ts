@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as core from './core.js';
+import { deposit as mailboxDeposit } from './mailbox.js';
 
 interface RelayPackage {
   name: string;
@@ -354,6 +355,28 @@ describe('/core filesystem boundary', () => {
     expect(() => core.sweep(root, Date.now(), () => false)).toThrow(TypeError);
     expect(fs.readdirSync(base)).toEqual(['relay']);
   });
+});
+
+it('threads wake through core deposit and rejects a non-boolean flag and a quiet ask', () => {
+  const root = path.join(fixture(), 'relay');
+  const addr = core.deriveAddr('/receiver', 'session');
+  core.deposit(root, addr, letter({ id: 'wake-core', kind: 'message', wake: false }));
+  expect(core.drain(root, addr).map((l) => [l.id, l.wake])).toEqual([['wake-core', false]]);
+  expect(() => core.deposit(root, addr, letter({ kind: 'message', wake: 'no' as unknown as boolean }))).toThrow(
+    TypeError,
+  );
+  // A quiet ask could never be answered: the receiver takes no turn.
+  expect(() => core.deposit(root, addr, letter({ kind: 'ask', wake: false }))).toThrow(TypeError);
+});
+
+it('drains rather than discards a letter whose wake flag is not boolean', () => {
+  const root = path.join(fixture(), 'relay');
+  const addr = core.deriveAddr('/receiver', 'session');
+  // An old writer stringifies the whole letter without validating wake, so a
+  // non-boolean flag can land on disk. Drain unlinks before parsing; the read
+  // path must deliver the letter (as waking mail), not silently drop it.
+  mailboxDeposit(root, addr, letter({ id: 'wake-odd', kind: 'message', wake: 'no' as unknown as boolean }));
+  expect(core.drain(root, addr).map((l) => l.id)).toEqual(['wake-odd']);
 });
 
 it('keeps the Pi extension entry importable', async () => {

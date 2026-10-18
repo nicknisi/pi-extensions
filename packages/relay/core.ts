@@ -280,6 +280,17 @@ export function sweep(root: string, now: number = Date.now(), sessionExists?: (s
 export function deposit(root: string, toAddr: string, letter: Letter): void {
   assertAddress(toAddr);
   assertLetter(letter);
+  // wake is validated on the write side only. The read path (isSafeLetter)
+  // tolerates a non-boolean wake, so a letter from a writer that never
+  // validated the field is still delivered (as waking mail: delivery only
+  // honours wake === false) instead of being discarded after drain already
+  // unlinked it.
+  if (letter.wake !== undefined && typeof letter.wake !== 'boolean') {
+    throw new TypeError(`Invalid relay letter wake flag: ${letter.wake}`);
+  }
+  if (letter.kind === 'ask' && letter.wake === false) {
+    throw new TypeError('A quiet ask (wake: false) is refused: the receiver takes no turn, so it could never answer');
+  }
   depositInternal(root, toAddr, letter);
 }
 

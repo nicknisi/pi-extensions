@@ -232,6 +232,28 @@ describe('mailbox', () => {
     expect(unreadCount(root, addr)).toBe(0);
   });
 
+  it('wake survives deposit intact, stays absent when unset, and does not break delivery proof', async () => {
+    const root = tmpRoot();
+    const addr = 'inbox0000006';
+    deposit(root, addr, letter({ id: 'quiet-1', ts: 1000, wake: false }));
+    deposit(root, addr, letter({ id: 'plain-1', ts: 2000 }));
+    const drained = drain(root, addr);
+    expect(drained.map((l) => [l.id, l.wake])).toEqual([
+      ['quiet-1', false],
+      ['plain-1', undefined],
+    ]);
+    expect('wake' in drained[1]!).toBe(false); // old writers never set it; nothing invents it
+
+    // The durable claim flow preserves the field, and the acknowledgement
+    // digest (which excludes wake) still proves delivery to the sender.
+    const quiet = letter({ id: 'quiet-2', ts: 3000, wake: false });
+    deposit(root, addr, quiet);
+    const claim = claimInbox(root, addr)!;
+    expect(readClaimedLetter(root, addr, claim.claimToken, claim.fileTokens[0]!)?.wake).toBe(false);
+    expect(ackClaimedLetter(root, addr, claim.claimToken, claim.fileTokens[0]!)).toBe(true);
+    expect(await awaitReceipt(root, addr, quiet, 400)).toBe('delivered');
+  });
+
   it('discards corrupt letters without poisoning future drains', () => {
     const root = tmpRoot();
     const addr = 'inbox0000002';
