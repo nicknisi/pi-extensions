@@ -270,6 +270,23 @@ export default function relay(pi: ExtensionAPI) {
       display: true,
       details,
     };
+    // wake === false: an FYI letter. It must land in the session's context
+    // (triggerTurn: false appends to the session, or queues until the
+    // current turn ends when the agent is streaming) without taking a model
+    // turn. Absent or true keeps the wake path below. An ask always wakes,
+    // whatever its flag says (core deposit refuses quiet asks, but the
+    // mailbox layer does not validate): without a turn the receiver could
+    // never answer and the asker would wait out its timeout.
+    if (letter.wake === false && letter.kind !== 'ask') {
+      try {
+        pi.sendMessage(message, { triggerTurn: false });
+        auditDelivery('deliver');
+        return true;
+      } catch {
+        auditDelivery('deliver-failed');
+        return false;
+      }
+    }
     // steer lands between tool calls mid-run; triggerTurn wakes an idle
     // session. A busy agent rejects triggerTurn ("Agent is already
     // processing") — fall back to queueing for the next turn instead of

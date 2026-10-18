@@ -49,10 +49,12 @@ function peer(id = 'peer'): SessionRecord {
     offline: true,
   };
 }
+type SentMessage = { message: Record<string, unknown>; options: Record<string, unknown> | undefined };
 function start() {
   const handlers = new Map<string, Handler>();
   let execute!: Execute;
   let branch: unknown[] = [];
+  const sends: SentMessage[] = [];
   const ctx = {
     cwd: '/work',
     sessionManager: { getSessionId: () => 'self', getCwd: () => '/work', getBranch: () => branch },
@@ -68,7 +70,8 @@ function start() {
     registerCommand: () => {},
     registerMessageRenderer: () => {},
     registerEntryRenderer: () => {},
-    sendMessage: (message: Record<string, unknown>) => {
+    sendMessage: (message: Record<string, unknown>, options?: Record<string, unknown>) => {
+      sends.push({ message, options });
       branch.push({ ...message, type: 'custom_message' });
     },
   } as unknown as ExtensionAPI;
@@ -84,6 +87,7 @@ function start() {
       branch = entries;
     },
     emit,
+    sends,
   };
 }
 function delivery(l: Letter) {
@@ -179,6 +183,33 @@ it('restores an offline queued letter and emits an exact durable receipt', async
   start();
   const { awaitReceipt } = await import('./mailbox.js');
   expect(await awaitReceipt(root, self, l, 1800)).toBe('delivered');
+});
+
+it('delivers wake:false mail without triggering a turn, waking mail with one, and an ask always wakes', async () => {
+  const root = fixture();
+  const p = peer();
+  writeRecord(root, p);
+  const self = deriveAddr('/work', 'self');
+  const from = { addr: p.addr, name: p.name, cwd: p.cwd };
+  const quiet: Letter = { id: 'quiet-letter', kind: 'message', body: 'fyi only', ts: Date.now(), wake: false, from };
+  const loud: Letter = { id: 'loud-letter', kind: 'message', body: 'wake up', ts: Date.now() + 1, from };
+  // The mailbox layer does not validate wake, so a quiet ask can land on
+  // disk; delivery must wake it anyway or it would never be answered.
+  const quietAsk: Letter = { id: 'quiet-ask', kind: 'ask', body: 'answer me', ts: Date.now() + 2, wake: false, from };
+  deposit(root, self, quiet);
+  deposit(root, self, loud);
+  deposit(root, self, quietAsk);
+  const host = start();
+  const { awaitReceipt } = await import('./mailbox.js');
+  // All three letters are acked, so all landed in the session's context.
+  expect(await awaitReceipt(root, self, quiet, 3000)).toBe('delivered');
+  expect(await awaitReceipt(root, self, loud, 3000)).toBe('delivered');
+  expect(await awaitReceipt(root, self, quietAsk, 3000)).toBe('delivered');
+  const byId = (id: string) => host.sends.find((s) => (s.message.details as { id?: string } | undefined)?.id === id)!;
+  expect(byId(quiet.id).options).toEqual({ triggerTurn: false });
+  expect(byId(loud.id).options).toEqual({ triggerTurn: true, deliverAs: 'steer' });
+  expect(byId(quietAsk.id).options).toEqual({ triggerTurn: true, deliverAs: 'steer' });
+  expect(pendingAsks(root, self).map((l) => l.id)).toEqual([quietAsk.id]);
 });
 
 it('settles a waiting ask on shutdown and clears tracking for the original sender', async () => {
