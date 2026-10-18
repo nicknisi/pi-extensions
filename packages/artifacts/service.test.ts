@@ -493,3 +493,126 @@ it('concurrent publishes share one lazy server and cancelled startup cannot resu
   await expect(pending).rejects.toThrow();
   expect(isRunning()).toBe(false);
 });
+
+it('page requests reach only the live owner, only for accepted actions, and never from another origin', async () => {
+  const { api } = provider();
+  const page = await api.publish({
+    title: 'Request page',
+    html: '<button type="button" data-artifact-action="approve" hidden>Approve in Pi</button>',
+  });
+  const served = await (await fetch(page.url)).text();
+  expect(served).toContain('data-artifact-requests');
+  const actions = async () => (await (await fetch(new URL(`/api/actions?slug=${page.slug}`, page.url))).json()).actions;
+  const ask = (body: unknown, headers: Record<string, string> = {}) =>
+    fetch(new URL('/api/request', page.url), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+    });
+
+  // Nobody listening: nothing is offered and a request is refused.
+  expect(await actions()).toEqual([]);
+  expect((await ask({ slug: page.slug, action: 'approve' })).status).toBe(409);
+
+  const received: unknown[] = [];
+  await expect(api.subscribe({ slug: page.slug, onFeedback: () => true, actions: ['approve'] })).rejects.toThrow(
+    /onRequest/,
+  );
+  await expect(
+    api.subscribe({ slug: page.slug, onFeedback: () => true, actions: ['Approve!'], onRequest: () => true }),
+  ).rejects.toThrow(/actions/);
+  const release = await api.subscribe({
+    slug: page.slug,
+    onFeedback: () => true,
+    actions: ['approve'],
+    onRequest: (request) => {
+      received.push(request);
+      return true;
+    },
+  });
+  expect(await actions()).toEqual(['approve']);
+  const ok = await ask({ slug: page.slug, action: 'approve' });
+  expect(ok.status).toBe(200);
+  expect(await ok.json()).toEqual({ delivered: true });
+  expect(received).toEqual([{ slug: page.slug, action: 'approve' }]);
+
+  // Unaccepted actions, foreign origins and non-JSON posts never reach the owner.
+  expect((await ask({ slug: page.slug, action: 'accept' })).status).toBe(409);
+  expect((await ask({ slug: page.slug, action: 'approve' }, { Origin: 'http://evil.example' })).status).toBe(403);
+  const form = await fetch(new URL('/api/request', page.url), {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain' },
+    body: JSON.stringify({ slug: page.slug, action: 'approve' }),
+  });
+  expect(form.status).toBe(403);
+  expect(received).toHaveLength(1);
+
+  release();
+  expect(await actions()).toEqual([]);
+  expect((await ask({ slug: page.slug, action: 'approve' })).status).toBe(409);
+});
+
+it('a failed or slow owner answers 503 or 409 instead of pretending delivery', async () => {
+  const { api } = provider();
+  const page = await api.publish({ title: 'Slow owner', html: '<p>page</p>' });
+  const gate = deferred<boolean>();
+  await api.subscribe({ slug: page.slug, onFeedback: () => true, actions: ['approve'], onRequest: () => gate.promise });
+  const ask = () =>
+    fetch(new URL('/api/request', page.url), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slug: page.slug, action: 'approve' }),
+    });
+  const first = ask();
+  await new Promise((r) => setTimeout(r, 50));
+  expect((await ask()).status).toBe(409);
+  gate.resolve(false);
+  expect((await first).status).toBe(503);
+});
+
+it('a baked or file copy carries no request wiring', async () => {
+  const { api } = provider();
+  const page = await api.publish({
+    title: 'Baked page',
+    html: '<button data-artifact-action="approve" hidden>Go</button>',
+  });
+  expect(readArtifact(page.slug)).not.toContain('data-artifact-requests');
+});
+
+it('a request carrying another host name (DNS rebinding) is refused', async () => {
+  const { api } = provider();
+  const page = await api.publish({ title: 'Rebind page', html: '<p>page</p>' });
+  const received: unknown[] = [];
+  await api.subscribe({
+    slug: page.slug,
+    onFeedback: () => true,
+    actions: ['approve'],
+    onRequest: (r) => (received.push(r), true),
+  });
+  const { port } = new URL(page.url);
+  const body = JSON.stringify({ slug: page.slug, action: 'approve' });
+  const { request: send } = await import('node:http');
+  const status = await new Promise<number>((resolve, reject) => {
+    const req = send(
+      {
+        host: '127.0.0.1',
+        port,
+        path: '/api/request',
+        method: 'POST',
+        headers: {
+          Host: `attacker.example:${port}`,
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        },
+      },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      },
+    );
+    req.on('error', reject);
+    req.end(body);
+  });
+  expect(status).toBe(403);
+  expect(received).toEqual([]);
+});

@@ -1,10 +1,17 @@
 /** Tiny optional service provider over the existing artifact runtime. */
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { rmSync } from 'node:fs';
-import { ARTIFACTS_SERVICE, type ArtifactsAPI } from './contract.js';
+import { ARTIFACT_ACTION, ARTIFACTS_SERVICE, type ArtifactsAPI } from './contract.js';
 import { answerQuestion } from './feedback.js';
 import { savePreviousRevision } from './review.js';
-import { artifactUrl, notifyAnnotations, notifyReload, setFeedbackSender, type FeedbackSender } from './server.js';
+import {
+  artifactUrl,
+  notifyAnnotations,
+  notifyReload,
+  setFeedbackSender,
+  setRequestRouter,
+  type FeedbackSender,
+} from './server.js';
 import { renderHtmlDocument } from './templates.js';
 import { artifactExists, isSafeSlug, openInBrowser, slugify, sourcePath, writeArtifact } from './utils.js';
 
@@ -12,7 +19,11 @@ export function provideArtifacts(events: Pick<ExtensionAPI['events'], 'on'>, fal
   const cwd = process.cwd();
   let disposed = false;
   const cancelDeliveries = new Set<() => void>();
-  const subscribers = new Map<string, { onFeedback: Parameters<ArtifactsAPI['subscribe']>[0]['onFeedback'] }>();
+  type Subscription = Parameters<ArtifactsAPI['subscribe']>[0];
+  const subscribers = new Map<
+    string,
+    { onFeedback: Subscription['onFeedback']; actions: string[]; onRequest?: Subscription['onRequest'] }
+  >();
   const guard = () => {
     if (disposed || process.cwd() !== cwd) throw new Error('Artifacts service disposed or project changed');
   };
@@ -49,12 +60,15 @@ export function provideArtifacts(events: Pick<ExtensionAPI['events'], 'on'>, fal
       notifyAnnotations(slug);
       return { ok: true as const };
     },
-    async subscribe({ slug, onFeedback }) {
+    async subscribe({ slug, onFeedback, actions = [], onRequest }) {
       guard();
       slugGuard(slug);
       if (typeof onFeedback !== 'function') throw new Error('invalid onFeedback');
+      if (!Array.isArray(actions) || !actions.every((a) => typeof a === 'string' && ARTIFACT_ACTION.test(a)))
+        throw new Error('invalid actions');
+      if (actions.length && typeof onRequest !== 'function') throw new Error('actions require onRequest');
       if (subscribers.has(slug)) throw new Error(`Artifact ${slug} already has a subscriber`);
-      const owner = { onFeedback };
+      const owner = { onFeedback, actions: [...new Set(actions)], onRequest };
       subscribers.set(slug, owner);
       return () => {
         if (subscribers.get(slug) === owner) subscribers.delete(slug);
@@ -84,6 +98,27 @@ export function provideArtifacts(events: Pick<ExtensionAPI['events'], 'on'>, fal
     }
   };
   const releaseSender = setFeedbackSender(sender);
+  // Page requests reach only the slug's current owner, and only for actions it accepts.
+  const releaseRouter = setRequestRouter({
+    actions: (slug) => (disposed ? [] : [...(subscribers.get(slug)?.actions ?? [])]),
+    async request(slug, action) {
+      guard();
+      const owner = subscribers.get(slug);
+      if (!owner?.onRequest || !owner.actions.includes(action)) return false;
+      let cancel!: () => void;
+      const cancelled = new Promise<false>((resolve) => {
+        cancel = () => resolve(false);
+      });
+      cancelDeliveries.add(cancel);
+      try {
+        const delivered = await Promise.race([owner.onRequest({ slug, action }), cancelled]);
+        guard();
+        return delivered === true;
+      } finally {
+        cancelDeliveries.delete(cancel);
+      }
+    },
+  });
   const off = events.on(ARTIFACTS_SERVICE.discoveryEvent, (request: unknown) => {
     if (disposed || !request || typeof request !== 'object') return;
     const { id, apiMajor, offer } = request as { id?: unknown; apiMajor?: unknown; offer?: unknown };
@@ -101,6 +136,7 @@ export function provideArtifacts(events: Pick<ExtensionAPI['events'], 'on'>, fal
       off();
       subscribers.clear();
       releaseSender();
+      releaseRouter();
     },
   };
 }

@@ -9,6 +9,8 @@ import { annotationsPath, artifactPath, isSafeSlug, listArtifacts, readArtifact,
 import { renderCommentMarkdown, renderIndexPage, sseSnippet } from './templates.js';
 import { BAKED_RELOAD_SNIPPET } from './events.js';
 import { injectAnnotations } from './annotate.js';
+import { requestSnippet } from './requests.js';
+import { ARTIFACT_ACTION } from './contract.js';
 import { renderRevisionComparison } from './review.js';
 import {
   artifactText,
@@ -48,6 +50,75 @@ export function setFeedbackSender(fn: FeedbackSender | null): () => void {
   return () => {
     if (feedbackSender === fn) feedbackSender = null;
   };
+}
+
+/** Routes page requests to whoever currently owns an artifact. */
+export interface RequestRouter {
+  /** Actions the slug's current subscriber accepts (empty when nobody listens). */
+  actions(slug: string): string[];
+  /** true once the owner received the request; false/throw → 503. */
+  request(slug: string, action: string): Promise<boolean>;
+}
+let requestRouter: RequestRouter | null = null;
+const requesting = new Set<string>();
+export function setRequestRouter(router: RequestRouter | null): () => void {
+  requestRouter = router;
+  return () => {
+    if (requestRouter === router) requestRouter = null;
+  };
+}
+
+/** POST /api/request asks the artifact's owner to act. A request, never permission. */
+async function handlePostRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  // DNS rebinding sends a foreign Host with no Origin; only this server's own host is accepted.
+  if (req.headers.host !== `${HOST}:${state?.port}`) {
+    sendJson(res, 403, { delivered: false, error: 'requests must come from this server' });
+    return;
+  }
+  const router = requestRouter;
+  const raw = await readBody(req, res);
+  if (raw === null) return; // 413 already sent
+  let body: { slug?: unknown; action?: unknown };
+  try {
+    body = JSON.parse(raw) ?? {};
+  } catch {
+    sendJson(res, 400, { delivered: false, error: 'malformed JSON' });
+    return;
+  }
+  if (typeof body.slug !== 'string' || !isSafeSlug(body.slug)) {
+    sendJson(res, 400, { delivered: false, error: 'invalid slug' });
+    return;
+  }
+  if (typeof body.action !== 'string' || !ARTIFACT_ACTION.test(body.action)) {
+    sendJson(res, 400, { delivered: false, error: 'invalid action' });
+    return;
+  }
+  const { slug, action } = body;
+  if (!router || router !== requestRouter || !router.actions(slug).includes(action)) {
+    sendJson(res, 409, { delivered: false, error: 'Nothing is listening for this request. Use the command instead.' });
+    return;
+  }
+  const key = `${slug}\0${action}`;
+  if (requesting.has(key)) {
+    sendJson(res, 409, { delivered: false, error: 'Already sent. Check your terminal.' });
+    return;
+  }
+  requesting.add(key);
+  try {
+    let delivered = false;
+    try {
+      delivered = (await router.request(slug, action)) === true;
+    } catch {
+      delivered = false;
+    }
+    sendJson(
+      res,
+      delivered ? 200 : 503,
+      delivered ? { delivered } : { delivered, error: 'Not delivered. Use the command instead.' },
+    );
+  } finally {
+    requesting.delete(key);
+  }
 }
 
 /** URL for a given slug (or index). Starts the server if needed. */
@@ -390,6 +461,15 @@ async function handle(req: IncomingMessage, res: ServerResponse, clients: Set<Se
       return;
     }
   }
+  if (req.method === 'GET' && url === '/api/actions') {
+    const slug = parsedUrl.searchParams.get('slug');
+    if (!slug || !isSafeSlug(slug)) {
+      sendJson(res, 400, { error: 'invalid slug' });
+      return;
+    }
+    sendJson(res, 200, { actions: requestRouter?.actions(slug) ?? [] });
+    return;
+  }
   if (req.method === 'GET' && (url === '/api/annotations' || url === '/api/revision')) {
     const slug = parsedUrl.searchParams.get('slug');
     if (!slug || !isSafeSlug(slug)) {
@@ -425,6 +505,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, clients: Set<Se
   }
   if (url === '/api/feedback' && req.method === 'POST') {
     await handlePostFeedback(req, res);
+    return;
+  }
+  if (url === '/api/request' && req.method === 'POST') {
+    await handlePostRequest(req, res);
     return;
   }
 
@@ -490,9 +574,14 @@ async function handle(req: IncomingMessage, res: ServerResponse, clients: Set<Se
     // Files written before the shared event stream still bake the old reload
     // snippet; serve the current one so old tabs stop holding extra connections.
     const html = readFileSync(safe, 'utf-8').replace(BAKED_RELOAD_SNIPPET, () => sseSnippet(slug).trim());
-    const injected = injectAnnotations(html, slug, JSON.stringify(review.annotations), {
+    const annotated = injectAnnotations(html, slug, JSON.stringify(review.annotations), {
       revision: review.revision,
     });
+    // Page-request buttons are wired only when served live, never in a baked copy.
+    const requests = requestSnippet(slug);
+    const close = annotated.search(/<\/body>/i);
+    const injected =
+      close === -1 ? annotated + requests : annotated.slice(0, close) + requests + annotated.slice(close);
     res.writeHead(200, { 'Content-Type': mime });
     res.end(injected);
     return;
