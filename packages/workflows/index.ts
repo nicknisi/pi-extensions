@@ -26,6 +26,7 @@
  */
 
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { CONFIG_DIR_NAME, getAgentDir } from '@earendil-works/pi-coding-agent';
@@ -59,6 +60,16 @@ const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_RESULT_CHARS = 16 * 1024;
 const MAX_LOG_CHARS = 2000;
+
+/**
+ * Concurrent workflow agents: 16 by default, fewer on machines with fewer
+ * CPUs; PI_WORKFLOW_MAX_CONCURRENT overrides (1–256).
+ */
+export function workflowMaxConcurrent(env: NodeJS.ProcessEnv = process.env, cpus = os.availableParallelism()): number {
+  const raw = Number(env.PI_WORKFLOW_MAX_CONCURRENT);
+  if (Number.isInteger(raw) && raw >= 1) return Math.min(raw, 256);
+  return Math.max(1, Math.min(16, cpus));
+}
 
 // ── Live runId → AbortController, so `stop` can cancel in-flight spawns. ──
 // Mirrors @nicknisi/pi-subagents' cascading-cancellation registry. Each
@@ -337,6 +348,7 @@ export default function workflows(pi: ExtensionAPI): void {
   let parentCtx: ExtensionContext | undefined;
   const runtime = createSubagentRuntime({
     namespace: NAMESPACE,
+    maxConcurrent: workflowMaxConcurrent(),
     artifactsDir: artifactsRoot(),
     parent: () => parentCtx,
   });
@@ -368,9 +380,10 @@ export default function workflows(pi: ExtensionAPI): void {
       'agent() opts: model, tools (default read-only [read, grep, find, ls]; pass tools explicitly for',
       'builders), label, systemPrompt, schema (validated; agent() returns parsed data, otherwise text),',
       'effort (thinking level), timeoutMs, maxTurns, worktree (when a patch is produced, agent() returns',
-      '{ value, patchPath, runId }). agent() throws `${kind}: ${error}` on failure, so wrap',
-      'it in a safeAgent() returning { ok, value, error } inside parallel(), or one failure collapses',
-      'the wave. parallel(thunks) takes zero-arg thunks: pass () => agent(...), not agent(...).',
+      '{ value, patchPath, runId }). A failed agent() becomes null inside parallel()/pipeline() (logged;',
+      'later pipeline stages skip it); awaited directly it throws `${kind}: ${error}`.',
+      'parallel(thunks) takes zero-arg thunks: pass () => agent(...), not agent(...). Up to',
+      `${workflowMaxConcurrent()} agents run at once; at most 1000 agents per run and 4096 items per call.`,
       'checkpoint(label?) gates the run on a human confirm (dismiss or reject throws and stops the',
       'run). ask(question, options?) asks the human mid-run: select when options are given, yes/no',
       'otherwise, undefined when dismissed. Use them before destructive or expensive steps.',
