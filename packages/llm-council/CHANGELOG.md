@@ -1,5 +1,15 @@
 # @nicknisi/pi-llm-council
 
+## 0.4.1
+
+### Patch Changes
+
+- Updated dependencies [c22cede]
+- Updated dependencies [01de359]
+- Updated dependencies [79ab2c6]
+- Updated dependencies [db67986]
+  - @nicknisi/pi-shared@0.7.0
+
 ## 0.4.0
 
 ### Minor Changes

@@ -1,5 +1,14 @@
 # @nicknisi/pi-shared
 
+## 0.7.0
+
+### Minor Changes
+
+- c22cede: Fast mode now reaches subagent and workflow children: they follow the session's `/fast` toggle and share its rate-limit cooldown. The shared runtime gains `childExtensions()`, a registry of inline extensions loaded into every child.
+- 01de359: Fan-outs share one prompt-cache write: matching workflow agents that start together wait (at most 5 seconds) for the first one's response to start, so they read its cached prefix instead of each writing their own. The shared runtime gains an `onResponseStart` callback.
+- 79ab2c6: Workflow agents that stop producing output for 5 minutes (tool time excluded) restart from the same prompt, up to 5 times. Agents with a `schema` are now told the JSON Schema, and an invalid answer is corrected in the same session before failing. The shared runtime gains `stallMs` and a `stalled` failure kind.
+- db67986: Workflows run up to 16 agents at once by default (fewer on small machines; `PI_WORKFLOW_MAX_CONCURRENT` sets 1–256). A failed `agent()` inside `parallel()`/`pipeline()` now becomes `null` instead of failing the whole wave, and runs are capped at 1,000 agents and 4,096 items per call.
+
 ## 0.6.0
 
 ### Minor Changes

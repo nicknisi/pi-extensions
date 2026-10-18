@@ -1,5 +1,24 @@
 # @nicknisi/pi-workflows
 
+## 0.5.0
+
+### Minor Changes
+
+- 8fb5308: Workflow runs now start in the background with a `wf-` id and deliver their result as a message when they finish; there's no 30-minute cap anymore (pass `background: false` to wait inside the tool call). Each run keeps a journal, so `relaunch` (or `/wf relaunch <id>`) replays completed agents and re-runs only failed, changed, or unfinished ones and those after them. Status, stop, pause, and resume accept a workflow id.
+- 79ab2c6: Workflow agents that stop producing output for 5 minutes (tool time excluded) restart from the same prompt, up to 5 times. Agents with a `schema` are now told the JSON Schema, and an invalid answer is corrected in the same session before failing. The shared runtime gains `stallMs` and a `stalled` failure kind.
+- db67986: Workflows run up to 16 agents at once by default (fewer on small machines; `PI_WORKFLOW_MAX_CONCURRENT` sets 1–256). A failed `agent()` inside `parallel()`/`pipeline()` now becomes `null` instead of failing the whole wave, and runs are capped at 1,000 agents and 4,096 items per call.
+- 3093f0a: Add ultracode: `/ultracode` (or `pi --ultracode`, or `"ultracode": true` in `~/.pi/agent/configs/workflows.json`) asks the model to plan a workflow for every substantive task, and the word `ultracode` in a prompt you type runs just that task as a workflow.
+- d445da7: Add `/workflows`, a live progress view of workflow runs (phases, agents, prompts, results) with pause, stop, per-agent stop and restart, and save. Saved workflows now also run as `/<name>`, and `/wf save <id> [name]` saves a run's script as one.
+
+### Patch Changes
+
+- 01de359: Fan-outs share one prompt-cache write: matching workflow agents that start together wait (at most 5 seconds) for the first one's response to start, so they read its cached prefix instead of each writing their own. The shared runtime gains an `onResponseStart` callback.
+- Updated dependencies [c22cede]
+- Updated dependencies [01de359]
+- Updated dependencies [79ab2c6]
+- Updated dependencies [db67986]
+  - @nicknisi/pi-shared@0.7.0
+
 ## 0.4.0
 
 ### Minor Changes
