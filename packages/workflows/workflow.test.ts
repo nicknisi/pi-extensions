@@ -557,3 +557,45 @@ describe('saveWorkflowScript', () => {
     expect(() => saveWorkflowScript('return 1;', '../escape', dir)).toThrow('Invalid workflow name');
   });
 });
+
+describe('createPrefixStagger', () => {
+  const tick = () => new Promise((r) => setTimeout(r, 5));
+
+  it('holds matching siblings until the first response starts, then lets later ones through', async () => {
+    const { createPrefixStagger } = await import('./index.js');
+    const stagger = createPrefixStagger(10_000);
+    const started: string[] = [];
+    let firstResponse!: () => void;
+    const first = stagger('k', async (onStart) => {
+      started.push('first');
+      await new Promise<void>((r) => (firstResponse = () => (onStart(), r())));
+    });
+    const sibling = stagger('k', async () => void started.push('sibling'));
+    const other = stagger('other-prefix', async () => void started.push('other'));
+    await tick();
+    expect(started).toEqual(['first', 'other']);
+    firstResponse();
+    await Promise.all([first, sibling, other]);
+    expect(started).toEqual(['first', 'other', 'sibling']);
+    // Warm now: a later agent with the same prefix starts at once.
+    await stagger('k', async () => void started.push('later'));
+    expect(started.at(-1)).toBe('later');
+  });
+
+  it('releases the hold after the cap, and is off at 0', async () => {
+    const { createPrefixStagger } = await import('./index.js');
+    const capped = createPrefixStagger(20);
+    const order: string[] = [];
+    const first = capped('k', () => new Promise<void>((r) => setTimeout(() => (order.push('first done'), r()), 100)));
+    const sibling = capped('k', async () => void order.push('sibling'));
+    await Promise.all([first, sibling]);
+    expect(order).toEqual(['sibling', 'first done']);
+
+    const off = createPrefixStagger(0);
+    const seen: string[] = [];
+    const a = off('k', () => new Promise<void>((r) => setTimeout(r, 50)));
+    await off('k', async () => void seen.push('b'));
+    expect(seen).toEqual(['b']);
+    await a;
+  });
+});
