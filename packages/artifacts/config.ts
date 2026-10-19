@@ -10,8 +10,13 @@ export const ARTIFACT_DIR = '.pi/artifacts';
 /** Server bind host — localhost-only, never exposed externally. */
 export const HOST = '127.0.0.1';
 
-/** Mermaid CDN script URL (the only client-side JS; everything else renders at write time). */
-export const MERMAID_CDN = 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js';
+/**
+ * Mermaid CDN script (the only third-party JS; everything else renders at write
+ * time). Pinned with an integrity hash: it runs on the same origin as the review
+ * API, so a changed file must fail to load rather than run. Bump both together.
+ */
+export const MERMAID_CDN = 'https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.min.js';
+export const MERMAID_SRI = 'sha384-EOXBFmc3gx5mb+vn0vPvvGqACToJD24hhacX5Yx+8NUUQrHIle/Qi5Bg9o3zKwW2';
 
 // ─── User config (optional): ~/.pi/agent/configs/artifacts.json ───────────────
 

@@ -4,7 +4,7 @@ import { Marked } from 'marked';
 import { parse as diffParse, html as diffHtml } from 'diff2html';
 import hljs from 'highlight.js';
 
-import { CONFIG, MERMAID_CDN } from './config.js';
+import { CONFIG, MERMAID_CDN, MERMAID_SRI } from './config.js';
 import { EVENT_HUB_JS } from './events.js';
 import { BASE_CSS, D2H_CSS, HLJS_CSS } from './styles.js';
 import { readerBody, READER_ATTRIBUTES, READER_SCRIPT, READER_STYLES } from './reader.js';
@@ -143,7 +143,7 @@ ${EVENT_HUB_JS}
  * "neutral" in particular draws grayscale text that's unreadably pale. */
 function mermaidSnippet(): string {
   return `
-<script src="${MERMAID_CDN}"></script>
+<script src="${MERMAID_CDN}" integrity="${MERMAID_SRI}" crossorigin="anonymous"></script>
 <script>
 (function () {
   var mode = ${JSON.stringify(CONFIG.theme)};
