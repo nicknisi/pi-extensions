@@ -440,6 +440,12 @@ async function handleShare(req: IncomingMessage, res: ServerResponse): Promise<v
 }
 
 async function handle(req: IncomingMessage, res: ServerResponse, clients: Set<ServerResponse>): Promise<void> {
+  // DNS rebinding: a site that points its own name at 127.0.0.1 reaches this port with its name as Host.
+  const port = req.socket.localPort;
+  if (req.headers.host !== `${HOST}:${port}` && req.headers.host !== `localhost:${port}`) {
+    sendJson(res, 403, { error: 'forbidden host' });
+    return;
+  }
   const parsedUrl = new URL(req.url ?? '/', `http://${HOST}`);
   const url = parsedUrl.pathname;
   if (url.startsWith('/api/') && req.method !== 'GET') {
