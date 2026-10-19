@@ -57,6 +57,11 @@ export function annotationsPath(slug: string, cwd = process.cwd()): string {
   return join(cwd, ARTIFACT_DIR, `${slug}.annotations.json`);
 }
 
+/** Absolute path to a slug's comment screenshots (<slug>.clips/<annotation id>.png). */
+export function clipsDir(slug: string, cwd = process.cwd()): string {
+  return join(cwd, ARTIFACT_DIR, `${slug}.clips`);
+}
+
 /** Absolute path to a slug's raw markdown source mirror (<slug>.md). */
 export function sourcePath(slug: string): string {
   return join(artifactDir(), `${slug}.md`);

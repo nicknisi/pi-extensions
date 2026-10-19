@@ -624,6 +624,65 @@ body.aa-review-layout { padding-right: 400px; }
     state.annotations.push(a);
     state.editing = null;
     resetComposer(); reHighlightAll(); render(); persist();
+    captureClip(a);
+  }
+
+  // ── clips: a PNG of each anchored comment's region, as the reviewer saw it ──
+  var clipJobs = [], shotLib = null;
+  function loadShot() { return shotLib || (shotLib = import("/_artifacts/modern-screenshot.mjs")); }
+  function renderClip(target) {
+    var isRange = typeof Range !== "undefined" && target instanceof Range;
+    var node = isRange ? target.commonAncestorContainer : target;
+    var el = isRange ? blockOf(node.nodeType === 1 ? node : node.parentElement) : target;
+    // Measure everything now, before any await can scroll or reflow the page.
+    var box = el.getBoundingClientRect();
+    var rects = isRange ? Array.prototype.slice.call(target.getClientRects()) : [];
+    // shortcut: blocks taller than 4000px get no clip (canvas limits); render a sub-rect if long sections need one.
+    if (!box.width || !box.height || box.height > 4000) return Promise.resolve(null);
+    var top = 0, height = box.height;
+    if (rects.length) {
+      var minY = Math.min.apply(null, rects.map(function (r) { return r.top - box.top; }));
+      var maxY = Math.max.apply(null, rects.map(function (r) { return r.bottom - box.top; }));
+      top = Math.max(0, minY - 120); height = Math.min(box.height, maxY + 120) - top;
+    }
+    var scale = Math.min(window.devicePixelRatio || 1, 2, 1600 / box.width, 2400 / height);
+    return loadShot().then(function (lib) {
+      // The library drops the root's own margins, which revives UA defaults (a <p>'s 1em) inside the image.
+      return lib.domToCanvas(el, { scale: scale, backgroundColor: toRgb("var(--aa-bg)"), timeout: 5000, style: { margin: "0" },
+        filter: function (n) { return n !== root; } });
+    }).then(function (canvas) {
+      var ctx = canvas.getContext("2d");
+      ctx.globalAlpha = 0.3; ctx.fillStyle = toRgb("var(--aa-accent)");
+      rects.forEach(function (r) { ctx.fillRect((r.left - box.left) * scale, (r.top - box.top) * scale, r.width * scale, r.height * scale); });
+      var out = canvas;
+      if (top > 0 || height < box.height) {
+        out = document.createElement("canvas");
+        out.width = canvas.width; out.height = Math.max(1, Math.round(height * scale));
+        out.getContext("2d").drawImage(canvas, 0, Math.round(top * scale), out.width, out.height, 0, 0, out.width, out.height);
+      }
+      var png = out.toDataURL("image/png");
+      return png.length > 7.5e6 ? null : png;
+    }).catch(function () { return null; });
+  }
+  // A clip is a nicety: failures are silent and never block or fail the review.
+  function captureClip(a) {
+    var target = a.element ? findElement(a.element) : a.quote ? findRange(a.quote) : null;
+    if (STATIC || !target) return;
+    var job = renderClip(target).then(function (png) {
+      if (!png) return;
+      // Queued behind the save that wrote this comment, so the server knows its id.
+      state.saving = state.saving.then(function () {
+        return fetch("/api/clips", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ slug: SLUG, id: a.id, png: png }) });
+      }).catch(function () {});
+      return state.saving;
+    }).catch(function () {});
+    clipJobs.push(job);
+    job.then(function () { clipJobs.splice(clipJobs.indexOf(job), 1); });
+  }
+  function clipsSettled() {
+    if (!clipJobs.length) return Promise.resolve();
+    return Promise.race([Promise.all(clipJobs), new Promise(function (done) { setTimeout(done, 8000); })]);
   }
   function openComposer(pending, label) {
     if (popTextarea.value.trim() && pending && (pending.exact || pending.element)) {
@@ -730,6 +789,9 @@ body.aa-review-layout { padding-right: 400px; }
     if (!state.annotations.some(function (a) { return !a.sentAt; })) return;
     state.sending = true;
     render();
+    clipsSettled().then(deliver);
+  }
+  function deliver() {
     state.saving = persist().then(function () {
       if (state.saveError) { sendBtn.disabled = false; return Promise.reject(new Error("save failed")); }
       return fetch("/api/feedback", {
