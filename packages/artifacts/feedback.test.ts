@@ -1,5 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { request as httpRequest } from 'node:http';
+import { createServer as createNetServer } from 'node:net';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import {
@@ -99,6 +101,41 @@ it('sends general, keep, element, question and decision feedback once and preser
   expect(shared.count).toBe(5);
   expect(shared.html).toContain('STATIC = true');
   expect(shared.html).not.toContain('<script data-artifact-reload>');
+});
+
+it("restarts on the project's previous port, and on a fresh one when that port is taken", async () => {
+  const port = Number(new URL(base).port);
+  stopServer();
+  expect(await ensureServer()).toBe(port);
+  stopServer();
+  const blocker = createNetServer();
+  await new Promise<void>((resolve) => blocker.listen(port, '127.0.0.1', resolve));
+  try {
+    const moved = await ensureServer();
+    expect(moved).not.toBe(port);
+    expect(readFileSync(join(process.cwd(), '.pi', 'artifacts', '.server-port'), 'utf8')).toBe(String(moved));
+  } finally {
+    blocker.close();
+  }
+});
+
+it('answers only requests addressed to this server by host (DNS rebinding)', async () => {
+  const port = new URL(base).port;
+  const status = (path: string, host: string) =>
+    new Promise<number>((resolve, reject) => {
+      const req = httpRequest(`${base}${path}`, { headers: { host } }, (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      });
+      req.on('error', reject);
+      req.end();
+    });
+  for (const path of [`/api/annotations?slug=${slug}`, `/${slug}.html`]) {
+    expect(await status(path, `rebind.example:${port}`)).toBe(403);
+    expect(await status(path, `127.0.0.1:${Number(port) + 1}`)).toBe(403);
+    expect(await status(path, `127.0.0.1:${port}`)).toBe(200);
+    expect(await status(path, `localhost:${port}`)).toBe(200);
+  }
 });
 
 it('stores a screenshot per saved comment, names it in the feedback, and prunes it with the comment', async () => {

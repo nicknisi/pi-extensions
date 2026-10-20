@@ -1,13 +1,21 @@
 /** Lazy localhost HTTP server: static artifact serving, index page, SSE live reload. */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readFileSync, existsSync, statSync } from 'node:fs';
-import { basename, extname } from 'node:path';
+import { readFileSync, existsSync, statSync, writeFileSync } from 'node:fs';
+import { basename, extname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 import { HOST } from './config.js';
-import { annotationsPath, artifactPath, isSafeSlug, listArtifacts, readArtifact, safeArtifactPath } from './utils.js';
+import {
+  annotationsPath,
+  artifactDir,
+  artifactPath,
+  isSafeSlug,
+  listArtifacts,
+  readArtifact,
+  safeArtifactPath,
+} from './utils.js';
 import { renderCommentMarkdown, renderIndexPage, sseSnippet } from './templates.js';
 import { BAKED_RELOAD_SNIPPET } from './events.js';
 import { injectAnnotations } from './annotate.js';
@@ -90,6 +98,15 @@ export function runningPort(): number | null {
   return state ? state.port : null;
 }
 
+function rememberedPort(file: string): number {
+  try {
+    const port = Number(readFileSync(file, 'utf-8'));
+    return Number.isInteger(port) && port >= 1024 && port <= 65535 ? port : 0;
+  } catch {
+    return 0;
+  }
+}
+
 /** Start the server if not already running. Returns the port. */
 export async function ensureServer(): Promise<number> {
   if (state) return state.port;
@@ -104,13 +121,23 @@ export async function ensureServer(): Promise<number> {
     });
   });
 
-  const promise = new Promise<number>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, HOST, () => {
-      server.removeListener('error', reject);
-      const addr = server.address();
-      resolve(typeof addr === 'object' && addr ? addr.port : 0);
+  const listen = (port: number) =>
+    new Promise<number>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(port, HOST, () => {
+        server.removeListener('error', reject);
+        const addr = server.address();
+        resolve(typeof addr === 'object' && addr ? addr.port : 0);
+      });
     });
+  // The project's previous port first, so tabs left open across a restart or /new reconnect and keep their drafts.
+  const portFile = join(artifactDir(), '.server-port');
+  const previous = rememberedPort(portFile);
+  const promise = (previous ? listen(previous).catch(() => listen(0)) : listen(0)).then((port) => {
+    try {
+      if (existsSync(artifactDir())) writeFileSync(portFile, String(port));
+    } catch {}
+    return port;
   });
 
   const pending = { server, promise };
@@ -440,6 +467,12 @@ async function handleShare(req: IncomingMessage, res: ServerResponse): Promise<v
 }
 
 async function handle(req: IncomingMessage, res: ServerResponse, clients: Set<ServerResponse>): Promise<void> {
+  // DNS rebinding: a site that points its own name at 127.0.0.1 reaches this port with its name as Host.
+  const port = req.socket.localPort;
+  if (req.headers.host !== `${HOST}:${port}` && req.headers.host !== `localhost:${port}`) {
+    sendJson(res, 403, { error: 'forbidden host' });
+    return;
+  }
   const parsedUrl = new URL(req.url ?? '/', `http://${HOST}`);
   const url = parsedUrl.pathname;
   if (url.startsWith('/api/') && req.method !== 'GET') {

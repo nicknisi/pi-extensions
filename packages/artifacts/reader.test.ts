@@ -117,3 +117,11 @@ describe('Markdown reader', () => {
     expect(root.dataset.readerSize).toBe('large');
   });
 });
+
+it('loads mermaid from a pinned version that must match its integrity hash', () => {
+  const html = renderMarkdownDocument('Diagram', 'diagram', '```mermaid\ngraph TD; A-->B\n```');
+  const tag = html.match(/<script src="https:\/\/cdn\.jsdelivr\.net[^>]*>/)?.[0] ?? '';
+  expect(tag).toMatch(/mermaid@\d+\.\d+\.\d+\//);
+  expect(tag).toMatch(/integrity="sha384-[A-Za-z0-9+/]{64}"/);
+  expect(tag).toContain('crossorigin="anonymous"');
+});
