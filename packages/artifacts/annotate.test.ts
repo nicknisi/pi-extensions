@@ -44,6 +44,37 @@ describe('emitted browser review logic', () => {
     expect(shell).toMatch(/<iframe[^>]+sandbox="[^"]*allow-scripts[^"]*"/);
     expect(shell).not.toMatch(/sandbox="[^"]*allow-top-navigation/);
   });
+  it('sends the document anchors only, never comment text or answers', () => {
+    const sent: { list: Record<string, unknown>[] }[] = [];
+    const state = {
+      annotations: [
+        {
+          ...record('q', 'secret comment'),
+          quote: { exact: 'passage' },
+          intent: 'question',
+          sentAt: 's',
+          reply: 'secret answer',
+        },
+        {
+          ...record('d', 'Storage: Postgres'),
+          intent: 'decision',
+          decisionId: 'storage',
+          decisionValues: ['postgres'],
+        },
+      ],
+    };
+    const syncDoc = new Function(
+      'state',
+      'channel',
+      `${source.slice(source.indexOf('  // The document gets anchors only'), source.indexOf('  function syncAll('))}\nreturn syncDoc;`,
+    )(state, { send: (m: { list: Record<string, unknown>[] }) => sent.push(m) });
+    syncDoc();
+    expect(JSON.stringify(sent)).not.toMatch(/secret|Storage/);
+    expect(sent[0]!.list).toEqual([
+      { id: 'q', quote: { exact: 'passage' }, intent: 'question', sentAt: 's' },
+      { id: 'd', intent: 'decision', decisionId: 'storage', decisionValues: ['postgres'] },
+    ]);
+  });
   it('keeps the composer in the panel and does not clear it when the panel closes', () => {
     expect(source).toContain('panel.querySelector(".composer-slot").appendChild(popover)');
     const state = { mode: 'annotate', pending: { exact: 'original passage' } };

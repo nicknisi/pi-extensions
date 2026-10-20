@@ -298,7 +298,11 @@ async function share() {
     baked.html.includes('"id":"a1"') && baked.html.includes('link the runbook'),
     'baked file missing the annotation payload',
   );
-  assert('share', baked.html.includes('static: true') && !baked.html.includes('<iframe'), 'baked file not in static mode');
+  assert(
+    'share',
+    baked.html.includes('static: true') && !baked.html.includes('<iframe'),
+    'baked file not in static mode',
+  );
   assert('share', !readFileSync(utils.artifactPath(slug), 'utf-8').includes(MARKER), 'bake polluted the stored file');
 
   // Copy endpoint bakes comments when they exist.

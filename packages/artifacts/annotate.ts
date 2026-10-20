@@ -742,7 +742,15 @@ const PANEL_JS = `function aaPanel(channel, cfg) {
   }
 
   // ── document sync ───────────────────────────────────────────────────────
-  function syncDoc() { channel.send({ type: "annotations", list: state.annotations.map(clean) }); }
+  // The document gets anchors only: comment text and answers never enter the artifact's window.
+  function anchorsOnly(a) {
+    var out = { id: a.id };
+    ["quote", "element", "intent", "decisionId", "decisionValues", "sentAt"].forEach(function (k) {
+      if (a[k] !== undefined) out[k] = a[k];
+    });
+    return out;
+  }
+  function syncDoc() { channel.send({ type: "annotations", list: state.annotations.map(anchorsOnly) }); }
   function syncAll() {
     bridgeReady = true;
     syncDoc();
