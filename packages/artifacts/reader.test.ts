@@ -6,6 +6,7 @@ import { renderHtmlDocument, renderIndexPage, renderMarkdownDocument } from './t
 const script = READER_SCRIPT.replace(/^<script[^>]*>/, '').replace(/<\/script>$/, '');
 
 function controlsHarness(storageThrows = false) {
+  const observers: (() => void)[] = [];
   const values = new Map([
     ['unrelated-setting', 'keep'],
     ['pi-artifacts.reader.theme', 'dark'],
@@ -46,8 +47,14 @@ function controlsHarness(storageThrows = false) {
     },
   };
   const window = { matchMedia: () => ({ matches: false, addEventListener() {} }) };
-  new Script(script).runInNewContext({ document, localStorage, window });
-  return { root, controls, theme, size, values };
+  class MutationObserver {
+    constructor(fn: () => void) {
+      observers.push(fn);
+    }
+    observe() {}
+  }
+  new Script(script).runInNewContext({ document, localStorage, window, MutationObserver });
+  return { root, controls, theme, size, values, observers };
 }
 
 describe('Markdown reader', () => {
@@ -107,6 +114,16 @@ describe('Markdown reader', () => {
     size.listeners.click!();
     expect(root.dataset.readerSize).toBe('normal');
     expect(values.get('unrelated-setting')).toBe('keep');
+  });
+  it('follows theme and size set by the review page, and remembers them', () => {
+    const { root, theme, size, values, observers } = controlsHarness();
+    root.dataset.readerTheme = 'light';
+    root.dataset.readerSize = 'large';
+    observers.forEach((fn) => fn());
+    expect(theme.textContent).toBe('Dark');
+    expect(size.attrs['aria-pressed']).toBe('true');
+    expect(values.get('pi-artifacts.reader.theme')).toBe('light');
+    expect(values.get('pi-artifacts.reader.size')).toBe('large');
   });
   it('keeps the controls working when browser storage is blocked', () => {
     const { root, controls, theme, size } = controlsHarness(true);

@@ -3,6 +3,7 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFileSync, existsSync, statSync, writeFileSync } from 'node:fs';
 import { basename, extname, join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
@@ -63,10 +64,20 @@ export function setFeedbackSender(fn: FeedbackSender | null): () => void {
   };
 }
 
-/** Origin the artifacts themselves are served from (`/c/<slug>.html`). Starts the server if needed. */
-export async function contentOrigin(): Promise<string> {
-  return `http://localhost:${await ensureServer()}`;
+/** Each artifact's own host label: stable per slug, so its origin (and storage) survives restarts. */
+function contentLabel(slug: string): string {
+  return createHash('sha256').update(slug).digest('hex').slice(0, 16);
 }
+
+/** The artifact's own origin, where `/c/<slug>.html` is served. Starts the server if needed. */
+export async function contentOrigin(slug: string): Promise<string> {
+  return `http://${contentLabel(slug)}.localhost:${await ensureServer()}`;
+}
+
+// Where a browser can't resolve <label>.localhost (Safari), artifacts load from
+// plain localhost instead, each sandboxed into an opaque origin of its own.
+const SANDBOX_CSP =
+  'sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads';
 
 /** URL for a given slug (or index). Starts the server if needed. */
 export async function artifactUrl(slug?: string): Promise<string> {
@@ -464,7 +475,9 @@ async function handleShare(req: IncomingMessage, res: ServerResponse): Promise<v
   const title = html.match(/<title>(.*?)<\/title>/s)?.[1]?.trim() || body.slug;
   try {
     // handleShare only runs on a live server, so state is set.
-    const result = await shareBaked(body.slug, title, method, { baseUrl: `http://localhost:${state!.port}` });
+    const result = await shareBaked(body.slug, title, method, {
+      baseUrl: `http://${contentLabel(body.slug)}.localhost:${state!.port}`,
+    });
     sendJson(res, 200, { ok: true, ...result });
   } catch (e) {
     sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
@@ -474,14 +487,16 @@ async function handleShare(req: IncomingMessage, res: ServerResponse): Promise<v
 async function handle(req: IncomingMessage, res: ServerResponse, clients: Set<ServerResponse>): Promise<void> {
   // DNS rebinding: a site that points its own name at 127.0.0.1 reaches this port with its name as Host.
   const port = req.socket.localPort ?? 0;
-  if (req.headers.host !== `${HOST}:${port}` && req.headers.host !== `localhost:${port}`) {
+  const host = req.headers.host ?? '';
+  const label = host.endsWith(`.localhost:${port}`) ? host.slice(0, -`.localhost:${port}`.length) : null;
+  if (host !== `${HOST}:${port}` && host !== `localhost:${port}` && !(label && /^[0-9a-f]{16}$/.test(label))) {
     sendJson(res, 403, { error: 'forbidden host' });
     return;
   }
   const parsedUrl = new URL(req.url ?? '/', `http://${HOST}`);
   const url = parsedUrl.pathname;
-  if (req.headers.host === `localhost:${port}`) {
-    handleContent(req, res, parsedUrl, port);
+  if (host !== `${HOST}:${port}`) {
+    handleContent(req, res, parsedUrl, port, label);
     return;
   }
   if (url.startsWith('/api/') && req.method !== 'GET') {
@@ -580,7 +595,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, clients: Set<Se
     return;
   }
   const review = annotationState(slug);
-  const contentOrigin = `http://localhost:${port}`;
+  const contentOrigin = `http://${contentLabel(slug)}.localhost:${port}`;
   res.writeHead(200, {
     'Content-Type': 'text/html; charset=utf-8',
     'Cache-Control': 'no-cache',
@@ -594,6 +609,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, clients: Set<Se
       revision: review.revision,
       contentUrl: `${contentOrigin}/c/${slug}.html`,
       contentOrigin,
+      fallbackUrl: `http://localhost:${port}/c/${slug}.html`,
     }),
   );
 }
@@ -612,20 +628,36 @@ function documentTitle(html: string): string {
 }
 
 /**
- * The artifact's own origin (`localhost:<port>`): its documents under `/c/`
- * and the screenshot library, nothing else. Its scripts never share an origin
- * with the API, and review state and server files are not served here.
+ * The artifacts' origins: `<label>.localhost:<port>` for one artifact, or plain
+ * `localhost:<port>` (label null) where every response is sandboxed. Only
+ * documents under `/c/` and the screenshot library are served, never the API,
+ * review state, server files, or (on an artifact's origin) another artifact's files.
  */
-function handleContent(req: IncomingMessage, res: ServerResponse, parsedUrl: URL, port: number): void {
+function handleContent(
+  req: IncomingMessage,
+  res: ServerResponse,
+  parsedUrl: URL,
+  port: number,
+  label: string | null,
+): void {
   const url = parsedUrl.pathname;
   const notFound = () => {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('404 — artifact not found');
   };
   if (req.method !== 'GET') return notFound();
+  // The review page checks that this browser resolves <label>.localhost.
+  if (url === '/_artifacts/ping') {
+    res.writeHead(204).end();
+    return;
+  }
   if (url === '/_artifacts/modern-screenshot.mjs') {
     const lib = screenshotLibrary();
-    res.writeHead(lib ? 200 : 404, { 'Content-Type': 'text/javascript; charset=utf-8' });
+    // Sandboxed (opaque-origin) documents import it cross-origin.
+    res.writeHead(lib ? 200 : 404, {
+      'Content-Type': 'text/javascript; charset=utf-8',
+      'Access-Control-Allow-Origin': '*',
+    });
     res.end(lib ?? '');
     return;
   }
@@ -638,6 +670,9 @@ function handleContent(req: IncomingMessage, res: ServerResponse, parsedUrl: URL
   }
   if (rel.split('/').some((seg) => seg.startsWith('.')) || /\.(annotations|previous)\.json$|\.clips\//.test(rel))
     return notFound();
+  // Files named after another artifact (its page, source, share image) stay off this one's origin.
+  const owner = /^([^/.]+)\./.exec(rel)?.[1];
+  if (label && owner && existsSync(artifactPath(owner)) && contentLabel(owner) !== label) return notFound();
   const safe = safeArtifactPath(rel);
   if (!safe || !existsSync(safe) || !statSync(safe).isFile()) return notFound();
 
@@ -646,6 +681,7 @@ function handleContent(req: IncomingMessage, res: ServerResponse, parsedUrl: URL
     res.writeHead(200, {
       'Content-Type': MIME[ext] ?? 'application/octet-stream',
       'X-Content-Type-Options': 'nosniff',
+      ...(label ? {} : { 'Content-Security-Policy': 'sandbox' }),
     });
     res.end(readFileSync(safe));
     return;
@@ -658,7 +694,7 @@ function handleContent(req: IncomingMessage, res: ServerResponse, parsedUrl: URL
   res.writeHead(200, {
     'Content-Type': 'text/html; charset=utf-8',
     'Cache-Control': 'no-cache',
-    'Content-Security-Policy': `frame-ancestors http://${HOST}:${port}`,
+    'Content-Security-Policy': `frame-ancestors http://${HOST}:${port}${label ? '' : `; ${SANDBOX_CSP}`}`,
   });
   res.end(
     share

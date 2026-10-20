@@ -87,6 +87,10 @@ export const READER_SCRIPT = `<script data-reader-controls>
     root.dataset.readerSize = root.dataset.readerSize === 'large' ? 'normal' : 'large';
     store('size', root.dataset.readerSize); syncControls();
   });
+  // The review page sets these too: it remembers them across artifacts.
+  if (typeof MutationObserver !== 'undefined') new MutationObserver(function () {
+    store('theme', root.dataset.readerTheme); store('size', root.dataset.readerSize); syncControls();
+  }).observe(root, { attributes: true, attributeFilter: ['data-reader-theme', 'data-reader-size'] });
   media.addEventListener('change', syncControls);
   syncControls(); controls.hidden = false;
 

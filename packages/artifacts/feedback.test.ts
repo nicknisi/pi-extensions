@@ -1,6 +1,6 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { request as httpRequest } from 'node:http';
+import { request as httpRequest, type IncomingHttpHeaders } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it } from 'vitest';
@@ -13,7 +13,7 @@ import {
   writeAnnotations,
   type Annotation,
 } from './feedback.js';
-import { ensureServer, setFeedbackSender, stopServer } from './server.js';
+import { contentOrigin, ensureServer, setFeedbackSender, stopServer } from './server.js';
 import { annotationsPath, artifactPath, writeArtifact, writeSourceMirror } from './utils.js';
 import { renderCommentMarkdown, renderMarkdownDocument } from './templates.js';
 import { renderReviewContent, renderRevisionComparison, savePreviousRevision } from './review.js';
@@ -33,6 +33,18 @@ const request = (path: string, body: unknown, method: 'POST' | 'PUT' = 'POST') =
     method: method === 'PUT' ? 'PUT' : 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+  });
+// Node can't resolve <label>.localhost, so name the host in the request instead.
+const get = (path: string, host: string) =>
+  new Promise<{ status: number; headers: IncomingHttpHeaders; body: string }>((resolve, reject) => {
+    const req = httpRequest(`${base}${path}`, { headers: { host } }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk: string) => (body += chunk));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body }));
+    });
+    req.on('error', reject);
+    req.end();
   });
 
 beforeEach(async () => {
@@ -121,47 +133,46 @@ it("restarts on the project's previous port, and on a fresh one when that port i
 });
 
 it('answers only requests addressed to this server by host (DNS rebinding)', async () => {
-  const port = new URL(base).port;
-  const status = (path: string, host: string) =>
-    new Promise<number>((resolve, reject) => {
-      const req = httpRequest(`${base}${path}`, { headers: { host } }, (res) => {
-        res.resume();
-        resolve(res.statusCode ?? 0);
-      });
-      req.on('error', reject);
-      req.end();
-    });
+  const port = Number(new URL(base).port);
+  const own = new URL(await contentOrigin(slug)).host;
+  const status = async (path: string, host: string) => (await get(path, host)).status;
   for (const path of [`/api/annotations?slug=${slug}`, `/${slug}.html`, `/c/${slug}.html`]) {
     expect(await status(path, `rebind.example:${port}`)).toBe(403);
-    expect(await status(path, `127.0.0.1:${Number(port) + 1}`)).toBe(403);
+    expect(await status(path, `127.0.0.1:${port + 1}`)).toBe(403);
+    expect(await status(path, `rebind.localhost:${port}`)).toBe(403);
+    expect(await status(path, own.replace(`:${port}`, `:${port + 1}`))).toBe(403);
   }
-  // The review page and API answer on 127.0.0.1; the artifact itself only on localhost.
+  // The review page and API answer on 127.0.0.1; the artifact itself only on its own host or plain localhost.
   expect(await status(`/api/annotations?slug=${slug}`, `127.0.0.1:${port}`)).toBe(200);
   expect(await status(`/${slug}.html`, `127.0.0.1:${port}`)).toBe(200);
   expect(await status(`/c/${slug}.html`, `127.0.0.1:${port}`)).toBe(404);
-  expect(await status(`/c/${slug}.html`, `localhost:${port}`)).toBe(200);
-  expect(await status(`/api/annotations?slug=${slug}`, `localhost:${port}`)).toBe(404);
-  expect(await status(`/${slug}.html`, `localhost:${port}`)).toBe(404);
+  for (const host of [own, `localhost:${port}`]) {
+    expect(await status(`/c/${slug}.html`, host)).toBe(200);
+    expect(await status(`/api/annotations?slug=${slug}`, host)).toBe(404);
+    expect(await status(`/${slug}.html`, host)).toBe(404);
+  }
 });
 
-it('keeps the artifact on its own origin, away from the API and review state', async () => {
-  const port = new URL(base).port;
-  const content = `http://localhost:${port}`;
+it('serves each artifact on its own origin, away from the API, review state, and other artifacts', async () => {
+  const port = Number(new URL(base).port);
+  const content = await contentOrigin(slug);
+  const own = new URL(content).host;
+  expect(own).toMatch(new RegExp(`^[0-9a-f]{16}\\.localhost:${port}$`));
   writeAnnotations(slug, [annotation('a', { quote: { exact: 'Original' } })]);
   // The review page frames the document from the other origin and cannot itself be framed.
   const page = await fetch(`${base}/${slug}.html`);
   expect(page.headers.get('content-security-policy')).toBe("frame-ancestors 'none'");
-  expect(await page.text()).toContain(
-    `<iframe id="artifact-frame" title="Review test" src="${content}/c/${slug}.html"`,
-  );
-  const doc = await fetch(`${content}/c/${slug}.html`);
-  expect(doc.headers.get('content-security-policy')).toBe(`frame-ancestors http://127.0.0.1:${port}`);
-  const docHtml = await doc.text();
-  expect(docHtml).toContain('data-artifact-bridge');
-  expect(docHtml).not.toContain('data-artifact-reload');
-  expect(docHtml).not.toContain('/api/');
+  const pageHtml = await page.text();
+  expect(pageHtml).toContain(JSON.stringify(`${content}/c/${slug}.html`));
+  expect(pageHtml).toContain(JSON.stringify(`http://localhost:${port}/c/${slug}.html`));
+  const doc = await get(`/c/${slug}.html`, own);
+  expect(doc.headers['content-security-policy']).toBe(`frame-ancestors http://127.0.0.1:${port}`);
+  expect(doc.body).toContain('data-artifact-bridge');
+  expect(doc.body).not.toContain('data-artifact-reload');
+  expect(doc.body).not.toContain('/api/');
+  expect((await get('/_artifacts/ping', own)).status).toBe(204);
   // Share renders get the read-only layer instead of the bridge.
-  expect(await (await fetch(`${content}/c/${slug}.html?panel=open`)).text()).toContain('static: true');
+  expect((await get(`/c/${slug}.html?panel=open`, own)).body).toContain('static: true');
   for (const path of [
     `${slug}.annotations.json`,
     '.server-port',
@@ -169,7 +180,28 @@ it('keeps the artifact on its own origin, away from the API and review state', a
     `${slug}.previous.json`,
     '..%2Fx',
   ])
-    expect((await fetch(`${content}/c/${path}`)).status).toBe(404);
+    expect((await get(`/c/${path}`, own)).status).toBe(404);
+  // Another artifact's page, source, and share image stay off this one's origin; shared files don't.
+  const dir = join(process.cwd(), '.pi', 'artifacts');
+  writeArtifact('other', renderMarkdownDocument('Other', 'other', '# Secret'));
+  writeSourceMirror('other', '# Secret');
+  writeFileSync(join(dir, 'other.png'), 'png');
+  writeFileSync(join(dir, 'chart.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>');
+  const otherHost = new URL(await contentOrigin('other')).host;
+  for (const file of ['other.html', 'other.md', 'other.png']) {
+    expect((await get(`/c/${file}`, own)).status).toBe(404);
+    expect((await get(`/c/${file}`, otherHost)).status).toBe(200);
+  }
+  expect((await get(`/c/${slug}.md`, own)).status).toBe(200);
+  expect((await get('/c/chart.svg', own)).status).toBe(200);
+  // Plain localhost (browsers without <label>.localhost) sandboxes everything into opaque origins.
+  const shared = await get(`/c/${slug}.html`, `localhost:${port}`);
+  expect(shared.headers['content-security-policy']).toMatch(/; sandbox allow-scripts /);
+  expect(shared.headers['content-security-policy']).not.toContain('allow-same-origin');
+  expect((await get('/c/chart.svg', `localhost:${port}`)).headers['content-security-policy']).toBe('sandbox');
+  expect(
+    (await get('/_artifacts/modern-screenshot.mjs', `localhost:${port}`)).headers['access-control-allow-origin'],
+  ).toBe('*');
   // A write from the artifact's origin is refused, as a forged review would be.
   const forged = await new Promise<number>((resolve, reject) => {
     const req = httpRequest(
