@@ -276,6 +276,13 @@ Runtime npm deps (declared in `package.json`):
 
 Peer deps: `@earendil-works/pi-coding-agent` (provides `ExtensionAPI` — only `pi.registerTool`, `pi.registerCommand`, and `pi.on` are used), `@earendil-works/pi-tui`, `typebox`. No `@nicknisi/pi-shared` or other workspace deps. One CDN script (mermaid, version-pinned with an integrity hash) for mermaid fences only. A Chrome-family browser binary is needed for `image`/`pdf` shares (and nothing else).
 
+## Checks
+
+Beyond `vitest`, two scripts boot the real server from `dist/` (run `pnpm build` first) in a temp project, from the repo root:
+
+- `node packages/artifacts/smoke.mjs clean|persist|stale|share`: the review page, draft persistence, stale quotes, and baked shares, over plain HTTP.
+- `node packages/artifacts/e2e.mjs`: headless Chrome over CDP, with real mouse and keyboard input inside the artifact's frame. It selects, pins, picks a decision, and sends, then checks the delivered message and its screenshots. It also checks that a forging script in the artifact can neither write to the API nor read another artifact, and that the reader theme carries to the next artifact. It runs once on per-artifact origins and once with `*.localhost` unresolvable (as in Safari). Set `CHROME_PATH` to choose the browser; without Chrome it skips.
+
 ## Caveats
 
 - **Uses only the public extension API** (`registerTool` / `registerCommand` / `on("session_shutdown")` / `ctx.ui.setStatus` / `ctx.ui.select`) — no pi internals. Should be stable across pi versions modulo API changes in those calls.
