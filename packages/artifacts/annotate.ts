@@ -444,8 +444,21 @@ const BRIDGE_JS = `function aaBridge(channel, opts) {
     var p = palette(), key = JSON.stringify(p);
     if (key !== lastPalette) { lastPalette = key; channel.send({ type: "palette", palette: p }); }
   }
+  // Reader theme and text size live with the panel; report changes, apply what it remembers.
+  var html = document.documentElement;
+  function readerPrefs() { return JSON.stringify({ theme: html.dataset.readerTheme, size: html.dataset.readerSize }); }
+  var lastPrefs = readerPrefs();
+  function sendPrefs() {
+    var p = readerPrefs();
+    if (p !== lastPrefs) { lastPrefs = p; channel.send({ type: "prefs", prefs: JSON.parse(p) }); }
+  }
+  function applyPrefs(p) {
+    if (!p || html.dataset.readerTheme === undefined) return;
+    if (p.theme) html.dataset.readerTheme = p.theme;
+    if (p.size) html.dataset.readerSize = p.size;
+  }
   // Reader theme toggles flip attributes on <html>; recheck after any transition settles.
-  if (typeof MutationObserver !== "undefined") new MutationObserver(function () { sendPalette(); setTimeout(sendPalette, 350); }).observe(document.documentElement, { attributes: true });
+  if (typeof MutationObserver !== "undefined") new MutationObserver(function () { sendPrefs(); sendPalette(); setTimeout(sendPalette, 350); }).observe(html, { attributes: true });
   var scheme = window.matchMedia("(prefers-color-scheme: dark)");
   if (scheme.addEventListener) scheme.addEventListener("change", sendPalette);
 
@@ -562,6 +575,7 @@ const BRIDGE_JS = `function aaBridge(channel, opts) {
       (shot ? renderClip(shot) : Promise.resolve(null)).then(function (png) { channel.send({ type: "clip", id: m.id, png: png }); });
     }
     else if (m.type === "reload" && !LOCAL) location.reload();
+    else if (m.type === "prefs") applyPrefs(m.prefs);
   });
   sendPalette();
   channel.send({ type: "ready" });
@@ -1109,8 +1123,9 @@ const PANEL_JS = `function aaPanel(channel, cfg) {
   // anchor, a decision, or a screenshot, but never comment text or a send.
   channel.on(function (m) {
     if (!m || typeof m.type !== "string") return;
-    if (m.type === "ready") syncAll();
+    if (m.type === "ready") { syncAll(); if (SHELL) channel.send({ type: "prefs", prefs: readerPrefs() }); }
     else if (m.type === "palette") applyPalette(m.palette);
+    else if (m.type === "prefs" && SHELL) storeReaderPrefs(m.prefs);
     else if (m.type === "select" || m.type === "pin") {
       if (STATIC || state.sending || state.mode !== "annotate") return;
       if (m.type === "pin") setPinning(false, true);
@@ -1130,11 +1145,26 @@ const PANEL_JS = `function aaPanel(channel, cfg) {
     else if (m.type === "scrolled" && !m.found) showToast("Anchor is no longer in this artifact.");
   });
 
+  // Reader preferences live out here, on one origin, so a theme picked in one artifact carries to the next.
+  var READER_PREFS = { theme: ["light", "dark"], size: ["normal", "large"] };
+  function readerPrefs() {
+    var p = {};
+    Object.keys(READER_PREFS).forEach(function (k) {
+      try { var v = localStorage.getItem("pi-artifacts.reader." + k); if (READER_PREFS[k].indexOf(v) !== -1) p[k] = v; } catch (_) {}
+    });
+    return p;
+  }
+  function storeReaderPrefs(p) {
+    Object.keys(READER_PREFS).forEach(function (k) {
+      if (p && READER_PREFS[k].indexOf(p[k]) !== -1) try { localStorage.setItem("pi-artifacts.reader." + k, p[k]); } catch (_) {}
+    });
+  }
+
   // Reloading the document never touches the review: drafts live out here.
   function reloadFrame() {
     if (!SHELL) return;
     if (bridgeReady) { bridgeReady = false; channel.send({ type: "reload" }); }
-    else cfg.frame.src = cfg.frame.src;
+    else if (cfg.frame.getAttribute("src")) cfg.frame.src = cfg.frame.src;
   }
   if (!STATIC && window.__artifactEvents) {
     window.__artifactEvents.on(SLUG, "reload", function (e) { if (e.data === SLUG || e.data === "*") reloadFrame(); });
@@ -1233,8 +1263,10 @@ export function injectAnnotations(html: string, slug: string, annotationsJson: s
 
 /**
  * The live review page: the panel on the server's origin, the artifact in an
- * iframe on `contentOrigin`. The sandbox keeps the artifact from navigating
- * this page; the separate origin keeps it from calling the API.
+ * iframe on its own origin, `contentOrigin`, or (where the browser can't
+ * resolve that host) at `fallbackUrl`, sandboxed into an opaque origin. The
+ * sandbox keeps the artifact from navigating this page; the separate origin
+ * keeps it from calling the API or reading other artifacts.
  */
 export function renderShell(opts: {
   slug: string;
@@ -1243,6 +1275,7 @@ export function renderShell(opts: {
   revision: string;
   contentUrl: string;
   contentOrigin: string;
+  fallbackUrl: string;
 }): string {
   return `<!DOCTYPE html>
 <html lang="en" class="aa-shell">
@@ -1253,21 +1286,40 @@ export function renderShell(opts: {
 <style>${PANEL_CSS}</style>
 </head>
 <body>
-<iframe id="artifact-frame" title="${escapeHtml(opts.title)}" src="${escapeHtml(opts.contentUrl)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads" allow="clipboard-write; fullscreen"></iframe>
+<iframe id="artifact-frame" title="${escapeHtml(opts.title)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads" allow="clipboard-write; fullscreen"></iframe>
 <script>
 (function () {
   ${EVENT_HUB_JS}
   ${PANEL_JS}
-  var frame = document.getElementById("artifact-frame"), CONTENT_ORIGIN = ${JSON.stringify(opts.contentOrigin)};
+  var frame = document.getElementById("artifact-frame"), CONTENT_ORIGIN = null, OWN_ORIGIN = ${JSON.stringify(opts.contentOrigin)};
   var channel = {
-    send: function (m) { try { frame.contentWindow.postMessage({ aa: m }, CONTENT_ORIGIN); } catch (_) {} },
+    send: function (m) {
+      if (CONTENT_ORIGIN) try { frame.contentWindow.postMessage({ aa: m }, CONTENT_ORIGIN === "null" ? "*" : CONTENT_ORIGIN); } catch (_) {}
+    },
     on: function (fn) {
       window.addEventListener("message", function (e) {
-        if (e.source === frame.contentWindow && e.origin === CONTENT_ORIGIN && e.data && e.data.aa) fn(e.data.aa);
+        if (CONTENT_ORIGIN && e.source === frame.contentWindow && e.origin === CONTENT_ORIGIN && e.data && e.data.aa) fn(e.data.aa);
       });
     },
   };
   aaPanel(channel, { slug: ${JSON.stringify(opts.slug)}, static: false, revision: ${JSON.stringify(opts.revision)}, annotations: ${scriptJson(opts.annotationsJson)}, frame: frame });
+  // Each artifact gets its own origin on <label>.localhost. A browser that can't
+  // resolve that (Safari) gets the shared host, sandboxed into an opaque origin.
+  function start(own) {
+    CONTENT_ORIGIN = own ? OWN_ORIGIN : "null";
+    if (!own) frame.setAttribute("sandbox", frame.getAttribute("sandbox").replace("allow-same-origin ", ""));
+    frame.src = own ? ${JSON.stringify(opts.contentUrl)} : ${JSON.stringify(opts.fallbackUrl)};
+  }
+  var known = null;
+  try { known = sessionStorage.getItem("aa-own-origin"); } catch (_) {}
+  if (known) start(true);
+  else Promise.race([
+    fetch(OWN_ORIGIN + "/_artifacts/ping", { mode: "no-cors", cache: "no-store" }).then(function () { return true; }, function () { return false; }),
+    new Promise(function (r) { setTimeout(r, 1500, false); }),
+  ]).then(function (own) {
+    if (own) try { sessionStorage.setItem("aa-own-origin", "1"); } catch (_) {}
+    start(own);
+  });
 })();
 </script>
 </body>

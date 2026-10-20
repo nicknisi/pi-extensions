@@ -7,8 +7,9 @@ const shell = renderShell({
   title: 'Test',
   annotationsJson: '[]',
   revision: 'v1',
-  contentUrl: 'http://localhost:1/c/test.html',
-  contentOrigin: 'http://localhost:1',
+  contentUrl: 'http://abc.localhost:1/c/test.html',
+  contentOrigin: 'http://abc.localhost:1',
+  fallbackUrl: 'http://localhost:1/c/test.html',
 });
 const source = shell;
 const clean = source.slice(source.indexOf('  function clean(a)'), source.indexOf('  // Each request snapshots'));
@@ -43,6 +44,58 @@ describe('emitted browser review logic', () => {
     expect(shell).toContain('e.source === frame.contentWindow && e.origin === CONTENT_ORIGIN');
     expect(shell).toMatch(/<iframe[^>]+sandbox="[^"]*allow-scripts[^"]*"/);
     expect(shell).not.toMatch(/sandbox="[^"]*allow-top-navigation/);
+  });
+  it("loads the artifact from its own origin, or sandboxed into an opaque one when that host doesn't resolve", async () => {
+    const boot = source.slice(source.indexOf('  function start(own) {'), source.lastIndexOf('})();'));
+    const run = async (probe: () => Promise<unknown>) => {
+      const attrs: Record<string, string> = { sandbox: 'allow-scripts allow-same-origin allow-forms' };
+      const frame = {
+        setAttribute: (k: string, v: string) => (attrs[k] = v),
+        getAttribute: (k: string) => attrs[k],
+        src: '',
+      };
+      const session = new Map<string, string>();
+      const sessionStorage = {
+        getItem: (k: string) => session.get(k) ?? null,
+        setItem: (k: string, v: string) => session.set(k, v),
+      };
+      const origin = new Function(
+        'frame',
+        'sessionStorage',
+        'fetch',
+        'OWN_ORIGIN',
+        `var CONTENT_ORIGIN = null;\n${boot}\nreturn function () { return CONTENT_ORIGIN; };`,
+      )(frame, sessionStorage, probe, 'http://abc.localhost:1');
+      await new Promise((r) => setTimeout(r, 0));
+      return { origin: origin(), src: frame.src, sandbox: attrs.sandbox, cached: session.get('aa-own-origin') };
+    };
+    expect(await run(() => Promise.resolve({}))).toEqual({
+      origin: 'http://abc.localhost:1',
+      src: 'http://abc.localhost:1/c/test.html',
+      sandbox: 'allow-scripts allow-same-origin allow-forms',
+      cached: '1',
+    });
+    expect(await run(() => Promise.reject(new TypeError('Load failed')))).toEqual({
+      origin: 'null',
+      src: 'http://localhost:1/c/test.html',
+      sandbox: 'allow-scripts allow-forms',
+      cached: undefined,
+    });
+  });
+  it('keeps reader preferences on the review page and accepts only known values', () => {
+    const store = new Map<string, string>([['pi-artifacts.reader.theme', 'neon']]);
+    const localStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => store.set(k, v),
+    };
+    const prefs = new Function(
+      'localStorage',
+      `${source.slice(source.indexOf('  var READER_PREFS'), source.indexOf('  // Reloading the document'))}\nreturn { readerPrefs, storeReaderPrefs };`,
+    )(localStorage);
+    expect(prefs.readerPrefs()).toEqual({});
+    prefs.storeReaderPrefs({ theme: 'light', size: 'huge', extra: 'x' });
+    expect(prefs.readerPrefs()).toEqual({ theme: 'light' });
+    expect([...store.keys()]).toEqual(['pi-artifacts.reader.theme']);
   });
   it('sends the document anchors only, never comment text or answers', () => {
     const sent: { list: Record<string, unknown>[] }[] = [];

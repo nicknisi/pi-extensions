@@ -401,7 +401,7 @@ export default function artifacts(pi: ExtensionAPI) {
             };
           }
           if (method === 'image' || method === 'pdf') {
-            const baseUrl = await contentOrigin(); // starts the lazy server Chrome will hit
+            const baseUrl = await contentOrigin(slug); // starts the lazy server Chrome will hit
             const res = await shareBaked(slug, title, method, {
               baseUrl,
               bake,
