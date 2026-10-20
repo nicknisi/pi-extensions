@@ -94,7 +94,7 @@ Fenced code blocks are handled per language:
 
 - ` ```diff ` fences → rendered **server-side** via [`diff2html`](https://github.com/rtfpessoa/diff2html) (Node API, line-by-line, no file list). Malformed diffs fall back to plain code blocks. Offline-safe.
 - Known-language fences (` ```ts `, ` ```py `, …) → syntax-highlighted **server-side** via [`highlight.js`](https://highlightjs.org/); highlighted spans are baked into the HTML. Unknown languages fall back to plain escaped code (no unreliable auto-detect on short snippets).
-- ` ```mermaid ` fences → rendered **client-side** via the mermaid 11 CDN script (`https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js`). This is the reader's only external script. Mermaid artifacts need network on first view. Mermaid uses its `base` theme fed from the document's CSS variables when rendered. Already-rendered diagrams and authored SVG/images retain their colors when the reader theme is toggled.
+- ` ```mermaid ` fences → rendered **client-side** via the mermaid CDN script, pinned to an exact version with a subresource integrity hash (`MERMAID_CDN` / `MERMAID_SRI` in `config.ts`; bump both together). A changed file fails to load instead of running next to the review API. This is the reader's only external script. Mermaid artifacts need network on first view. Mermaid uses its `base` theme fed from the document's CSS variables when rendered. Already-rendered diagrams and authored SVG/images retain their colors when the reader theme is toggled.
 
 ### `kind: "html"` (escape hatch)
 
@@ -114,6 +114,7 @@ Project-local, mirroring plan-mode's `.pi/plans` convention:
 <project>/.pi/artifacts/<slug>.md              # markdown source mirror (markdown kind only; enables source-line refs)
 <project>/.pi/artifacts/<slug>.annotations.json # comment drafts (written by the annotation layer)
 <project>/.pi/artifacts/<slug>.clips/<id>.png   # one screenshot per pinned or text comment
+<project>/.pi/artifacts/.server-port            # last port the server used, tried first next time
 ```
 
 - Slug = identity: derived from the title (lowercase, alnum + hyphens, trimmed, 80-char cap; empty result → `artifact`). Slugs are validated against path traversal (`/`, `\`, `..` rejected). `update` with the same slug overwrites the file — collisions are intentional.
@@ -123,11 +124,11 @@ Project-local, mirroring plan-mode's `.pi/plans` convention:
 
 ## Server (lazy, localhost-only)
 
-- `node:http` server started on first `open`/auto-open (not at extension load), bound strictly to `127.0.0.1`, random free port (`listen(0)`) remembered for the process lifetime. One server per pi process, matching the cwd-relative storage model.
+- `node:http` server started on first `open`/auto-open (not at extension load), bound strictly to `127.0.0.1`, on the project's previous port when it is free (kept in `.pi/artifacts/.server-port`), else a random free port. Reusing the port lets tabs left open across a restart or `/new` reconnect and keep unsent drafts. One server per pi process, matching the cwd-relative storage model.
 - Routes: `/` lists artifacts, `/<slug>.html` serves them with annotations, and `/events` carries reload and answer events. `GET /api/annotations?slug=...` reads review state, `PUT /api/annotations` saves drafts, `POST /api/feedback` delivers a batch, `POST /api/clips` stores a comment's screenshot, `GET /_artifacts/modern-screenshot.mjs` serves the capture library, `POST /api/render` previews comment Markdown, and `POST /api/share` exports. `GET /api/revision?slug=...` opens the previous/current comparison.
 - **SSE live reload**: server and tool run in the same process, so `update` pushes a `reload` event directly to connected clients (no `fs.watch`). Every rendered page embeds a snippet that subscribes to `/events` and reloads only on events matching its own slug (or `*`).
 - **Index page** at `/`: artifact list newest-first with kind badge and timestamp. Titles/kind/mtime recovered by regex-parsing each file's `<title>` and `artifact-*` metas — no sidecar manifest.
-- Request paths are URL-decoded, normalized, and prefix-checked against the artifacts dir — nothing outside it is served. No auth: localhost-only, serving files the agent just wrote locally.
+- Request paths are URL-decoded, normalized, and prefix-checked against the artifacts dir — nothing outside it is served. No auth: localhost-only, serving files the agent just wrote locally. Every request must name this server in its `Host` header (`127.0.0.1:<port>` or `localhost:<port>`); anything else is 403, which stops DNS rebinding (a website that points its own domain at 127.0.0.1).
 
 ## Annotations
 
@@ -168,7 +169,7 @@ Screenshots are PNGs of each commented region as the reviewer saw it, with any q
 
 `(source line N)` appears for markdown artifacts when the quote is found verbatim in the source mirror (`.md`); it is omitted for raw HTML artifacts and quotes that span markdown formatting. If delivery fails, nothing is lost: when the server is up but has no live session to deliver to, it answers 503 with the composed message in the response and the page offers a Copy button; when the server itself is gone (e.g. `/new` stopped it), the draft comments stay in the sidecar and can be submitted after the next `open`.
 
-**Threat model**: the server is loopback-only (`127.0.0.1`), without authentication. Mutation endpoints require JSON and reject a different browser Origin. Native local clients without an Origin header remain supported. Requests have a 1 MB body cap (about 8 MB for screenshot uploads), and annotation records are validated and stripped of unknown fields. A screenshot is stored only for an already-saved comment whose ID is filename-safe, and only when the bytes are a PNG of at most 6 MB. Browser requests cannot forge replies or erase sent records. Comment Markdown escapes raw HTML and blocks unsafe link schemes. Artifact HTML itself remains agent-authored executable content, not sandboxed content.
+**Threat model**: the server is loopback-only (`127.0.0.1`), without authentication, and refuses requests whose `Host` is not its own. Mutation endpoints require JSON and reject a different browser Origin. Native local clients without an Origin header remain supported. Requests have a 1 MB body cap (about 8 MB for screenshot uploads), and annotation records are validated and stripped of unknown fields. A screenshot is stored only for an already-saved comment whose ID is filename-safe, and only when the bytes are a PNG of at most 6 MB. Browser requests cannot forge replies or erase sent records. Comment Markdown escapes raw HTML and blocks unsafe link schemes. Artifact HTML itself remains agent-authored executable content, not sandboxed content.
 
 ### Questions, decisions, and evidence
 
@@ -271,14 +272,14 @@ Runtime npm deps (declared in `package.json`):
 - `modern-screenshot` — in-page PNG capture for comment screenshots; served to the page by the artifact server and loaded only when a comment is added.
 - `typebox` — tool parameter schema.
 
-Peer deps: `@earendil-works/pi-coding-agent` (provides `ExtensionAPI` — only `pi.registerTool`, `pi.registerCommand`, and `pi.on` are used), `@earendil-works/pi-tui`, `typebox`. No `@nicknisi/pi-shared` or other workspace deps. One CDN script (mermaid 11) for mermaid fences only. A Chrome-family browser binary is needed for `image`/`pdf` shares (and nothing else).
+Peer deps: `@earendil-works/pi-coding-agent` (provides `ExtensionAPI` — only `pi.registerTool`, `pi.registerCommand`, and `pi.on` are used), `@earendil-works/pi-tui`, `typebox`. No `@nicknisi/pi-shared` or other workspace deps. One CDN script (mermaid, version-pinned with an integrity hash) for mermaid fences only. A Chrome-family browser binary is needed for `image`/`pdf` shares (and nothing else).
 
 ## Caveats
 
 - **Uses only the public extension API** (`registerTool` / `registerCommand` / `on("session_shutdown")` / `ctx.ui.setStatus` / `ctx.ui.select`) — no pi internals. Should be stable across pi versions modulo API changes in those calls.
 - **Config is loaded once at extension load** (pi extensions load at session start) — edit `artifacts.json`, then restart pi.
 - **Mermaid artifacts need network** on first view (CDN script). Everything else is rendered at write time and viewable offline.
-- **Server lifetime = process lifetime.** Port is held in module state; the server stops on `session_shutdown`. Artifacts persist on disk and can be re-served by a later session.
+- **Server lifetime = process lifetime.** The server stops on `session_shutdown`; the next session in the same project reuses its port when free. Artifacts persist on disk and can be re-served by a later session.
 - **Server is per-process and cwd-keyed.** Two pi sessions in different projects each run their own server on different ports; artifact URLs from one session don't resolve in the other.
 - **Footer status uses a nerd-font glyph** (`\u{F0C5}`) — terminals without a nerd font show tofu for the icon; the link itself is unaffected.
 - **Browser open is platform-specific**: `open` (macOS), `rundll32 url.dll,FileProtocolHandler` (Windows — `start` is a cmd.exe builtin and can't be spawned), `xdg-open` (Linux). Failures only warn.
