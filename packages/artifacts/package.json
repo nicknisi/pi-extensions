@@ -49,7 +49,8 @@
   "dependencies": {
     "diff2html": "^3.4.52",
     "highlight.js": "^11.11.1",
-    "marked": "^18.0.5"
+    "marked": "^18.0.5",
+    "modern-screenshot": "^4.7.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it } from 'vitest';
@@ -99,6 +99,39 @@ it('sends general, keep, element, question and decision feedback once and preser
   expect(shared.count).toBe(5);
   expect(shared.html).toContain('STATIC = true');
   expect(shared.html).not.toContain('<script data-artifact-reload>');
+});
+
+it('stores a screenshot per saved comment, names it in the feedback, and prunes it with the comment', async () => {
+  const png =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+  const lib = await fetch(`${base}/_artifacts/modern-screenshot.mjs`);
+  expect(lib.status).toBe(200);
+  expect(await lib.text()).toContain('domToCanvas');
+  // Only a saved comment, a filename-safe id, and real PNG bytes are accepted.
+  expect((await request('/api/clips', { slug, id: 'pin', png })).status).toBe(400);
+  const list = [annotation('pin', { element: { selector: '#chart', label: 'Chart' } }), annotation('plain')];
+  expect((await request('/api/annotations', { slug, annotations: list }, 'PUT')).status).toBe(200);
+  expect((await request('/api/clips', { slug, id: '../pin', png })).status).toBe(400);
+  expect((await request('/api/clips', { slug, id: 'pin', png: 'data:image/png;base64,aGVsbG8=' })).status).toBe(400);
+  expect((await request('/api/clips', { slug, id: 'pin', png })).status).toBe(200);
+  const clip = join(process.cwd(), '.pi', 'artifacts', `${slug}.clips`, 'pin.png');
+  expect(readFileSync(clip).subarray(1, 4).toString()).toBe('PNG');
+
+  let message = '';
+  setFeedbackSender((text) => ((message = text), true));
+  expect((await request('/api/feedback', { slug })).status).toBe(200);
+  expect(message).toContain(`[annotationId: pin]\n   Screenshot: ${clip}`);
+  expect(message.match(/Screenshot: /g)).toHaveLength(1);
+  expect(message).toContain('as the reviewer saw it');
+
+  // Sent records keep their screenshots; a comment that leaves the sidecar takes its file along.
+  expect((await request('/api/annotations', { slug, annotations: [] }, 'PUT')).status).toBe(200);
+  expect(existsSync(clip)).toBe(true);
+  writeAnnotations(
+    slug,
+    readAnnotations(slug).filter((a) => a.id !== 'pin'),
+  );
+  expect(existsSync(clip)).toBe(false);
 });
 
 it('rejects invalid data and stale writes, strips rendering caches, and cannot forge sent records', async () => {

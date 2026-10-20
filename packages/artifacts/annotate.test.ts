@@ -84,6 +84,7 @@ describe('emitted browser review logic', () => {
       'persist',
       'sendBtn',
       'showToast',
+      'clipsSettled',
       `${source.slice(source.indexOf('  function send()'), source.indexOf('  function showFeedbackFallback('))}\nreturn send;`,
     )(
       false,
@@ -100,13 +101,19 @@ describe('emitted browser review logic', () => {
       },
       { disabled: true },
       () => {},
+      () => {
+        calls.push('clips');
+        return Promise.resolve();
+      },
     );
     state.editing = 0;
     send();
     expect(calls).toEqual([]);
     state.editing = null;
     send();
-    expect(calls).toEqual(['add', 'persist']);
+    await new Promise((done) => setTimeout(done, 0));
+    // Screenshots of the typed comment get a bounded wait before delivery.
+    expect(calls).toEqual(['add', 'clips', 'persist']);
     await state.saving;
     expect(state.sending).toBe(false);
     expect(state.annotations).toHaveLength(1);

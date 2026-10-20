@@ -3,7 +3,7 @@
  * so `smoke.mjs` can drive it directly against `dist/`.
  */
 
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,6 +12,7 @@ import {
   annotationsPath,
   artifactDir,
   artifactPath,
+  clipsDir,
   copyFileToClipboard,
   copyImageToClipboard,
   copyToClipboard,
@@ -132,6 +133,48 @@ export function writeAnnotations(slug: string, list: Annotation[], cwd = process
   } finally {
     rmSync(temporary, { force: true });
   }
+  pruneClips(slug, new Set(list.map((a) => a.id)), cwd);
+}
+
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+export const CLIP_MAX_BYTES = 6 * 1024 * 1024;
+
+/** Clip files are named by annotation id, so only filename-safe ids get one. */
+function clipFile(slug: string, id: string, cwd = process.cwd()): string | null {
+  return isSafeSlug(slug) && /^[A-Za-z0-9_-]{1,200}$/.test(id) ? join(clipsDir(slug, cwd), `${id}.png`) : null;
+}
+
+/** Store a comment's screenshot. The annotation must already be saved; throws on invalid input. */
+export function writeClip(slug: string, id: string, png: Buffer, cwd = process.cwd()): string {
+  const path = clipFile(slug, id, cwd);
+  if (!path) throw new Error('invalid slug or annotation id');
+  if (png.length > CLIP_MAX_BYTES || !png.subarray(0, 8).equals(PNG_SIGNATURE)) throw new Error('clip must be a PNG');
+  if (!readAnnotations(slug, cwd).some((a) => a.id === id)) throw new Error('no annotation with that id');
+  mkdirSync(clipsDir(slug, cwd), { recursive: true });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, png);
+    renameSync(temporary, path);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+  return path;
+}
+
+/** Absolute path of an annotation's screenshot, when one was stored. */
+export function clipFor(slug: string, id: string, cwd = process.cwd()): string | undefined {
+  const path = clipFile(slug, id, cwd);
+  return path && existsSync(path) ? path : undefined;
+}
+
+/** Deleted comments take their screenshots with them. Cleanup never fails a save. */
+function pruneClips(slug: string, keep: Set<string>, cwd: string): void {
+  const dir = clipsDir(slug, cwd);
+  try {
+    for (const file of readdirSync(dir)) {
+      if (file.endsWith('.png') && !keep.has(file.slice(0, -4))) rmSync(join(dir, file), { force: true });
+    }
+  } catch {}
 }
 
 /** Revision tokens prevent an old browser tab from overwriting a newer review. */
@@ -365,8 +408,14 @@ export function composeFeedback(
   anns: Annotation[],
   staleFlags: boolean[],
   lines: (number | undefined)[],
+  clips: (string | undefined)[] = [],
 ): string {
   const parts: string[] = ['# Artifact Annotations', '', `Artifact: ${slug} (${url})`, ''];
+  if (clips.some(Boolean))
+    parts.push(
+      'Screenshots are PNGs of each commented region as the reviewer saw it, with any quoted text tinted. Read them when a comment is about how something looks.',
+      '',
+    );
   if (anns.some((a) => a.intent === 'question')) {
     parts.push(
       'Questions request an explanation, not an edit. Answer each with the artifact tool using action "answer", title ' +
@@ -394,6 +443,7 @@ export function composeFeedback(
         : 'Whole artifact';
     const intent = ann.intent && ann.intent !== 'comment' ? ` [${ann.intent}]` : '';
     parts.push(`${i + 1}. ${stale}${anchor}${intent} [annotationId: ${ann.id}]`);
+    if (clips[i]) parts.push(`   Screenshot: ${clips[i]}`);
     parts.push('');
     parts.push(
       ann.comment

@@ -113,6 +113,7 @@ Project-local, mirroring plan-mode's `.pi/plans` convention:
 <project>/.pi/artifacts/<slug>.html            # the artifact
 <project>/.pi/artifacts/<slug>.md              # markdown source mirror (markdown kind only; enables source-line refs)
 <project>/.pi/artifacts/<slug>.annotations.json # comment drafts (written by the annotation layer)
+<project>/.pi/artifacts/<slug>.clips/<id>.png   # one screenshot per pinned or text comment
 ```
 
 - Slug = identity: derived from the title (lowercase, alnum + hyphens, trimmed, 80-char cap; empty result → `artifact`). Slugs are validated against path traversal (`/`, `\`, `..` rejected). `update` with the same slug overwrites the file — collisions are intentional.
@@ -123,7 +124,7 @@ Project-local, mirroring plan-mode's `.pi/plans` convention:
 ## Server (lazy, localhost-only)
 
 - `node:http` server started on first `open`/auto-open (not at extension load), bound strictly to `127.0.0.1`, random free port (`listen(0)`) remembered for the process lifetime. One server per pi process, matching the cwd-relative storage model.
-- Routes: `/` lists artifacts, `/<slug>.html` serves them with annotations, and `/events` carries reload and answer events. `GET /api/annotations?slug=...` reads review state, `PUT /api/annotations` saves drafts, `POST /api/feedback` delivers a batch, `POST /api/render` previews comment Markdown, and `POST /api/share` exports. `GET /api/revision?slug=...` opens the previous/current comparison.
+- Routes: `/` lists artifacts, `/<slug>.html` serves them with annotations, and `/events` carries reload and answer events. `GET /api/annotations?slug=...` reads review state, `PUT /api/annotations` saves drafts, `POST /api/feedback` delivers a batch, `POST /api/clips` stores a comment's screenshot, `GET /_artifacts/modern-screenshot.mjs` serves the capture library, `POST /api/render` previews comment Markdown, and `POST /api/share` exports. `GET /api/revision?slug=...` opens the previous/current comparison.
 - **SSE live reload**: server and tool run in the same process, so `update` pushes a `reload` event directly to connected clients (no `fs.watch`). Every rendered page embeds a snippet that subscribes to `/events` and reloads only on events matching its own slug (or `*`).
 - **Index page** at `/`: artifact list newest-first with kind badge and timestamp. Titles/kind/mtime recovered by regex-parsing each file's `<title>` and `artifact-*` metas — no sidecar manifest.
 - Request paths are URL-decoded, normalized, and prefix-checked against the artifacts dir — nothing outside it is served. No auth: localhost-only, serving files the agent just wrote locally.
@@ -134,7 +135,9 @@ Every artifact page served by the localhost server carries an inert annotation l
 
 **Commenting**: click **Review** and write feedback for the whole document, or select a passage first. The composer has visible **Comment**, **Question**, and **Keep this** choices. Comment requests a change, Question requests an explanation, and Keep this marks content to preserve. Markdown and Preview are supported. Use **Add to review** to collect several comments, or send the typed comment directly. Closing the panel or pressing `Esc` preserves unfinished text. Add or clear it before choosing a different passage. Drafts can be edited or deleted in the panel. Text comments appear as highlights through the CSS Custom Highlight API.
 
-**Visual pins**: choose **Pin a visual**, then click an image, SVG diagram, figure, table, canvas, or element with `data-artifact-anchor`. Keyboard users can Tab to a target and press Enter. Click a comment's anchor to return to it. Author stable `id` or `data-artifact-anchor` attributes where possible. Structural fallback selectors are best-effort and can become stale after layout changes. The browser marks missing or ambiguous targets stale. The agent receives the element label and selector, not a screenshot.
+**Visual pins**: choose **Pin a visual**, then click an image, SVG diagram, figure, table, canvas, or element with `data-artifact-anchor`. Keyboard users can Tab to a target and press Enter. Click a comment's anchor to return to it. Author stable `id` or `data-artifact-anchor` attributes where possible. Structural fallback selectors are best-effort and can become stale after layout changes. The browser marks missing or ambiguous targets stale. The agent receives the element label and selector, plus a screenshot (below).
+
+**Screenshots**: adding a pinned or text comment also takes a PNG of its region as you see it (theme, layout, and page state included) and stores it in `<slug>.clips/<annotation id>.png`. A pin captures its element. A text comment captures the block holding the selection with the selected text tinted, cropped to 120px around it when the block is tall. General and decision comments have none. The feedback message names each file, so the agent can read it. Capture runs in the page with [`modern-screenshot`](https://github.com/qq15725/modern-screenshot), loaded only when needed. It is best-effort: blocks taller than 4000px, images over about 5.5 MB, and failed renders are skipped silently, and **Send review** waits at most 8 seconds for unfinished captures. Deleting a draft deletes its screenshot. Sent comments keep theirs.
 
 **Sent feedback**: sending retains comments in a collapsed **Sent feedback** section. Sent records are read-only and excluded from later sends. Sent means delivered, not resolved. Question answers appear there without reloading the document. Shared HTML, images, and PDFs include retained feedback unless annotations are excluded.
 
@@ -149,11 +152,14 @@ Every artifact page served by the localhost server carries an inert annotation l
 
 Artifact: sprint-report (http://127.0.0.1:PORT/sprint-report.html)
 
-1. > "Deploys rose 40% after the migration" (source line 5)
+Screenshots are PNGs of each commented region as the reviewer saw it, with any quoted text tinted. Read them when a comment is about how something looks.
+
+1. > "Deploys rose 40% after the migration" (source line 5) [annotationId: mvf1a2b3-1234]
+   > Screenshot: /path/to/project/.pi/artifacts/sprint-report.clips/mvf1a2b3-1234.png
 
    Which migration? Cite the PR.
 
-2. [stale] > "No incidents were recorded"
+2. [stale] > "No incidents were recorded" [annotationId: mvf1a2c4-5678]
 
    Wrong — link the Feb outage retro.
 
@@ -162,7 +168,7 @@ Artifact: sprint-report (http://127.0.0.1:PORT/sprint-report.html)
 
 `(source line N)` appears for markdown artifacts when the quote is found verbatim in the source mirror (`.md`); it is omitted for raw HTML artifacts and quotes that span markdown formatting. If delivery fails, nothing is lost: when the server is up but has no live session to deliver to, it answers 503 with the composed message in the response and the page offers a Copy button; when the server itself is gone (e.g. `/new` stopped it), the draft comments stay in the sidecar and can be submitted after the next `open`.
 
-**Threat model**: the server is loopback-only (`127.0.0.1`), without authentication. Mutation endpoints require JSON and reject a different browser Origin. Native local clients without an Origin header remain supported. Requests have a 1 MB body cap, and annotation records are validated and stripped of unknown fields. Browser requests cannot forge replies or erase sent records. Comment Markdown escapes raw HTML and blocks unsafe link schemes. Artifact HTML itself remains agent-authored executable content, not sandboxed content.
+**Threat model**: the server is loopback-only (`127.0.0.1`), without authentication. Mutation endpoints require JSON and reject a different browser Origin. Native local clients without an Origin header remain supported. Requests have a 1 MB body cap (about 8 MB for screenshot uploads), and annotation records are validated and stripped of unknown fields. A screenshot is stored only for an already-saved comment whose ID is filename-safe, and only when the bytes are a PNG of at most 6 MB. Browser requests cannot forge replies or erase sent records. Comment Markdown escapes raw HTML and blocks unsafe link schemes. Artifact HTML itself remains agent-authored executable content, not sandboxed content.
 
 ### Questions, decisions, and evidence
 
@@ -262,6 +268,7 @@ Runtime npm deps (declared in `package.json`):
 - `marked` — markdown → HTML (GFM).
 - `diff2html` — server-side rendering of ` ```diff ` fences; its bundled CSS is read from the installed package at load time.
 - `highlight.js` — server-side syntax highlighting baked into the HTML.
+- `modern-screenshot` — in-page PNG capture for comment screenshots; served to the page by the artifact server and loaded only when a comment is added.
 - `typebox` — tool parameter schema.
 
 Peer deps: `@earendil-works/pi-coding-agent` (provides `ExtensionAPI` — only `pi.registerTool`, `pi.registerCommand`, and `pi.on` are used), `@earendil-works/pi-tui`, `typebox`. No `@nicknisi/pi-shared` or other workspace deps. One CDN script (mermaid 11) for mermaid fences only. A Chrome-family browser binary is needed for `image`/`pdf` shares (and nothing else).

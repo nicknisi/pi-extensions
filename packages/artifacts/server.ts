@@ -3,6 +3,8 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { basename, extname } from 'node:path';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 
 import { HOST } from './config.js';
 import { annotationsPath, artifactPath, isSafeSlug, listArtifacts, readArtifact, safeArtifactPath } from './utils.js';
@@ -12,6 +14,8 @@ import { injectAnnotations } from './annotate.js';
 import { renderRevisionComparison } from './review.js';
 import {
   artifactText,
+  CLIP_MAX_BYTES,
+  clipFor,
   composeFeedback,
   annotationState,
   validAnnotation,
@@ -19,6 +23,7 @@ import {
   shareBaked,
   sourceLine,
   writeAnnotations,
+  writeClip,
   type Annotation,
 } from './feedback.js';
 
@@ -155,15 +160,40 @@ const MIME: Record<string, string> = {
 
 const BODY_CAP = 1024 * 1024; // 1 MB
 
+/**
+ * The in-page screenshot library, read from the installed package with a direct
+ * `import.meta.resolve` (see styles.ts for why), or `createRequire` where that
+ * is missing (vitest). Null when a bundled host has no node_modules: the page
+ * then attaches no screenshots.
+ */
+let screenshotLib: string | null | undefined;
+function screenshotLibrary(): string | null {
+  const spec = 'modern-screenshot/dist/index.mjs';
+  if (screenshotLib === undefined) {
+    for (const resolve of [
+      () => fileURLToPath(import.meta.resolve(spec)),
+      () => createRequire(import.meta.url).resolve(spec),
+    ]) {
+      try {
+        screenshotLib = readFileSync(resolve(), 'utf-8');
+        break;
+      } catch {
+        screenshotLib = null;
+      }
+    }
+  }
+  return screenshotLib ?? null;
+}
+
 /** Accumulate a request body with a hard cap; destroys + 413 past it. Resolves null when capped. */
-function readBody(req: IncomingMessage, res: ServerResponse): Promise<string | null> {
+function readBody(req: IncomingMessage, res: ServerResponse, cap = BODY_CAP): Promise<string | null> {
   return new Promise((resolve) => {
     let size = 0;
     const chunks: Buffer[] = [];
     let capped = false;
     req.on('data', (chunk: Buffer) => {
       size += chunk.length;
-      if (size > BODY_CAP) {
+      if (size > cap) {
         capped = true;
         res.writeHead(413, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('413 — body too large');
@@ -283,8 +313,9 @@ async function handlePostFeedback(req: IncomingMessage, res: ServerResponse): Pr
   const text = artifactText(slug);
   const staleFlags = anns.map((a) => (text === null ? true : isStale(a, text)));
   const lines = anns.map((a) => sourceLine(a, slug));
+  const clips = anns.map((a) => clipFor(slug, a.id, cwd));
   const url = state ? `http://${HOST}:${state.port}/${slug}.html` : `/${slug}.html`;
-  const feedback = composeFeedback(slug, url, anns, staleFlags, lines);
+  const feedback = composeFeedback(slug, url, anns, staleFlags, lines, clips);
 
   if (!sender) {
     sendJson(res, 503, { delivered: false, feedback });
@@ -322,6 +353,37 @@ async function handlePostFeedback(req: IncomingMessage, res: ServerResponse): Pr
   } finally {
     delivering.delete(key);
   }
+}
+
+/** POST /api/clips stores the screenshot of a saved comment's anchor. */
+async function handlePostClip(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const cwd = process.cwd();
+  // base64 grows the PNG by a third; leave room for the JSON around it.
+  const raw = await readBody(req, res, Math.ceil((CLIP_MAX_BYTES * 4) / 3) + 4096);
+  if (raw === null) return; // 413 already sent
+  if (cwd !== process.cwd()) {
+    sendJson(res, 409, { error: 'Artifact session changed.' });
+    return;
+  }
+  let body: { slug?: unknown; id?: unknown; png?: unknown };
+  try {
+    body = JSON.parse(raw) ?? {};
+  } catch {
+    sendJson(res, 400, { error: 'malformed JSON' });
+    return;
+  }
+  const data = typeof body.png === 'string' ? /^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/.exec(body.png) : null;
+  if (typeof body.slug !== 'string' || typeof body.id !== 'string' || !data) {
+    sendJson(res, 400, { error: 'slug, id, and a PNG data URL are required' });
+    return;
+  }
+  try {
+    writeClip(body.slug, body.id, Buffer.from(data[1]!, 'base64'), cwd);
+  } catch (e) {
+    sendJson(res, 400, { error: e instanceof Error ? e.message : 'invalid clip' });
+    return;
+  }
+  sendJson(res, 200, { ok: true });
 }
 
 /** POST /api/render — render comment markdown to HTML for the annotation UI. */
@@ -425,6 +487,16 @@ async function handle(req: IncomingMessage, res: ServerResponse, clients: Set<Se
   }
   if (url === '/api/feedback' && req.method === 'POST') {
     await handlePostFeedback(req, res);
+    return;
+  }
+  if (url === '/api/clips' && req.method === 'POST') {
+    await handlePostClip(req, res);
+    return;
+  }
+  if (url === '/_artifacts/modern-screenshot.mjs' && req.method === 'GET') {
+    const lib = screenshotLibrary();
+    res.writeHead(lib ? 200 : 404, { 'Content-Type': 'text/javascript; charset=utf-8' });
+    res.end(lib ?? '');
     return;
   }
 
