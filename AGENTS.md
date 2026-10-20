@@ -18,6 +18,7 @@ pnpm format        # oxfmt (format:check to verify)
 ```
 
 - Extensions ship `.ts` source directly — no build step. `@earendil-works/*` are peer deps; pi's runtime aliases them at load time.
+- Any `pnpm <script>` first reinstalls if a `package.json` or the lockfile changed since the last install, and that install's `prepare` rebuilds every `dist/` from the working tree. So after `git stash`, a branch switch, or a dependency edit, `dist/` and `node_modules` can match the stashed or other branch's state: run `pnpm install && pnpm build` before running `node` against `dist/` (smoke scripts, live harnesses).
 - Cross-package helpers go in `packages/shared` (`@nicknisi/pi-shared`, `workspace:*`).
 - Runtime configs live in `~/.pi/agent/configs/`, not in this repo.
 
