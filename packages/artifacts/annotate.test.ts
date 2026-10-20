@@ -1,21 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import { Script } from 'node:vm';
-import { annotateSnippet } from './annotate.js';
+import { annotateSnippet, injectBridge, renderShell } from './annotate.js';
 
-const source = annotateSnippet('test', '[]');
+const shell = renderShell({
+  slug: 'test',
+  title: 'Test',
+  annotationsJson: '[]',
+  revision: 'v1',
+  contentUrl: 'http://localhost:1/c/test.html',
+  contentOrigin: 'http://localhost:1',
+});
+const source = shell;
 const clean = source.slice(source.indexOf('  function clean(a)'), source.indexOf('  // Each request snapshots'));
-const merge = source.slice(source.indexOf('  function mergeServer('), source.indexOf('  // ── anchoring / highlights'));
+const merge = source.slice(source.indexOf('  function mergeServer('), source.indexOf('  // ── document sync'));
 const record = (id: string, comment = id) => ({ id, comment, createdAt: '2026-09-09' });
 
 function harness(baseline: unknown[], local: unknown[]) {
   const state = { annotations: local, baseline, revision: 'old', conflict: false, saveError: false };
-  const reconcile = new Function(
-    'state',
-    'showToast',
-    'reHighlightAll',
-    'render',
-    `${clean}\n${merge}\nreturn mergeServer;`,
-  )(
+  const reconcile = new Function('state', 'showToast', 'syncDoc', 'render', `${clean}\n${merge}\nreturn mergeServer;`)(
     state,
     () => {},
     () => {},
@@ -25,12 +27,22 @@ function harness(baseline: unknown[], local: unknown[]) {
 }
 
 describe('emitted browser review logic', () => {
-  it('produces valid JavaScript in both live and offline modes', () => {
-    for (const options of [{}, { static: true, revision: 'v1' }]) {
-      const script = annotateSnippet('test', '[]', options).match(/<script>([\s\S]*)<\/script>/)?.[1];
+  it('produces valid JavaScript for the review page, the document bridge, and offline shares', () => {
+    const pages = [shell, injectBridge('<body></body>', 'http://127.0.0.1:1'), annotateSnippet('test', '[]')];
+    for (const page of pages) {
+      const script = page.match(/<script[^>]*>([\s\S]*)<\/script>/)?.[1];
       expect(script).toBeTruthy();
       expect(() => new Script(script!)).not.toThrow();
     }
+  });
+  it('keeps the API out of the document and talks to it only from the expected origins', () => {
+    const bridge = injectBridge('<body><p>hi</p></body>', 'http://127.0.0.1:1');
+    for (const call of ['/api/', 'fetch(']) expect(bridge).not.toContain(call);
+    expect(bridge).toContain('e.origin === PARENT_ORIGIN');
+    expect(bridge).toContain('window.parent.postMessage({ aa: m }, PARENT_ORIGIN)');
+    expect(shell).toContain('e.source === frame.contentWindow && e.origin === CONTENT_ORIGIN');
+    expect(shell).toMatch(/<iframe[^>]+sandbox="[^"]*allow-scripts[^"]*"/);
+    expect(shell).not.toMatch(/sandbox="[^"]*allow-top-navigation/);
   });
   it('keeps the composer in the panel and does not clear it when the panel closes', () => {
     expect(source).toContain('panel.querySelector(".composer-slot").appendChild(popover)');
@@ -40,12 +52,14 @@ describe('emitted browser review logic', () => {
       'btn',
       'setPinning',
       'render',
+      'channel',
       `${source.slice(source.indexOf('  function setMode('), source.indexOf('  // ── persistence'))}\nreturn setMode;`,
     )(
       state,
       { classList: { toggle() {} }, focus() {} },
       () => {},
       () => {},
+      { send() {} },
     );
     setMode('off');
     expect(state.mode).toBe('off');
@@ -58,7 +72,7 @@ describe('emitted browser review logic', () => {
       'state',
       'popTextarea',
       'showToast',
-      `${source.slice(source.indexOf('  function openComposer('), source.indexOf('  function elementSelector('))}\nreturn openComposer;`,
+      `${source.slice(source.indexOf('  function openComposer('), source.indexOf('  function setPinning('))}\nreturn openComposer;`,
     )(state, { value: 'An existing whole-document comment' }, (text: string) => {
       message = text;
     });

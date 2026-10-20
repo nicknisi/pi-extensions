@@ -16,9 +16,9 @@ import {
   readArtifact,
   safeArtifactPath,
 } from './utils.js';
-import { renderCommentMarkdown, renderIndexPage, sseSnippet } from './templates.js';
+import { renderCommentMarkdown, renderIndexPage } from './templates.js';
 import { BAKED_RELOAD_SNIPPET } from './events.js';
-import { injectAnnotations } from './annotate.js';
+import { injectAnnotations, injectBridge, renderShell } from './annotate.js';
 import { renderRevisionComparison } from './review.js';
 import {
   artifactText,
@@ -61,6 +61,11 @@ export function setFeedbackSender(fn: FeedbackSender | null): () => void {
   return () => {
     if (feedbackSender === fn) feedbackSender = null;
   };
+}
+
+/** Origin the artifacts themselves are served from (`/c/<slug>.html`). Starts the server if needed. */
+export async function contentOrigin(): Promise<string> {
+  return `http://localhost:${await ensureServer()}`;
 }
 
 /** URL for a given slug (or index). Starts the server if needed. */
@@ -459,7 +464,7 @@ async function handleShare(req: IncomingMessage, res: ServerResponse): Promise<v
   const title = html.match(/<title>(.*?)<\/title>/s)?.[1]?.trim() || body.slug;
   try {
     // handleShare only runs on a live server, so state is set.
-    const result = await shareBaked(body.slug, title, method, { baseUrl: `http://${HOST}:${state!.port}` });
+    const result = await shareBaked(body.slug, title, method, { baseUrl: `http://localhost:${state!.port}` });
     sendJson(res, 200, { ok: true, ...result });
   } catch (e) {
     sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
@@ -468,13 +473,17 @@ async function handleShare(req: IncomingMessage, res: ServerResponse): Promise<v
 
 async function handle(req: IncomingMessage, res: ServerResponse, clients: Set<ServerResponse>): Promise<void> {
   // DNS rebinding: a site that points its own name at 127.0.0.1 reaches this port with its name as Host.
-  const port = req.socket.localPort;
+  const port = req.socket.localPort ?? 0;
   if (req.headers.host !== `${HOST}:${port}` && req.headers.host !== `localhost:${port}`) {
     sendJson(res, 403, { error: 'forbidden host' });
     return;
   }
   const parsedUrl = new URL(req.url ?? '/', `http://${HOST}`);
   const url = parsedUrl.pathname;
+  if (req.headers.host === `localhost:${port}`) {
+    handleContent(req, res, parsedUrl, port);
+    return;
+  }
   if (url.startsWith('/api/') && req.method !== 'GET') {
     const origin = req.headers.origin;
     if (
@@ -526,13 +535,6 @@ async function handle(req: IncomingMessage, res: ServerResponse, clients: Set<Se
     await handlePostClip(req, res);
     return;
   }
-  if (url === '/_artifacts/modern-screenshot.mjs' && req.method === 'GET') {
-    const lib = screenshotLibrary();
-    res.writeHead(lib ? 200 : 404, { 'Content-Type': 'text/javascript; charset=utf-8' });
-    res.end(lib ?? '');
-    return;
-  }
-
   // SSE endpoint
   if (url === '/events') {
     res.writeHead(200, {
@@ -569,40 +571,98 @@ async function handle(req: IncomingMessage, res: ServerResponse, clients: Set<Se
     return;
   }
 
-  // Static artifact file — normalize + prefix-check to prevent traversal outside artifacts dir
-  let decoded: string;
-  try {
-    decoded = decodeURIComponent(url);
-  } catch {
-    sendJson(res, 400, { error: 'invalid URL encoding' });
-    return;
-  }
-  const safe = safeArtifactPath(decoded);
-  if (!safe || !existsSync(safe) || !statSync(safe).isFile()) {
+  // Review page: the panel here, the artifact itself in a frame on its own origin.
+  const slug = /^\/([a-z0-9-]+)\.html$/i.exec(url)?.[1];
+  const html = slug && isSafeSlug(slug) ? readArtifact(slug) : null;
+  if (req.method !== 'GET' || !slug || html == null) {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('404 — artifact not found');
     return;
   }
-
-  const ext = extname(safe).toLowerCase();
-  const mime = MIME[ext] ?? 'application/octet-stream';
-
-  // Inject the annotation layer at serve time into .html artifact pages only —
-  // the stored file stays byte-clean.
-  if (ext === '.html') {
-    const slug = basename(safe).replace(/\.html$/, '');
-    const review = annotationState(slug);
-    // Files written before the shared event stream still bake the old reload
-    // snippet; serve the current one so old tabs stop holding extra connections.
-    const html = readFileSync(safe, 'utf-8').replace(BAKED_RELOAD_SNIPPET, () => sseSnippet(slug).trim());
-    const injected = injectAnnotations(html, slug, JSON.stringify(review.annotations), {
+  const review = annotationState(slug);
+  const contentOrigin = `http://localhost:${port}`;
+  res.writeHead(200, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-cache',
+    'Content-Security-Policy': "frame-ancestors 'none'",
+  });
+  res.end(
+    renderShell({
+      slug,
+      title: documentTitle(html) || slug,
+      annotationsJson: JSON.stringify(review.annotations),
       revision: review.revision,
-    });
-    res.writeHead(200, { 'Content-Type': mime });
-    res.end(injected);
+      contentUrl: `${contentOrigin}/c/${slug}.html`,
+      contentOrigin,
+    }),
+  );
+}
+
+/** The <title> text of a stored artifact, with the entities the renderer writes decoded. */
+function documentTitle(html: string): string {
+  const raw = html.match(/<title\b[^>]*>([\s\S]*?)<\/title\s*>/i)?.[1] ?? '';
+  return raw
+    .replace(/<[^>]*>/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&')
+    .trim();
+}
+
+/**
+ * The artifact's own origin (`localhost:<port>`): its documents under `/c/`
+ * and the screenshot library, nothing else. Its scripts never share an origin
+ * with the API, and review state and server files are not served here.
+ */
+function handleContent(req: IncomingMessage, res: ServerResponse, parsedUrl: URL, port: number): void {
+  const url = parsedUrl.pathname;
+  const notFound = () => {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('404 — artifact not found');
+  };
+  if (req.method !== 'GET') return notFound();
+  if (url === '/_artifacts/modern-screenshot.mjs') {
+    const lib = screenshotLibrary();
+    res.writeHead(lib ? 200 : 404, { 'Content-Type': 'text/javascript; charset=utf-8' });
+    res.end(lib ?? '');
     return;
   }
+  if (!url.startsWith('/c/')) return notFound();
+  let rel: string;
+  try {
+    rel = decodeURIComponent(url.slice(3));
+  } catch {
+    return notFound();
+  }
+  if (rel.split('/').some((seg) => seg.startsWith('.')) || /\.(annotations|previous)\.json$|\.clips\//.test(rel))
+    return notFound();
+  const safe = safeArtifactPath(rel);
+  if (!safe || !existsSync(safe) || !statSync(safe).isFile()) return notFound();
 
-  res.writeHead(200, { 'Content-Type': mime });
-  res.end(readFileSync(safe));
+  const ext = extname(safe).toLowerCase();
+  if (ext !== '.html') {
+    res.writeHead(200, {
+      'Content-Type': MIME[ext] ?? 'application/octet-stream',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    res.end(readFileSync(safe));
+    return;
+  }
+  // The review page reloads the frame itself, so the stored reload listener is dropped.
+  const slug = basename(safe).replace(/\.html$/, '');
+  const html = readFileSync(safe, 'utf-8').replace(BAKED_RELOAD_SNIPPET, '');
+  // Image/PDF share renders load the document on its own with a read-only review baked in.
+  const share = parsedUrl.searchParams.has('panel') || parsedUrl.searchParams.has('print');
+  res.writeHead(200, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-cache',
+    'Content-Security-Policy': `frame-ancestors http://${HOST}:${port}`,
+  });
+  res.end(
+    share
+      ? injectAnnotations(html, slug, JSON.stringify(annotationState(slug).annotations))
+      : injectBridge(html, `http://${HOST}:${port}`),
+  );
 }

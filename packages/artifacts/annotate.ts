@@ -1,50 +1,30 @@
 /**
- * Serve-time-injected annotation layer. `annotateSnippet(slug, annotationsJson)`
- * returns an escaped JS+CSS string that `server.ts` splices before `</body>`.
+ * The review layer, in two halves that talk only by message:
  *
- * Same convention as `sseSnippet`/`mermaidSnippet` in templates.ts: an exported
- * function that builds a `<script>` string by plain concatenation, with embedded
- * values passed through JSON.stringify (and `<` escaped so annotation JSON can
- * never break out of the tag). The root element carries the `data-artifact-annotate`
- * marker. Vanilla JS, zero deps, tolerant of arbitrary agent-authored DOM.
+ * - The panel (Review/Share buttons, composer, drafts, sending) owns every API
+ *   call. Live, it runs in a shell page on the server's origin.
+ * - The bridge runs inside the artifact document: selections, pins,
+ *   highlights, decisions, colors, screenshots. Live, the artifact is an iframe
+ *   on a different origin, so its own scripts cannot reach the API. Anything
+ *   the bridge says is a proposal: comment text and sending stay in the panel.
+ *
+ * Offline shares (baked files, image/PDF renders) put both halves in one
+ * document with a local channel and the panel read-only.
+ *
+ * Same convention as `sseSnippet`/`mermaidSnippet` in templates.ts: functions
+ * that build `<script>` strings by concatenation, embedded values passed
+ * through JSON.stringify with `<` escaped. Vanilla JS, zero deps, tolerant of
+ * arbitrary agent-authored DOM.
  */
 import { EVENT_HUB_JS } from './events.js';
 
-/**
- * Splice the annotation layer into an artifact HTML document, before `</body>`
- * (appended if absent). Used at serve time (live mode) and bake time (static).
- */
-export function injectAnnotations(
-  html: string,
-  slug: string,
-  annotationsJson: string,
-  opts?: { static?: boolean; revision?: string },
-): string {
-  const snippet = annotateSnippet(slug, annotationsJson, opts);
-  const bodyClose = html.search(/<\/body>/i);
-  return bodyClose !== -1 ? html.slice(0, bodyClose) + snippet + html.slice(bodyClose) : html + snippet;
-}
-
-/**
- * @param slug            the artifact slug (used for PUT/POST bodies)
- * @param annotationsJson `JSON.stringify(annotations)` — the sidecar contents
- * @param opts.static     baked-share mode: read-only (no annotate mode, editing,
- *                        or submit); highlights paint and comments sit behind a
- *                        "N comments" pill
- */
-export function annotateSnippet(
-  slug: string,
-  annotationsJson: string,
-  opts?: { static?: boolean; revision?: string },
-): string {
-  const staticMode = opts?.static === true;
-  // Escape `<` so a `</script>` inside any comment/quote cannot close the tag.
-  // The result is still valid JS (\u003c in a string/JSON literal), so hydration
-  // parses correctly.
-  const safeJson = annotationsJson.replace(/</g, '\\u003c');
-
-  return `
-<style>
+const PANEL_CSS = `
+:root { --aa-bg: Canvas; --aa-fg: CanvasText; --aa-accent: #d67858; }
+html.aa-shell { color-scheme: light dark; height: 100%; background: var(--aa-bg); }
+html.aa-shell body { margin: 0; height: 100%; overflow: hidden; background: var(--aa-bg); }
+#artifact-frame { position: fixed; top: 0; left: 0; width: 100%; height: 100%; border: 0; display: block; }
+body.aa-frame-narrow #artifact-frame { width: calc(100% - 400px); }
+@media (max-width: 900px) { body.aa-frame-narrow #artifact-frame { width: 100%; } }
 [data-artifact-annotate] {
   all: initial; user-select: none;
   /* Derived defaults; boot JS sets --aa-bg/--aa-fg/--aa-accent on <html> and
@@ -61,11 +41,6 @@ export function annotateSnippet(
 [data-artifact-annotate] :is(button, a, summary):focus-visible { outline: 2px solid var(--aa-accent); outline-offset: 3px; }
 [data-artifact-annotate] button:disabled { opacity: .45; cursor: default; }
 [data-artifact-annotate] .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-[data-aa-pin-tab] { outline: 2px dashed var(--aa-accent); outline-offset: 4px; cursor: crosshair; }
-[data-aa-pin-tab]:hover, [data-aa-pin-tab]:focus { outline-style: solid; }
-::highlight(artifact-comment) {
-  background-color: color-mix(in srgb, var(--aa-accent) 30%, transparent);
-}
 @keyframes aa-pop {
   from { opacity: 0; transform: scale(.96) translateY(-4px); }
   to { opacity: 1; transform: none; }
@@ -258,18 +233,348 @@ body.aa-review-layout { padding-right: 400px; }
   background: var(--aa-code-bg); border: 1px solid var(--aa-border);
   border-radius: 6px; padding: 8px; max-height: 200px; overflow: auto; margin-top: 8px;
 }
-</style>
-<script>
-(function () {
-  var SLUG = ${JSON.stringify(slug)};
-  var STATIC = ${staticMode ? 'true' : 'false'};
-  var REVISION = ${JSON.stringify(opts?.revision ?? '')};
+`;
+
+/** Styles the bridge adds to the artifact document itself. */
+const BRIDGE_CSS = `
+[data-aa-pin-tab] { outline: 2px dashed var(--accent, #d67858); outline-offset: 4px; cursor: crosshair; }
+[data-aa-pin-tab]:hover, [data-aa-pin-tab]:focus { outline-style: solid; }
+::highlight(artifact-comment) { background-color: color-mix(in srgb, var(--accent, #d67858) 30%, transparent); }
+`;
+
+/** Both halves in one document (offline shares): delivery is async, like postMessage. */
+const LOCAL_CHANNELS_JS = `function aaLocalChannels() {
+  var toPanel = [], toBridge = [];
+  function deliver(list, m) { setTimeout(function () { list.forEach(function (f) { f(m); }); }, 0); }
+  return {
+    panel: { send: function (m) { deliver(toBridge, m); }, on: function (f) { toPanel.push(f); } },
+    bridge: { send: function (m) { deliver(toPanel, m); }, on: function (f) { toBridge.push(f); } },
+  };
+}`;
+
+const BRIDGE_JS = `function aaBridge(channel, opts) {
+  var LOCAL = !!opts.local;
+  var mode = "off", pinning = false, annotations = [], disabled = false;
+  var PIN_TARGETS = "img,svg,figure,table,canvas,[data-artifact-anchor]";
+  var supportsHighlight = typeof CSS !== "undefined" && CSS.highlights && typeof Highlight !== "undefined";
+  function norm(s) { return String(s == null ? "" : s).replace(/\\s+/g, " ").trim(); }
+  // The panel's own DOM (offline shares) and the bridge's probe are never part of the document's text.
+  function inUi(n) { var el = n && (n.nodeType === 1 ? n : n.parentElement); return !!(el && el.closest && el.closest("[data-artifact-annotate]")); }
+
+  // ── anchoring ───────────────────────────────────────────────────────────
+  // Seam rule mirrors the server's tag stripping in feedback.ts: a boundary
+  // between two text nodes contributes a space iff the nodes live in different
+  // block-level subtrees (inline markup joins directly).
+  var INLINE_TAGS = { A:1, ABBR:1, B:1, BDI:1, BDO:1, CITE:1, CODE:1, DATA:1, DEL:1, EM:1, I:1, INS:1,
+    KBD:1, MARK:1, Q:1, S:1, SMALL:1, SPAN:1, STRONG:1, SUB:1, SUP:1, TIME:1, U:1, WBR:1 };
+
+  function blockOf(el) {
+    while (el && el !== document.body && INLINE_TAGS[el.tagName]) el = el.parentElement;
+    return el || document.body;
+  }
+
+  function textNodes() {
+    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode: function (node) {
+        var el = node.parentElement;
+        if (!el || inUi(el)) return NodeFilter.FILTER_REJECT;
+        var tag = el.tagName;
+        if (tag === "SCRIPT" || tag === "STYLE") return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    var out = [], n;
+    while ((n = walker.nextNode())) out.push(n);
+    return out;
+  }
+
+  // Joined visible text plus, per node, its start offset in that text.
+  function flowParts() {
+    var nodes = textNodes();
+    var parts = [];
+    var text = "";
+    for (var i = 0; i < nodes.length; i++) {
+      if (i > 0 && blockOf(nodes[i - 1].parentElement) !== blockOf(nodes[i].parentElement)) text += " ";
+      parts.push({ node: nodes[i], start: text.length });
+      text += nodes[i].textContent;
+    }
+    return { text: text, parts: parts };
+  }
+
+  function contextAround(range) {
+    try {
+      var flow = flowParts();
+      var sp = null, ep = null;
+      for (var i = 0; i < flow.parts.length; i++) {
+        if (flow.parts[i].node === range.startContainer) sp = flow.parts[i];
+        if (flow.parts[i].node === range.endContainer) ep = flow.parts[i];
+      }
+      if (!sp || !ep) return { prefix: "", suffix: "" };
+      var before = flow.text.slice(0, sp.start) + range.startContainer.textContent.slice(0, range.startOffset);
+      var after = range.endContainer.textContent.slice(range.endOffset) +
+        flow.text.slice(ep.start + range.endContainer.textContent.length);
+      return { prefix: norm(before).slice(-60), suffix: norm(after).slice(0, 60) };
+    } catch (_) { return { prefix: "", suffix: "" }; }
+  }
+
+  // Find the quote in the visible flow and map it back to a DOM Range.
+  // Whitespace-flexible: the normalized target spans element seams.
+  function findRange(quote) {
+    var target = norm(quote.exact);
+    if (!target) return null;
+    var flow = flowParts();
+    var re = new RegExp(target.split(" ").map(function (w) { return w.replace(/[^\\w]/g, "\\\\$&"); }).join("\\\\s+"), "g");
+    var hits = Array.from(flow.text.matchAll(re));
+    var m = hits.length === 1 ? hits[0] : hits.find(function (hit) {
+      return (!norm(quote.prefix) || norm(flow.text.slice(0, hit.index)).endsWith(norm(quote.prefix))) &&
+        (!norm(quote.suffix) || norm(flow.text.slice(hit.index + hit[0].length)).startsWith(norm(quote.suffix)));
+    });
+    if (!m) return null;
+    var startIdx = m.index;
+    var endIdx = m.index + m[0].length;
+    var sp = null, ep = null;
+    for (var i = 0; i < flow.parts.length; i++) {
+      var p = flow.parts[i];
+      var end = p.start + p.node.textContent.length;
+      if (sp === null && p.start <= startIdx && startIdx < end) sp = p;
+      if (p.start < endIdx && endIdx <= end) ep = p;
+    }
+    if (!sp || !ep) return null;
+    try {
+      var r = document.createRange();
+      r.setStart(sp.node, startIdx - sp.start);
+      r.setEnd(ep.node, endIdx - ep.start);
+      return r;
+    } catch (_) { return null; }
+  }
+
+  function elementSelector(el) {
+    if (el.id) return "#" + CSS.escape(el.id);
+    if (el.hasAttribute("data-artifact-anchor")) return "[data-artifact-anchor=" + JSON.stringify(el.getAttribute("data-artifact-anchor")) + "]";
+    var bits = [];
+    while (el && el !== document.body && bits.length < 5) {
+      var n = el.tagName.toLowerCase(), siblings = el.parentElement ? Array.prototype.filter.call(el.parentElement.children, function (x) { return x.tagName === el.tagName; }) : [];
+      bits.unshift(n + (siblings.length > 1 ? ":nth-of-type(" + (siblings.indexOf(el) + 1) + ")" : "")); el = el.parentElement;
+    }
+    return bits.join(" > ");
+  }
+  function findElement(anchor) {
+    try { var matches = document.querySelectorAll(anchor.selector); return matches.length === 1 && !inUi(matches[0]) ? matches[0] : null; } catch (_) { return null; }
+  }
+  function anchorOf(a) { return a && a.element ? findElement(a.element) : a && a.quote ? findRange(a.quote) : null; }
+  function pinTarget(el) {
+    return el && el.closest && !inUi(el) && el.closest(PIN_TARGETS);
+  }
+  function setPinning(active) {
+    pinning = active;
+    var targets = document.querySelectorAll(PIN_TARGETS);
+    for (var i = 0; i < targets.length; i++) {
+      var el = targets[i];
+      if (inUi(el)) continue;
+      if (active && !el.hasAttribute("data-aa-pin-tab")) {
+        el.setAttribute("data-aa-pin-tab", el.hasAttribute("tabindex") ? el.getAttribute("tabindex") : "absent"); el.setAttribute("tabindex", "0");
+      } else if (!active && el.hasAttribute("data-aa-pin-tab")) {
+        var prior = el.getAttribute("data-aa-pin-tab");
+        if (prior === "absent") el.removeAttribute("tabindex"); else el.setAttribute("tabindex", prior);
+        el.removeAttribute("data-aa-pin-tab");
+      }
+    }
+  }
+
+  function highlight() {
+    var hl = supportsHighlight ? new Highlight() : null, stale = [];
+    annotations.forEach(function (a) {
+      var r = a.quote ? findRange(a.quote) : null;
+      if (a.element ? !findElement(a.element) : !!a.quote && !r) stale.push(a.id);
+      if (r && hl) hl.add(r);
+    });
+    if (hl) CSS.highlights.set("artifact-comment", hl);
+    channel.send({ type: "stale", ids: stale });
+  }
+
+  // The most recent draft or sent record restores a fieldset; observing authored defaults never writes.
+  function restoreDecisions() {
+    document.querySelectorAll("fieldset[data-artifact-decision]").forEach(function (fs) {
+      var matching = annotations.filter(function (a) { return a.intent === "decision" && a.decisionId === fs.getAttribute("data-artifact-decision"); });
+      var drafts = matching.filter(function (a) { return !a.sentAt; });
+      var latest = (drafts.length ? drafts : matching).slice(-1)[0];
+      fs.querySelectorAll('input[type="radio"],input[type="checkbox"]').forEach(function (input) { input.checked = !!latest && Array.isArray(latest.decisionValues) && latest.decisionValues.indexOf(input.value) !== -1; });
+    });
+  }
+  function applyDisabled() {
+    document.querySelectorAll("fieldset[data-artifact-decision] input").forEach(function (input) { input.disabled = disabled; });
+  }
+
+  // ── palette ─────────────────────────────────────────────────────────────
+  // Host pages may define all, some, or none of the artifact CSS tokens. Honor
+  // the tokens that exist, fall back to the page's computed colors, guard
+  // bg/fg contrast, and hand the panel plain rgb() values (read back from a
+  // canvas pixel, so any CSS color syntax normalizes).
+  var probe = document.createElement("span");
+  probe.setAttribute("data-artifact-annotate", "");
+  probe.hidden = true;
+  document.body.appendChild(probe);
+  var pixel = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+  pixel.canvas.width = pixel.canvas.height = 1;
+  function toRgb(v) {
+    probe.style.color = ""; probe.style.color = v;
+    pixel.clearRect(0, 0, 1, 1); pixel.fillStyle = "#000"; pixel.fillStyle = getComputedStyle(probe).color; pixel.fillRect(0, 0, 1, 1);
+    var d = pixel.getImageData(0, 0, 1, 1).data;
+    return d[3] === 255 ? "rgb(" + d[0] + ", " + d[1] + ", " + d[2] + ")" : "rgba(" + d[0] + ", " + d[1] + ", " + d[2] + ", " + (d[3] / 255).toFixed(3) + ")";
+  }
+  function transparent(c) { return !c || /, 0(\\.0+)?\\)$/.test(c); }
+  function lum(c) { var m = c.match(/[\\d.]+/g); return (0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2]) / 255; }
+  function palette() {
+    var styles = getComputedStyle(document.documentElement);
+    function tok(name) { return styles.getPropertyValue(name).trim(); }
+    var bg = tok("--bg") ? toRgb(tok("--bg")) : "";
+    if (transparent(bg)) bg = toRgb(getComputedStyle(document.body).backgroundColor);
+    if (transparent(bg)) bg = toRgb(styles.backgroundColor);
+    if (transparent(bg)) bg = window.matchMedia("(prefers-color-scheme: dark)").matches ? "rgb(23, 22, 20)" : "rgb(255, 255, 255)";
+    var fg = toRgb(tok("--fg") || getComputedStyle(document.body).color || "#111111");
+    if (Math.abs(lum(bg) - lum(fg)) < 0.25) fg = lum(bg) < 0.5 ? "rgb(230, 230, 230)" : "rgb(17, 17, 17)";
+    var p = { bg: bg, fg: fg, accent: toRgb(tok("--accent") || "#d67858") };
+    if (tok("--muted")) p.muted = toRgb(tok("--muted"));
+    if (tok("--border")) p.border = toRgb(tok("--border"));
+    if (tok("--code-bg")) p.codeBg = toRgb(tok("--code-bg"));
+    return p;
+  }
+  var lastPalette = "";
+  function sendPalette() {
+    var p = palette(), key = JSON.stringify(p);
+    if (key !== lastPalette) { lastPalette = key; channel.send({ type: "palette", palette: p }); }
+  }
+  // Reader theme toggles flip attributes on <html>; recheck after any transition settles.
+  if (typeof MutationObserver !== "undefined") new MutationObserver(function () { sendPalette(); setTimeout(sendPalette, 350); }).observe(document.documentElement, { attributes: true });
+  var scheme = window.matchMedia("(prefers-color-scheme: dark)");
+  if (scheme.addEventListener) scheme.addEventListener("change", sendPalette);
+
+  // ── clips: a PNG of an anchored comment's region, as the reviewer sees it ──
+  var shotLib = null;
+  function loadShot() { return shotLib || (shotLib = import(opts.shotUrl)); }
+  function renderClip(target) {
+    if (!opts.shotUrl) return Promise.resolve(null);
+    var isRange = typeof Range !== "undefined" && target instanceof Range;
+    var node = isRange ? target.commonAncestorContainer : target;
+    var el = isRange ? blockOf(node.nodeType === 1 ? node : node.parentElement) : target;
+    // Measure everything now, before any await can scroll or reflow the page.
+    var box = el.getBoundingClientRect();
+    var rects = isRange ? Array.prototype.slice.call(target.getClientRects()) : [];
+    // shortcut: blocks taller than 4000px get no clip (canvas limits); render a sub-rect if long sections need one.
+    if (!box.width || !box.height || box.height > 4000) return Promise.resolve(null);
+    var top = 0, height = box.height;
+    if (rects.length) {
+      var minY = Math.min.apply(null, rects.map(function (r) { return r.top - box.top; }));
+      var maxY = Math.max.apply(null, rects.map(function (r) { return r.bottom - box.top; }));
+      top = Math.max(0, minY - 120); height = Math.min(box.height, maxY + 120) - top;
+    }
+    var scale = Math.min(window.devicePixelRatio || 1, 2, 1600 / box.width, 2400 / height);
+    var colors = palette();
+    return loadShot().then(function (lib) {
+      // The library drops the root's own margins, which revives UA defaults (a <p>'s 1em) inside the image.
+      return lib.domToCanvas(el, { scale: scale, backgroundColor: colors.bg, timeout: 5000, style: { margin: "0" },
+        filter: function (n) { return !(n.nodeType === 1 && n.hasAttribute("data-artifact-annotate")); } });
+    }).then(function (canvas) {
+      var ctx = canvas.getContext("2d");
+      ctx.globalAlpha = 0.3; ctx.fillStyle = colors.accent;
+      rects.forEach(function (r) { ctx.fillRect((r.left - box.left) * scale, (r.top - box.top) * scale, r.width * scale, r.height * scale); });
+      var out = canvas;
+      if (top > 0 || height < box.height) {
+        out = document.createElement("canvas");
+        out.width = canvas.width; out.height = Math.max(1, Math.round(height * scale));
+        out.getContext("2d").drawImage(canvas, 0, Math.round(top * scale), out.width, out.height, 0, 0, out.width, out.height);
+      }
+      var png = out.toDataURL("image/png");
+      return png.length > 7.5e6 ? null : png;
+    }).catch(function () { return null; });
+  }
+
+  // ── events ──────────────────────────────────────────────────────────────
+  function onSelect() {
+    if (mode !== "annotate" || pinning) return;
+    var sel = window.getSelection();
+    if (!sel || sel.isCollapsed) return;
+    var exact = sel.toString();
+    if (!norm(exact)) return;
+    var range = sel.getRangeAt(0);
+    if (inUi(range.startContainer) || inUi(range.endContainer)) return;
+    var ctx = contextAround(range);
+    var q = norm(exact);
+    if (q.length > 140) q = q.slice(0, 137) + "…";
+    channel.send({ type: "select", pending: { exact: exact, prefix: ctx.prefix, suffix: ctx.suffix }, label: '"' + q + '"' });
+  }
+  function choosePin(target) {
+    var el = pinTarget(target);
+    if (!pinning || !el) return false;
+    setPinning(false);
+    var label = el.getAttribute("aria-label") || el.getAttribute("alt") || el.getAttribute("data-artifact-anchor") || el.tagName.toLowerCase();
+    channel.send({ type: "pin", pending: { element: { selector: elementSelector(el), label: label } }, label: "Pinned: " + label });
+    return true;
+  }
+  document.addEventListener("click", function (e) { if (pinning && choosePin(e.target)) { e.preventDefault(); e.stopPropagation(); } }, true);
+  document.addEventListener("keydown", function (e) {
+    if (pinning && (e.key === "Enter" || e.key === " ") && choosePin(e.target)) { e.preventDefault(); e.stopPropagation(); }
+  }, true);
+  document.addEventListener("mouseup", function (e) { if (!inUi(e.target)) setTimeout(onSelect, 0); });
+  document.addEventListener("keyup", function (e) { if (e.shiftKey && !inUi(e.target)) onSelect(); });
+  document.querySelectorAll("fieldset[data-artifact-decision]").forEach(function (fs) {
+    fs.addEventListener("change", function () {
+      var legend = fs.querySelector("legend"), values = [], labels = [];
+      fs.querySelectorAll('input[type="radio"],input[type="checkbox"]').forEach(function (input) {
+        if (!input.checked) return;
+        values.push(input.value); var l = input.closest("label"); labels.push(l ? norm(l.textContent) : input.value);
+      });
+      channel.send({ type: "decision", id: fs.getAttribute("data-artifact-decision"), legend: legend ? norm(legend.textContent) : "Decision", values: values, labels: labels });
+    });
+  });
+  if (!LOCAL) {
+    // Escape here would otherwise never reach the panel, which lives in the parent page.
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "Escape") return;
+      if (pinning) { setPinning(false); channel.send({ type: "pinning", on: false }); } else channel.send({ type: "escape" });
+    });
+    // Most sites refuse to be framed: open other origins in a new tab instead of inside the frame.
+    document.addEventListener("click", function (e) {
+      var a = !e.defaultPrevented && e.target.closest && e.target.closest("a[href]");
+      if (!a || a.target || a.hasAttribute("download")) return;
+      var url;
+      try { url = new URL(a.href, location.href); } catch (_) { return; }
+      if (!/^https?:$/.test(url.protocol) || url.origin === location.origin) return;
+      a.target = "_blank";
+      if (!/\\bnoopener\\b/.test(a.rel)) a.rel = (a.rel + " noopener").trim();
+    });
+  }
+
+  channel.on(function (m) {
+    if (!m || typeof m.type !== "string") return;
+    if (m.type === "hello") { lastPalette = ""; sendPalette(); channel.send({ type: "ready" }); }
+    else if (m.type === "annotations" && Array.isArray(m.list)) { annotations = m.list; highlight(); restoreDecisions(); }
+    else if (m.type === "mode") mode = m.annotate ? "annotate" : "off";
+    else if (m.type === "pinning") setPinning(!!m.on);
+    else if (m.type === "disabled") { disabled = !!m.on; applyDisabled(); }
+    else if (m.type === "scroll") {
+      var target = anchorOf(m);
+      if (!target) channel.send({ type: "scrolled", found: false });
+      else (target.scrollIntoView ? target : target.startContainer.parentElement).scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    else if (m.type === "capture") {
+      var shot = anchorOf(m);
+      (shot ? renderClip(shot) : Promise.resolve(null)).then(function (png) { channel.send({ type: "clip", id: m.id, png: png }); });
+    }
+    else if (m.type === "reload" && !LOCAL) location.reload();
+  });
+  sendPalette();
+  channel.send({ type: "ready" });
+}`;
+
+const PANEL_JS = `function aaPanel(channel, cfg) {
+  var SLUG = cfg.slug, STATIC = !!cfg.static, REVISION = cfg.revision || "", SHELL = !!cfg.frame;
   var urlParams = new URLSearchParams(location.search);
-  window.__ARTIFACT_ANNOTATIONS__ = ${safeJson};
+  var initial = Array.isArray(cfg.annotations) ? cfg.annotations : [];
 
   var state = {
     mode: "off",
-    annotations: (window.__ARTIFACT_ANNOTATIONS__ || []).slice(),
+    annotations: initial.slice(),
     editing: null,
     pending: {},
     revision: REVISION,
@@ -279,11 +584,11 @@ body.aa-review-layout { padding-right: 400px; }
     sending: false,
     conflict: false,
     pendingSaves: 0,
-    baseline: (window.__ARTIFACT_ANNOTATIONS__ || []).map(clean),
+    baseline: initial.map(clean),
   };
   // ?panel=open pins the panel open for share renders; render() must not stomp it.
   var panelPinned = false;
-  var supportsHighlight = typeof CSS !== "undefined" && CSS.highlights && typeof Highlight !== "undefined";
+  var bridgeReady = false;
 
   // ── DOM scaffold ──────────────────────────────────────────────────────────
   var root = document.createElement("div");
@@ -291,41 +596,22 @@ body.aa-review-layout { padding-right: 400px; }
   document.body.appendChild(root);
 
   // ── palette ─────────────────────────────────────────────────────────────
-  // Host pages may define all, some, or none of the artifact CSS tokens (a raw
-  // full-doc artifact can define --bg/--fg/--accent and skip --code-bg, which
-  // left per-property fallbacks internally inconsistent — light field, light
-  // text). Derive one guaranteed-consistent palette instead: honor the host
-  // tokens that exist, fall back to the page's computed body colors, guard
-  // bg/fg contrast, and set --aa-* on <html> so even ::highlight resolves them.
-  var htmlStyles = getComputedStyle(document.documentElement);
-  var probe = document.createElement("span");
-  root.appendChild(probe);
-  function toRgb(v) { probe.style.color = v; return getComputedStyle(probe).color; }
-  function lum(v) {
-    var m = toRgb(v).match(/[\\d.]+/g);
-    if (!m || m.length < 3) return 1;
-    return (0.2126 * +m[0] + 0.7152 * +m[1] + 0.0722 * +m[2]) / 255;
+  // Colors come from the document side as rgb() values. They are only
+  // proposals: anything malformed or unreadable keeps the current colors.
+  function rgb(c) { return typeof c === "string" && /^rgba?\\(\\d{1,3}, \\d{1,3}, \\d{1,3}(, [\\d.]+)?\\)$/.test(c) ? c : ""; }
+  function lum(c) { var m = c.match(/[\\d.]+/g); return (0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2]) / 255; }
+  function applyPalette(p) {
+    if (!p || typeof p !== "object") return;
+    var bg = rgb(p.bg), fg = rgb(p.fg), host = document.documentElement.style;
+    if (!bg || !fg || Math.abs(lum(bg) - lum(fg)) < 0.25) return;
+    host.setProperty("--aa-bg", bg);
+    host.setProperty("--aa-fg", fg);
+    host.setProperty("--aa-accent", rgb(p.accent) || "#d67858");
+    [["muted", "--aa-host-muted"], ["border", "--aa-host-border"], ["codeBg", "--aa-host-code-bg"]].forEach(function (k) {
+      var v = rgb(p[k[0]]);
+      if (v) host.setProperty(k[1], v); else host.removeProperty(k[1]);
+    });
   }
-  function tok(name) { return htmlStyles.getPropertyValue(name).trim(); }
-  function isTransparent(c) { return !c || c === "transparent" || c === "rgba(0, 0, 0, 0)"; }
-
-  var bgT = tok("--bg"), hostBg = !!bgT;
-  if (!bgT) {
-    bgT = getComputedStyle(document.body).backgroundColor;
-    if (isTransparent(bgT)) bgT = htmlStyles.backgroundColor;
-    if (isTransparent(bgT)) bgT = window.matchMedia("(prefers-color-scheme: dark)").matches ? "#171614" : "#ffffff";
-  }
-  var fgT = tok("--fg") || getComputedStyle(document.body).color || "#111111", hostFg = !!tok("--fg");
-  if (Math.abs(lum(bgT) - lum(fgT)) < 0.25) { fgT = lum(bgT) < 0.5 ? "#e6e6e6" : "#111111"; hostFg = false; }
-
-  // Keep valid host tokens live so reader theme changes also recolor the review UI.
-  var host = document.documentElement.style;
-  host.setProperty("--aa-bg", hostBg ? "var(--bg)" : bgT);
-  host.setProperty("--aa-fg", hostFg ? "var(--fg)" : fgT);
-  host.setProperty("--aa-accent", tok("--accent") ? "var(--accent)" : "#d67858");
-  if (tok("--muted")) host.setProperty("--aa-host-muted", "var(--muted)");
-  if (tok("--border")) host.setProperty("--aa-host-border", "var(--border)");
-  if (tok("--code-bg")) host.setProperty("--aa-host-code-bg", "var(--code-bg)");
 
   var ui = document.createElement("div");
   ui.id = "artifact-ui";
@@ -400,6 +686,7 @@ body.aa-review-layout { padding-right: 400px; }
     state.mode = m;
     btn.classList.toggle("active", m === "annotate");
     if (m === "off") setPinning(false);
+    channel.send({ type: "mode", annotate: m === "annotate" });
     render();
     if (m === "off") btn.focus();
     else (STATIC ? panel.querySelector("[data-close]") : panel.querySelector("[data-edittext]") || popTextarea).focus();
@@ -451,107 +738,28 @@ body.aa-review-layout { padding-right: 400px; }
     if (conflict) { state.conflict = true; state.saveError = true; showToast("Review conflict. Copy your unsaved feedback before reloading."); return; }
     state.annotations = merged; state.baseline = server.map(clean);
     if (revision) state.revision = revision;
-    reHighlightAll(); render();
+    syncDoc(); render();
   }
 
-  // ── anchoring / highlights ──────────────────────────────────────────────
-  // Text flow over the visible page, EXCLUDING our own UI (the panel lists
-  // quotes — an unfiltered walk would anchor comments into the panel itself)
-  // and style/script text. Seam rule mirrors the server's tag stripping in
-  // feedback.ts: a boundary between two text nodes contributes a space iff the
-  // nodes live in different block-level subtrees (inline markup joins directly).
-  var INLINE_TAGS = { A:1, ABBR:1, B:1, BDI:1, BDO:1, CITE:1, CODE:1, DATA:1, DEL:1, EM:1, I:1, INS:1,
-    KBD:1, MARK:1, Q:1, S:1, SMALL:1, SPAN:1, STRONG:1, SUB:1, SUP:1, TIME:1, U:1, WBR:1 };
-
-  function blockOf(el) {
-    while (el && el !== document.body && INLINE_TAGS[el.tagName]) el = el.parentElement;
-    return el || document.body;
+  // ── document sync ───────────────────────────────────────────────────────
+  function syncDoc() { channel.send({ type: "annotations", list: state.annotations.map(clean) }); }
+  function syncAll() {
+    bridgeReady = true;
+    syncDoc();
+    channel.send({ type: "mode", annotate: state.mode === "annotate" });
+    channel.send({ type: "pinning", on: state.pinning });
+    channel.send({ type: "disabled", on: STATIC || state.sending });
   }
-
-  function textNodes() {
-    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
-      acceptNode: function (node) {
-        var el = node.parentElement;
-        if (!el) return NodeFilter.FILTER_REJECT;
-        if (el.closest("[data-artifact-annotate]")) return NodeFilter.FILTER_REJECT;
-        var tag = el.tagName;
-        if (tag === "SCRIPT" || tag === "STYLE") return NodeFilter.FILTER_REJECT;
-        return NodeFilter.FILTER_ACCEPT;
-      },
-    });
-    var out = [], n;
-    while ((n = walker.nextNode())) out.push(n);
-    return out;
-  }
-
-  // Joined visible text plus, per node, its start offset in that text.
-  function flowParts() {
-    var nodes = textNodes();
-    var parts = [];
-    var text = "";
-    for (var i = 0; i < nodes.length; i++) {
-      if (i > 0 && blockOf(nodes[i - 1].parentElement) !== blockOf(nodes[i].parentElement)) text += " ";
-      parts.push({ node: nodes[i], start: text.length });
-      text += nodes[i].textContent;
+  // Selections arrive from the document; take only well-formed anchors.
+  function pendingFrom(p) {
+    if (!p || typeof p !== "object") return null;
+    var text = function (v, max) { return typeof v === "string" && v.length <= max ? v : ""; };
+    if (p.element && typeof p.element === "object") {
+      var selector = text(p.element.selector, 2000), label = text(p.element.label, 1000);
+      return selector.trim() && label.trim() ? { element: { selector: selector, label: label } } : null;
     }
-    return { text: text, parts: parts };
-  }
-
-  function contextAround(range) {
-    try {
-      var flow = flowParts();
-      var sp = null, ep = null;
-      for (var i = 0; i < flow.parts.length; i++) {
-        if (flow.parts[i].node === range.startContainer) sp = flow.parts[i];
-        if (flow.parts[i].node === range.endContainer) ep = flow.parts[i];
-      }
-      if (!sp || !ep) return { prefix: "", suffix: "" };
-      var before = flow.text.slice(0, sp.start) + range.startContainer.textContent.slice(0, range.startOffset);
-      var after = range.endContainer.textContent.slice(range.endOffset) +
-        flow.text.slice(ep.start + range.endContainer.textContent.length);
-      return { prefix: norm(before).slice(-60), suffix: norm(after).slice(0, 60) };
-    } catch (_) { return { prefix: "", suffix: "" }; }
-  }
-
-  // Find the quote in the visible flow and map it back to a DOM Range.
-  // Whitespace-flexible: the normalized target spans element seams.
-  function findRange(quote) {
-    var target = norm(quote.exact);
-    if (!target) return null;
-    var flow = flowParts();
-    var re = new RegExp(target.split(" ").map(function (w) { return w.replace(/[^\\w]/g, "\\\\$&"); }).join("\\\\s+"), "g");
-    var hits = Array.from(flow.text.matchAll(re));
-    var m = hits.length === 1 ? hits[0] : hits.find(function (hit) {
-      return (!norm(quote.prefix) || norm(flow.text.slice(0, hit.index)).endsWith(norm(quote.prefix))) &&
-        (!norm(quote.suffix) || norm(flow.text.slice(hit.index + hit[0].length)).startsWith(norm(quote.suffix)));
-    });
-    if (!m) return null;
-    var startIdx = m.index;
-    var endIdx = m.index + m[0].length;
-    var sp = null, ep = null;
-    for (var i = 0; i < flow.parts.length; i++) {
-      var p = flow.parts[i];
-      var end = p.start + p.node.textContent.length;
-      if (sp === null && p.start <= startIdx && startIdx < end) sp = p;
-      if (p.start < endIdx && endIdx <= end) ep = p;
-    }
-    if (!sp || !ep) return null;
-    try {
-      var r = document.createRange();
-      r.setStart(sp.node, startIdx - sp.start);
-      r.setEnd(ep.node, endIdx - ep.start);
-      return r;
-    } catch (_) { return null; }
-  }
-
-  function reHighlightAll() {
-    var hl = supportsHighlight ? new Highlight() : null;
-    state.annotations.forEach(function (a) {
-      var r = a.quote ? findRange(a.quote) : null;
-      a._stale = a.element ? !findElement(a.element) : !!a.quote && !r;
-      if (r && hl) hl.add(r);
-    });
-    if (hl) CSS.highlights.set("artifact-comment", hl);
+    var exact = text(p.exact, 20000);
+    return norm(exact) ? { exact: exact, prefix: text(p.prefix, 1000), suffix: text(p.suffix, 1000) } : null;
   }
 
   // ── composer ────────────────────────────────────────────────────────────
@@ -623,52 +831,20 @@ body.aa-review-layout { padding-right: 400px; }
     if (state.pending.element) a.element = state.pending.element;
     state.annotations.push(a);
     state.editing = null;
-    resetComposer(); reHighlightAll(); render(); persist();
+    resetComposer(); syncDoc(); render(); persist();
     captureClip(a);
   }
 
-  // ── clips: a PNG of each anchored comment's region, as the reviewer saw it ──
-  var clipJobs = [], shotLib = null;
-  function loadShot() { return shotLib || (shotLib = import("/_artifacts/modern-screenshot.mjs")); }
-  function renderClip(target) {
-    var isRange = typeof Range !== "undefined" && target instanceof Range;
-    var node = isRange ? target.commonAncestorContainer : target;
-    var el = isRange ? blockOf(node.nodeType === 1 ? node : node.parentElement) : target;
-    // Measure everything now, before any await can scroll or reflow the page.
-    var box = el.getBoundingClientRect();
-    var rects = isRange ? Array.prototype.slice.call(target.getClientRects()) : [];
-    // shortcut: blocks taller than 4000px get no clip (canvas limits); render a sub-rect if long sections need one.
-    if (!box.width || !box.height || box.height > 4000) return Promise.resolve(null);
-    var top = 0, height = box.height;
-    if (rects.length) {
-      var minY = Math.min.apply(null, rects.map(function (r) { return r.top - box.top; }));
-      var maxY = Math.max.apply(null, rects.map(function (r) { return r.bottom - box.top; }));
-      top = Math.max(0, minY - 120); height = Math.min(box.height, maxY + 120) - top;
-    }
-    var scale = Math.min(window.devicePixelRatio || 1, 2, 1600 / box.width, 2400 / height);
-    return loadShot().then(function (lib) {
-      // The library drops the root's own margins, which revives UA defaults (a <p>'s 1em) inside the image.
-      return lib.domToCanvas(el, { scale: scale, backgroundColor: toRgb("var(--aa-bg)"), timeout: 5000, style: { margin: "0" },
-        filter: function (n) { return n !== root; } });
-    }).then(function (canvas) {
-      var ctx = canvas.getContext("2d");
-      ctx.globalAlpha = 0.3; ctx.fillStyle = toRgb("var(--aa-accent)");
-      rects.forEach(function (r) { ctx.fillRect((r.left - box.left) * scale, (r.top - box.top) * scale, r.width * scale, r.height * scale); });
-      var out = canvas;
-      if (top > 0 || height < box.height) {
-        out = document.createElement("canvas");
-        out.width = canvas.width; out.height = Math.max(1, Math.round(height * scale));
-        out.getContext("2d").drawImage(canvas, 0, Math.round(top * scale), out.width, out.height, 0, 0, out.width, out.height);
-      }
-      var png = out.toDataURL("image/png");
-      return png.length > 7.5e6 ? null : png;
-    }).catch(function () { return null; });
-  }
+  // ── clips: the document renders the PNG, the panel uploads it ─────────────
+  var clipJobs = [], clipWaits = {};
   // A clip is a nicety: failures are silent and never block or fail the review.
   function captureClip(a) {
-    var target = a.element ? findElement(a.element) : a.quote ? findRange(a.quote) : null;
-    if (STATIC || !target) return;
-    var job = renderClip(target).then(function (png) {
+    if (STATIC || (!a.quote && !a.element)) return;
+    var job = new Promise(function (done) {
+      clipWaits[a.id] = done;
+      setTimeout(function () { if (clipWaits[a.id] === done) { delete clipWaits[a.id]; done(null); } }, 10000);
+      channel.send({ type: "capture", id: a.id, quote: a.quote, element: a.element });
+    }).then(function (png) {
       if (!png) return;
       // Queued behind the save that wrote this comment, so the server knows its id.
       state.saving = state.saving.then(function () {
@@ -693,55 +869,14 @@ body.aa-review-layout { padding-right: 400px; }
     panel.querySelector(".general").hidden = !state.pending.exact && !state.pending.element;
     setTab("write"); popTextarea.focus();
   }
-  function elementSelector(el) {
-    if (el.id) return "#" + CSS.escape(el.id);
-    if (el.hasAttribute("data-artifact-anchor")) return "[data-artifact-anchor=" + JSON.stringify(el.getAttribute("data-artifact-anchor")) + "]";
-    var bits = [];
-    while (el && el !== document.body && bits.length < 5) {
-      var n = el.tagName.toLowerCase(), siblings = el.parentElement ? Array.prototype.filter.call(el.parentElement.children, function (x) { return x.tagName === el.tagName; }) : [];
-      bits.unshift(n + (siblings.length > 1 ? ":nth-of-type(" + (siblings.indexOf(el) + 1) + ")" : "")); el = el.parentElement;
-    }
-    return bits.join(" > ");
-  }
-  function findElement(anchor) {
-    try { var matches = document.querySelectorAll(anchor.selector); return matches.length === 1 && !root.contains(matches[0]) ? matches[0] : null; } catch (_) { return null; }
-  }
-  function pinTarget(el) {
-    return el && el.closest && !root.contains(el) && el.closest("img,svg,figure,table,canvas,[data-artifact-anchor]");
-  }
-  function setPinning(active) {
+  function setPinning(active, fromDoc) {
     state.pinning = active;
     var pin = panel.querySelector(".pin");
     pin.classList.toggle("active", active);
     pin.setAttribute("aria-pressed", String(active));
     pin.textContent = active ? "Cancel pin" : "Pin a visual";
     panel.querySelector(".pin-hint").hidden = !active;
-    var targets = document.querySelectorAll("img,svg,figure,table,canvas,[data-artifact-anchor]");
-    for (var i = 0; i < targets.length; i++) {
-      var el = targets[i];
-      if (root.contains(el)) continue;
-      if (active && !el.hasAttribute("data-aa-pin-tab")) {
-        el.setAttribute("data-aa-pin-tab", el.hasAttribute("tabindex") ? el.getAttribute("tabindex") : "absent"); el.setAttribute("tabindex", "0");
-      } else if (!active && el.hasAttribute("data-aa-pin-tab")) {
-        var prior = el.getAttribute("data-aa-pin-tab");
-        if (prior === "absent") el.removeAttribute("tabindex"); else el.setAttribute("tabindex", prior);
-        el.removeAttribute("data-aa-pin-tab");
-      }
-    }
-  }
-
-  function onSelect() {
-    if (STATIC || state.sending || state.pinning || state.mode !== "annotate") return;
-    var sel = window.getSelection();
-    if (!sel || sel.isCollapsed) return;
-    var exact = sel.toString();
-    if (!norm(exact)) return;
-    var range = sel.getRangeAt(0);
-    if (root.contains(range.startContainer) || root.contains(range.endContainer)) return;
-    var ctx = contextAround(range);
-    var q = norm(exact);
-    if (q.length > 140) q = q.slice(0, 137) + "…";
-    openComposer({ exact: exact, prefix: ctx.prefix, suffix: ctx.suffix }, '"' + q + '"');
+    if (!fromDoc) channel.send({ type: "pinning", on: active });
   }
 
   // ── render ────────────────────────────────────────────────────────────────
@@ -753,7 +888,8 @@ body.aa-review-layout { padding-right: 400px; }
     panel.classList.toggle("open", isOpen);
     btn.setAttribute("aria-expanded", String(isOpen));
     ui.classList.toggle("review-open", isOpen);
-    document.body.classList.toggle("aa-review-layout", isOpen && !!document.querySelector("style[data-base]"));
+    if (SHELL) document.body.classList.toggle("aa-frame-narrow", isOpen);
+    else document.body.classList.toggle("aa-review-layout", isOpen && !!document.querySelector("style[data-base]"));
     function item(a) {
       var i = state.annotations.indexOf(a), anchor = a.quote ? '"' + escapeHtml(a.quote.exact) + '"' : a.element ? "Visual: " + escapeHtml(a.element.label || a.element.selector) : "Whole document";
       var intent = '<span class="intent-label">' + escapeHtml(a.intent === "keep" ? "Keep this" : a.intent === "question" ? "Question" : a.intent === "decision" ? "Decision" : "Comment") + '</span>';
@@ -772,8 +908,7 @@ body.aa-review-layout { padding-right: 400px; }
     if (editValue !== null && listEl.querySelector("[data-edittext]")) { var restored = listEl.querySelector("[data-edittext]"); restored.value = editValue; if (editFocused) restored.focus(); }
     updateSendState();
     popover.querySelectorAll("input,textarea,button").forEach(function (control) { if (control !== addBtn) control.disabled = STATIC || state.sending; });
-    document.querySelectorAll('fieldset[data-artifact-decision] input').forEach(function (input) { input.disabled = STATIC || state.sending; });
-    restoreDecisions();
+    channel.send({ type: "disabled", on: STATIC || state.sending });
     state.annotations.forEach(function (a) { if (!STATIC) renderCommentHtml(a); });
   }
 
@@ -805,7 +940,7 @@ body.aa-review-layout { padding-right: 400px; }
         state.annotations = Array.isArray(res.body.annotations) ? res.body.annotations : state.annotations.map(function (a) { if (!a.sentAt) a.sentAt = new Date().toISOString(); return a; });
         if (res.body.revision) state.revision = res.body.revision;
         state.baseline = state.annotations.map(clean);
-        reHighlightAll(); render(); showToast("Sent to the agent");
+        syncDoc(); render(); showToast("Sent to the agent");
       } else if (res.status === 503 && res.body.feedback) {
         showFeedbackFallback(res.body.feedback);
         sendBtn.disabled = state.annotations.length === 0;
@@ -840,6 +975,20 @@ body.aa-review-layout { padding-right: 400px; }
     showToast("No live session — copy the feedback instead.");
   }
 
+  // ── decisions ───────────────────────────────────────────────────────────
+  // Decisions are ordinary draft annotations, built from what the document reports.
+  function decisionAnnotation(info) {
+    if (STATIC || state.sending || typeof info.id !== "string" || !info.id || info.id.length > 200) return;
+    var list = function (v) { return Array.isArray(v) ? v.slice(0, 100).map(function (x) { return String(x).slice(0, 1000); }) : []; };
+    var id = info.id, values = list(info.values), labels = list(info.labels);
+    var old = state.annotations.filter(function (a) { return !a.sentAt && a.intent === "decision" && a.decisionId === id; })[0];
+    var hasSent = state.annotations.some(function (a) { return a.sentAt && a.intent === "decision" && a.decisionId === id; });
+    if (!values.length && !hasSent) { if (old) { state.annotations.splice(state.annotations.indexOf(old), 1); persist(); render(); } return; }
+    var comment = String(info.legend || "Decision").slice(0, 1000) + ": " + (values.length ? labels.join(", ") + " (" + values.join(", ") + ")" : "None selected");
+    if (old) { old.comment = comment; old.decisionValues = values; old._html = undefined; } else state.annotations.push({ id:newId(), comment:comment, createdAt:new Date().toISOString(), intent:"decision", decisionId:id, decisionValues:values });
+    persist(); render();
+  }
+
   // ── events ─────────────────────────────────────────────────────────────
   btn.addEventListener("click", function () {
     panelPinned = false;
@@ -852,12 +1001,12 @@ body.aa-review-layout { padding-right: 400px; }
     if (t.classList.contains("general") && !t.classList.contains("reload-artifact")) { openComposer({}); return; }
     if (t.classList.contains("pin")) { setPinning(!state.pinning); showToast(state.pinning ? "Click or press Enter on an element to pin it" : "Pinning cancelled"); return; }
     var scroll = t.getAttribute("data-scroll");
-    if (scroll != null) { var a0 = state.annotations[parseInt(scroll, 10)], target = a0 && (a0.element ? findElement(a0.element) : a0.quote && findRange(a0.quote)); if (target) { if (target.scrollIntoView) target.scrollIntoView({ behavior:"smooth", block:"center" }); else target.startContainer.parentElement.scrollIntoView({ behavior:"smooth", block:"center" }); } else showToast("Anchor is no longer in this artifact."); return; }
+    if (scroll != null) { var a0 = state.annotations[parseInt(scroll, 10)]; if (a0) channel.send({ type: "scroll", quote: a0.quote, element: a0.element }); return; }
     var del = t.getAttribute("data-del");
     if (del != null) {
       state.annotations.splice(parseInt(del, 10), 1);
       state.editing = null;
-      reHighlightAll(); render(); persist();
+      syncDoc(); render(); persist();
       return;
     }
     var edit = t.getAttribute("data-edit");
@@ -886,20 +1035,6 @@ body.aa-review-layout { padding-right: 400px; }
     }
   });
   sendBtn.addEventListener("click", send);
-  function choosePin(target) {
-    var el = pinTarget(target);
-    if (!state.pinning || !el) return false;
-    setPinning(false);
-    var label = el.getAttribute("aria-label") || el.getAttribute("alt") || el.getAttribute("data-artifact-anchor") || el.tagName.toLowerCase();
-    openComposer({ element: { selector: elementSelector(el), label: label } }, "Pinned: " + label);
-    return true;
-  }
-  document.addEventListener("click", function (e) { if (state.pinning && choosePin(e.target)) { e.preventDefault(); e.stopPropagation(); } }, true);
-  document.addEventListener("keydown", function (e) {
-    if (state.pinning && (e.key === "Enter" || e.key === " ") && choosePin(e.target)) { e.preventDefault(); e.stopPropagation(); }
-  }, true);
-  document.addEventListener("mouseup", function (e) { if (!root.contains(e.target)) setTimeout(onSelect, 0); });
-  document.addEventListener("keyup", function (e) { if (e.shiftKey && !root.contains(e.target)) onSelect(); });
   popover.addEventListener("click", function (e) {
     var t = e.target;
     if (state.sending) return;
@@ -953,46 +1088,48 @@ body.aa-review-layout { padding-right: 400px; }
     document.addEventListener("click", function () { shareMenu.style.display = "none"; });
   }
 
-  document.addEventListener("keydown", function (e) {
-    if (e.key !== "Escape") return;
+  function escape() {
     if (shareMenu && shareMenu.style.display === "block") { shareMenu.style.display = "none"; return; }
     if (state.pinning) { setPinning(false); return; }
     if (state.editing != null) { state.editing = null; render(); return; }
     if (state.mode === "annotate") setMode("off");
+  }
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") escape(); });
+
+  // ── messages from the document ────────────────────────────────────────────
+  // Everything here is a proposal from content the agent wrote: it can offer an
+  // anchor, a decision, or a screenshot, but never comment text or a send.
+  channel.on(function (m) {
+    if (!m || typeof m.type !== "string") return;
+    if (m.type === "ready") syncAll();
+    else if (m.type === "palette") applyPalette(m.palette);
+    else if (m.type === "select" || m.type === "pin") {
+      if (STATIC || state.sending || state.mode !== "annotate") return;
+      if (m.type === "pin") setPinning(false, true);
+      var pending = pendingFrom(m.pending);
+      if (pending) openComposer(pending, String(m.label || "").slice(0, 200));
+    }
+    else if (m.type === "pinning" && !m.on) setPinning(false, true);
+    else if (m.type === "escape") escape();
+    else if (m.type === "decision") decisionAnnotation(m);
+    else if (m.type === "stale" && Array.isArray(m.ids)) { state.annotations.forEach(function (a) { a._stale = m.ids.indexOf(a.id) !== -1; }); render(); }
+    else if (m.type === "clip") {
+      var done = clipWaits[m.id];
+      if (!done) return;
+      delete clipWaits[m.id];
+      done(typeof m.png === "string" && m.png.indexOf("data:image/png;base64,") === 0 ? m.png : null);
+    }
+    else if (m.type === "scrolled" && !m.found) showToast("Anchor is no longer in this artifact.");
   });
 
-  // Decisions are ordinary draft annotations. The most recent draft or sent
-  // record restores a fieldset, but merely observing authored defaults never writes.
-  function decisionAnnotation(fs) {
-    var id = fs.getAttribute("data-artifact-decision"), legend = fs.querySelector("legend");
-    var inputs = fs.querySelectorAll('input[type="radio"],input[type="checkbox"]'), values = [], labels = [];
-    for (var i = 0; i < inputs.length; i++) if (inputs[i].checked) { values.push(inputs[i].value); var l = inputs[i].closest("label"); labels.push(l ? norm(l.textContent) : inputs[i].value); }
-    var old = state.annotations.filter(function (a) { return !a.sentAt && a.intent === "decision" && a.decisionId === id; })[0];
-    var hasSent = state.annotations.some(function (a) { return a.sentAt && a.intent === "decision" && a.decisionId === id; });
-    if (!values.length && !hasSent) { if (old) { state.annotations.splice(state.annotations.indexOf(old), 1); persist(); render(); } return; }
-    var comment = (legend ? norm(legend.textContent) : "Decision") + ": " + (values.length ? labels.join(", ") + " (" + values.join(", ") + ")" : "None selected");
-    if (old) { old.comment = comment; old.decisionValues = values; old._html = undefined; } else state.annotations.push({ id:newId(), comment:comment, createdAt:new Date().toISOString(), intent:"decision", decisionId:id, decisionValues:values });
-    persist(); render();
+  // Reloading the document never touches the review: drafts live out here.
+  function reloadFrame() {
+    if (!SHELL) return;
+    if (bridgeReady) { bridgeReady = false; channel.send({ type: "reload" }); }
+    else cfg.frame.src = cfg.frame.src;
   }
-  function restoreDecisions() {
-    document.querySelectorAll("fieldset[data-artifact-decision]").forEach(function (fs) {
-      var matching = state.annotations.filter(function (a) { return a.intent === "decision" && a.decisionId === fs.getAttribute("data-artifact-decision"); });
-      var drafts = matching.filter(function (a) { return !a.sentAt; });
-      var latest = (drafts.length ? drafts : matching).slice(-1)[0];
-      fs.querySelectorAll('input[type="radio"],input[type="checkbox"]').forEach(function (input) { input.checked = !!latest && Array.isArray(latest.decisionValues) && latest.decisionValues.indexOf(input.value) !== -1; });
-    });
-  }
-  var fieldsets = document.querySelectorAll("fieldset[data-artifact-decision]");
-  for (var fi = 0; fi < fieldsets.length; fi++) {
-    (function (fs) {
-      var id = fs.getAttribute("data-artifact-decision"), matching = state.annotations.filter(function (a) { return a.intent === "decision" && a.decisionId === id; }), drafts = matching.filter(function(a) { return !a.sentAt; }), latest = (drafts.length ? drafts : matching)[(drafts.length ? drafts : matching).length - 1];
-      if (latest && Array.isArray(latest.decisionValues)) { var ins = fs.querySelectorAll('input[type="radio"],input[type="checkbox"]'); for (var j=0;j<ins.length;j++) ins[j].checked = latest.decisionValues.indexOf(ins[j].value) !== -1; }
-      if (STATIC) { var all = fs.querySelectorAll("input"); for (var k=0;k<all.length;k++) all[k].disabled = true; }
-      else fs.addEventListener("change", function () { decisionAnnotation(fs); });
-    })(fieldsets[fi]);
-  }
-  if (!STATIC && typeof EventSource !== "undefined") {
-    ${EVENT_HUB_JS}
+  if (!STATIC && window.__artifactEvents) {
+    window.__artifactEvents.on(SLUG, "reload", function (e) { if (e.data === SLUG || e.data === "*") reloadFrame(); });
     window.__artifactEvents.on(SLUG, "annotations", function (e) {
       if (e.data !== SLUG) return;
       state.saving = state.saving.then(function () {
@@ -1003,26 +1140,14 @@ body.aa-review-layout { padding-right: 400px; }
     });
   }
   function hasUnsavedWork() { return state.sending || state.pendingSaves > 0 || state.saveError || state.editing !== null || (state.pending && popTextarea.value.trim()); }
-  if (!STATIC) {
-    window.addEventListener("beforeunload", function (e) { if (hasUnsavedWork()) { e.preventDefault(); e.returnValue = ""; } });
-    window.addEventListener("artifact:before-reload", function (e) {
-      if (!hasUnsavedWork()) return;
-      e.preventDefault();
-      var reload = panel.querySelector(".reload-artifact");
-      if (!reload) {
-        reload = document.createElement("button"); reload.type = "button"; reload.className = "general reload-artifact";
-        reload.textContent = "Artifact updated. Reload when ready";
-        reload.addEventListener("click", function () { if (!hasUnsavedWork() || window.confirm("Reload and discard unsaved feedback?")) location.reload(); });
-        panel.querySelector("footer").prepend(reload);
-      }
-      showToast("Artifact updated. Finish saving your feedback before reloading.");
-    });
-  }
+  if (!STATIC) window.addEventListener("beforeunload", function (e) { if (hasUnsavedWork()) { e.preventDefault(); e.returnValue = ""; } });
+
   // ── boot ────────────────────────────────────────────────────────────────
   btn.setAttribute("aria-controls", panel.id);
   if (STATIC) { panel.querySelector("footer").style.display = "none"; panel.querySelector(".compare").style.display = "none"; popover.hidden = true; }
-  reHighlightAll();
   render();
+  channel.send({ type: "hello" });
+  if (SHELL) cfg.frame.addEventListener("load", function () { channel.send({ type: "hello" }); });
 
   // Share-render modes: ?panel=open shows the comments panel (image shares);
   // ?print=1 appends a plain comments section for print/PDF (fixed UI is
@@ -1057,6 +1182,114 @@ body.aa-review-layout { padding-right: 400px; }
     if (artFooter && artFooter.parentElement) artFooter.parentElement.insertBefore(printSection, artFooter);
     else document.body.appendChild(printSection);
   }
+}`;
+
+/** `<` escaped so a `</script>` inside any comment or quote cannot close the tag. */
+function scriptJson(value: string): string {
+  return value.replace(/</g, '\\u003c');
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function beforeBodyClose(html: string, snippet: string): string {
+  const bodyClose = html.search(/<\/body>/i);
+  return bodyClose !== -1 ? html.slice(0, bodyClose) + snippet + html.slice(bodyClose) : html + snippet;
+}
+
+/**
+ * Read-only review layer for offline shares (baked files, image/PDF renders):
+ * the artifact plus a panel and highlights in one document. It makes no API
+ * calls; `?panel=open` and `?print=1` select the share-render modes.
+ */
+export function annotateSnippet(slug: string, annotationsJson: string): string {
+  return `
+<style data-artifact-annotate-style>${PANEL_CSS}${BRIDGE_CSS}</style>
+<script>
+(function () {
+  ${LOCAL_CHANNELS_JS}
+  ${BRIDGE_JS}
+  ${PANEL_JS}
+  var channels = aaLocalChannels();
+  aaBridge(channels.bridge, { local: true, shotUrl: null });
+  aaPanel(channels.panel, { slug: ${JSON.stringify(slug)}, static: true, revision: "", annotations: ${scriptJson(annotationsJson)} });
 })();
 </script>`;
+}
+
+/** Splice the read-only review layer into an artifact HTML document, before `</body>`. */
+export function injectAnnotations(html: string, slug: string, annotationsJson: string): string {
+  return beforeBodyClose(html, annotateSnippet(slug, annotationsJson));
+}
+
+/**
+ * The live review page: the panel on the server's origin, the artifact in an
+ * iframe on `contentOrigin`. The sandbox keeps the artifact from navigating
+ * this page; the separate origin keeps it from calling the API.
+ */
+export function renderShell(opts: {
+  slug: string;
+  title: string;
+  annotationsJson: string;
+  revision: string;
+  contentUrl: string;
+  contentOrigin: string;
+}): string {
+  return `<!DOCTYPE html>
+<html lang="en" class="aa-shell">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${escapeHtml(opts.title)}</title>
+<style>${PANEL_CSS}</style>
+</head>
+<body>
+<iframe id="artifact-frame" title="${escapeHtml(opts.title)}" src="${escapeHtml(opts.contentUrl)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads" allow="clipboard-write; fullscreen"></iframe>
+<script>
+(function () {
+  ${EVENT_HUB_JS}
+  ${PANEL_JS}
+  var frame = document.getElementById("artifact-frame"), CONTENT_ORIGIN = ${JSON.stringify(opts.contentOrigin)};
+  var channel = {
+    send: function (m) { try { frame.contentWindow.postMessage({ aa: m }, CONTENT_ORIGIN); } catch (_) {} },
+    on: function (fn) {
+      window.addEventListener("message", function (e) {
+        if (e.source === frame.contentWindow && e.origin === CONTENT_ORIGIN && e.data && e.data.aa) fn(e.data.aa);
+      });
+    },
+  };
+  aaPanel(channel, { slug: ${JSON.stringify(opts.slug)}, static: false, revision: ${JSON.stringify(opts.revision)}, annotations: ${scriptJson(opts.annotationsJson)}, frame: frame });
+})();
+</script>
+</body>
+</html>`;
+}
+
+/**
+ * The document half for the live page. Inert when the artifact is opened on
+ * its own rather than inside the review page on `parentOrigin`.
+ */
+export function injectBridge(html: string, parentOrigin: string): string {
+  return beforeBodyClose(
+    html,
+    `
+<style data-artifact-bridge>${BRIDGE_CSS}</style>
+<script data-artifact-bridge>
+(function () {
+  if (window.parent === window) return;
+  var PARENT_ORIGIN = ${JSON.stringify(parentOrigin)};
+  var channel = {
+    send: function (m) { window.parent.postMessage({ aa: m }, PARENT_ORIGIN); },
+    on: function (fn) {
+      window.addEventListener("message", function (e) {
+        if (e.source === window.parent && e.origin === PARENT_ORIGIN && e.data && e.data.aa) fn(e.data.aa);
+      });
+    },
+  };
+  ${BRIDGE_JS}
+  aaBridge(channel, { local: false, shotUrl: "/_artifacts/modern-screenshot.mjs" });
+})();
+</script>`,
+  );
 }

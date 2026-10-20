@@ -10,7 +10,15 @@ import { answerQuestion, shareBaked } from './feedback.js';
 import { provideArtifacts } from './service.js';
 import { renderReviewContent, savePreviousRevision } from './review.js';
 
-import { artifactUrl, isRunning, notifyAnnotations, notifyReload, runningPort, stopServer } from './server.js';
+import {
+  artifactUrl,
+  contentOrigin,
+  isRunning,
+  notifyAnnotations,
+  notifyReload,
+  runningPort,
+  stopServer,
+} from './server.js';
 import type { FeedbackSender } from './server.js';
 import {
   slugify,
@@ -393,7 +401,7 @@ export default function artifacts(pi: ExtensionAPI) {
             };
           }
           if (method === 'image' || method === 'pdf') {
-            const baseUrl = new URL(await artifactUrl(slug)).origin; // starts the lazy server Chrome will hit
+            const baseUrl = await contentOrigin(); // starts the lazy server Chrome will hit
             const res = await shareBaked(slug, title, method, {
               baseUrl,
               bake,
