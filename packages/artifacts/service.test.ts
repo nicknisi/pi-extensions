@@ -40,6 +40,8 @@ function discover(events: ReturnType<typeof bus>, extra = {}) {
   events.emit(ARTIFACTS_SERVICE.discoveryEvent, { ...extra, offer: (offer: unknown) => offers.push(offer) });
   return offers;
 }
+/** Where the review page's frame loads the artifact from. */
+const contentUrl = (url: string) => url.replace('//127.0.0.1:', '//localhost:').replace(/\/([^/]+\.html)$/, '/c/$1');
 const cwd = process.cwd();
 let temp: string;
 let events: ReturnType<typeof bus>;
@@ -103,7 +105,7 @@ it('publishing the same contract pushes a real SSE reload for the stable slug', 
     const updated = await api.publish({ title: 'Live contract', html: '<h1 id="change">Verified</h1>' });
     expect(updated.url).toBe(first.url);
     expect(await reload).toContain(`event: reload\ndata: ${first.slug}`);
-    expect(await (await fetch(first.url)).text()).toContain('Verified');
+    expect(await (await fetch(contentUrl(first.url))).text()).toContain('Verified');
     await reader.cancel();
   } finally {
     clearTimeout(timer);
@@ -198,9 +200,11 @@ it('already-written pages are served with the shared stream instead of their old
     '<script data-artifact-reload>var es = new EventSource("/events");</script>',
   );
   writeArtifact(page.slug, legacy);
-  const served = await (await fetch(page.url)).text();
-  expect(served).not.toContain('var es = new EventSource');
-  expect(served).toContain('__artifactEvents.on(');
+  // The review page owns the one stream and reloads the frame; the document keeps no listener of its own.
+  const content = await (await fetch(contentUrl(page.url))).text();
+  expect(content).toContain('old');
+  expect(content).not.toContain('EventSource');
+  expect(await (await fetch(page.url)).text()).toContain('__artifactEvents.on(');
 });
 
 it('offers synchronously to multiple consumers, rejects mismatches, and validates own callable methods', () => {

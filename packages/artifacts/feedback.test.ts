@@ -99,7 +99,8 @@ it('sends general, keep, element, question and decision feedback once and preser
   expect(hydration).toContain('Because it is simpler.');
   const shared = bakeAnnotations(slug)!;
   expect(shared.count).toBe(5);
-  expect(shared.html).toContain('STATIC = true');
+  expect(shared.html).toContain('static: true');
+  expect(shared.html).not.toContain('<iframe');
   expect(shared.html).not.toContain('<script data-artifact-reload>');
 });
 
@@ -130,18 +131,65 @@ it('answers only requests addressed to this server by host (DNS rebinding)', asy
       req.on('error', reject);
       req.end();
     });
-  for (const path of [`/api/annotations?slug=${slug}`, `/${slug}.html`]) {
+  for (const path of [`/api/annotations?slug=${slug}`, `/${slug}.html`, `/c/${slug}.html`]) {
     expect(await status(path, `rebind.example:${port}`)).toBe(403);
     expect(await status(path, `127.0.0.1:${Number(port) + 1}`)).toBe(403);
-    expect(await status(path, `127.0.0.1:${port}`)).toBe(200);
-    expect(await status(path, `localhost:${port}`)).toBe(200);
   }
+  // The review page and API answer on 127.0.0.1; the artifact itself only on localhost.
+  expect(await status(`/api/annotations?slug=${slug}`, `127.0.0.1:${port}`)).toBe(200);
+  expect(await status(`/${slug}.html`, `127.0.0.1:${port}`)).toBe(200);
+  expect(await status(`/c/${slug}.html`, `127.0.0.1:${port}`)).toBe(404);
+  expect(await status(`/c/${slug}.html`, `localhost:${port}`)).toBe(200);
+  expect(await status(`/api/annotations?slug=${slug}`, `localhost:${port}`)).toBe(404);
+  expect(await status(`/${slug}.html`, `localhost:${port}`)).toBe(404);
+});
+
+it('keeps the artifact on its own origin, away from the API and review state', async () => {
+  const port = new URL(base).port;
+  const content = `http://localhost:${port}`;
+  writeAnnotations(slug, [annotation('a', { quote: { exact: 'Original' } })]);
+  // The review page frames the document from the other origin and cannot itself be framed.
+  const page = await fetch(`${base}/${slug}.html`);
+  expect(page.headers.get('content-security-policy')).toBe("frame-ancestors 'none'");
+  expect(await page.text()).toContain(
+    `<iframe id="artifact-frame" title="Review test" src="${content}/c/${slug}.html"`,
+  );
+  const doc = await fetch(`${content}/c/${slug}.html`);
+  expect(doc.headers.get('content-security-policy')).toBe(`frame-ancestors http://127.0.0.1:${port}`);
+  const docHtml = await doc.text();
+  expect(docHtml).toContain('data-artifact-bridge');
+  expect(docHtml).not.toContain('data-artifact-reload');
+  expect(docHtml).not.toContain('/api/');
+  // Share renders get the read-only layer instead of the bridge.
+  expect(await (await fetch(`${content}/c/${slug}.html?panel=open`)).text()).toContain('static: true');
+  for (const path of [
+    `${slug}.annotations.json`,
+    '.server-port',
+    `${slug}.clips/a.png`,
+    `${slug}.previous.json`,
+    '..%2Fx',
+  ])
+    expect((await fetch(`${content}/c/${path}`)).status).toBe(404);
+  // A write from the artifact's origin is refused, as a forged review would be.
+  const forged = await new Promise<number>((resolve, reject) => {
+    const req = httpRequest(
+      `${base}/api/feedback`,
+      { method: 'POST', headers: { origin: content, 'content-type': 'application/json' } },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      },
+    );
+    req.on('error', reject);
+    req.end(JSON.stringify({ slug }));
+  });
+  expect(forged).toBe(403);
 });
 
 it('stores a screenshot per saved comment, names it in the feedback, and prunes it with the comment', async () => {
   const png =
     'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
-  const lib = await fetch(`${base}/_artifacts/modern-screenshot.mjs`);
+  const lib = await fetch(`${base.replace('127.0.0.1', 'localhost')}/_artifacts/modern-screenshot.mjs`);
   expect(lib.status).toBe(200);
   expect(await lib.text()).toContain('domToCanvas');
   // Only a saved comment, a filename-safe id, and real PNG bytes are accepted.

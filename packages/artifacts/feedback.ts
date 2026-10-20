@@ -305,7 +305,7 @@ export function bakeAnnotations(slug: string): { html: string; count: number } |
   const html = readArtifact(slug);
   if (html == null) return null;
   const offline = html.replace(/<script data-artifact-reload>[\s\S]*?<\/script>/gi, '');
-  return { html: injectAnnotations(offline, slug, JSON.stringify(anns), { static: true }), count: anns.length };
+  return { html: injectAnnotations(offline, slug, JSON.stringify(anns)), count: anns.length };
 }
 
 export interface ShareResult {
@@ -334,12 +334,12 @@ export async function shareBaked(
   opts?: { public?: boolean; bake?: boolean; baseUrl?: string; width?: number; height?: number },
 ): Promise<ShareResult> {
   if (method === 'image' || method === 'pdf') {
-    if (!opts?.baseUrl) throw new Error('image/pdf shares need baseUrl (the running server origin)');
+    if (!opts?.baseUrl) throw new Error('image/pdf shares need baseUrl (the server content origin)');
     const count = opts.bake === false ? 0 : readAnnotations(slug).length;
     // Image: open the comments panel for the shot. PDF: print rules hide the
     // fixed UI, so comments go in as an end-of-document section instead.
     const query = count > 0 ? (method === 'pdf' ? '?print=1' : '?panel=open') : '';
-    const url = `${opts.baseUrl}/${slug}.html${query}`;
+    const url = `${opts.baseUrl}/c/${slug}.html${query}`;
     if (method === 'image') {
       const pngPath = join(artifactDir(), `${slug}.png`);
       await screenshotUrl(url, pngPath, opts.width ?? 1280, opts.height ?? 800);
