@@ -20,11 +20,9 @@ import { join } from 'node:path';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let step = 'boot';
+// Throw rather than exit, so the finally blocks close Chrome and the server.
 function assert(cond, why) {
-  if (!cond) {
-    console.error(`FAIL ${step}: ${why}`);
-    process.exit(1);
-  }
+  if (!cond) throw new Error(`FAIL ${step}: ${why}`);
 }
 async function waitFor(fn, why, ms = 10000) {
   const end = Date.now() + ms;
@@ -357,9 +355,12 @@ try {
   await run('own-origin', chromePath, [], env);
   // Safari can't resolve <label>.localhost; make Chrome fail the same way.
   await run('fallback', chromePath, ['--host-resolver-rules=MAP *.localhost ~NOTFOUND'], env);
+} catch (e) {
+  console.error(e.message.startsWith('FAIL ') ? e.message : `FAIL ${step}: ${e.stack}`);
+  process.exitCode = 1;
 } finally {
   env.server.stopServer();
   process.chdir(tmpdir());
   rmSync(env.tmp, { recursive: true, force: true });
 }
-process.exit(0);
+process.exit();
