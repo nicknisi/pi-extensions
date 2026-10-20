@@ -68,6 +68,8 @@ describe('Markdown reader', () => {
     expect(html).toContain('class="reader-prose"');
     expect(html).toContain('class="hljs language-ts"');
     expect(html).toContain('d2h-file-wrapper');
+    // diff2html's own stylesheet, not just our overrides.
+    expect(html).toContain('.d2h-file-list-wrapper');
     expect(html).not.toContain('<h1>Proposal</h1>');
     expect(renderHtmlDocument('Plain HTML', 'plain', '<p>Custom fragment</p>')).not.toContain('data-artifact-reader');
     expect(

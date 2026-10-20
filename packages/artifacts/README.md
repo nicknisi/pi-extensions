@@ -294,5 +294,5 @@ Beyond `vitest`, two scripts boot the real server from `dist/` (run `pnpm build`
 - **Browser open is platform-specific**: `open` (macOS), `rundll32 url.dll,FileProtocolHandler` (Windows — `start` is a cmd.exe builtin and can't be spawned), `xdg-open` (Linux). Failures only warn.
 - **`path` param is capped at 2 MB** — excerpt large files into `content` instead.
 - **Index-page metadata is regex-parsed** from each file's `<title>`/`<meta>` tags. Foreign `.html` files dropped into `.pi/artifacts/` are listed with kind inferred from the presence of the shell's `<style data-base>` marker.
-- **diff2html CSS is read via `createRequire(...).resolve("diff2html/bundles/css/diff2html.min.css")`** — breaks if diff2html changes its package layout.
+- **diff2html CSS is read from `diff2html/bundles/css/diff2html.min.css`** (via `import.meta.resolve`, or `createRequire` where that is missing) — breaks if diff2html changes its package layout.
 - **`update` on a missing slug silently creates** — intentional, but the model (and you) should not rely on `update` failing for typos.
