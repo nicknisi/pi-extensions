@@ -1,6 +1,7 @@
 /** Bespoke document stylesheet: design tokens, light/dark schemes, prose, chrome, diff + code theming. */
 
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 import { CONFIG } from './config.js';
@@ -14,14 +15,19 @@ import { CONFIG } from './config.js';
  * call expressions, and hosts that bundle the extension into a single file
  * have no on-disk node_modules for `createRequire` to walk. There the call
  * throws, so the catch degrades to unstyled diffs rather than failing
- * extension load.
+ * extension load. `createRequire` is the fallback where `import.meta.resolve`
+ * doesn't exist (vitest).
  */
 const D2H_BASE_CSS = (() => {
-  try {
-    return readFileSync(fileURLToPath(import.meta.resolve('diff2html/bundles/css/diff2html.min.css')), 'utf-8');
-  } catch {
-    return '';
+  for (const resolve of [
+    () => fileURLToPath(import.meta.resolve('diff2html/bundles/css/diff2html.min.css')),
+    () => createRequire(import.meta.url).resolve('diff2html/bundles/css/diff2html.min.css'),
+  ]) {
+    try {
+      return readFileSync(resolve(), 'utf-8');
+    } catch {}
   }
+  return '';
 })();
 
 // ─── Design tokens ─────────────────────────────────────────────────────────────
