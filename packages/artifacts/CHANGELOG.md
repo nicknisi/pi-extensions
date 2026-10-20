@@ -1,5 +1,17 @@
 # @nicknisi/pi-artifacts
 
+## 1.6.0
+
+### Minor Changes
+
+- 022ba46: Comments now carry screenshots. Adding a pinned or text comment captures a PNG of its region as the reviewer saw it (selected text tinted), stores it in `.pi/artifacts/<slug>.clips/`, and names it in the feedback message so the agent can read it.
+- 02c7f71: Artifacts now open in a review page that frames the artifact on its own origin. An artifact's scripts (including raw HTML in Markdown and CDN scripts) can no longer call the review API, so they can't send reviews, make gists, or touch your clipboard on your behalf. Comments, pins, decisions, screenshots, and shares work as before; a live reload now leaves your drafts and composer untouched, and links to other sites open in a new tab.
+
+### Patch Changes
+
+- 5269b48: Harden the artifact server: refuse requests whose `Host` isn't the server itself (blocks DNS rebinding), pin mermaid to an exact version with an integrity hash, and restart on the project's previous port so tabs left open across a restart or `/new` reconnect and keep their drafts.
+- 8913371: Each artifact now runs on an origin of its own, so a script in one artifact can't read another artifact's page, source, or share image. In browsers that can't resolve `*.localhost` (Safari), artifacts are sandboxed into an opaque origin instead. The reader's theme and text size are remembered by the review page, so they carry from one artifact to the next.
+
 ## 1.5.4
 
 ### Patch Changes
