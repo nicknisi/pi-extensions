@@ -460,8 +460,9 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      // Map thinking level ("off" → undefined, otherwise pass through)
-      const thinkingLevel = pi.getThinkingLevel();
+      // Map thinking level ("off" → undefined, otherwise pass through).
+      // A configured `thinking` overrides the session level.
+      const thinkingLevel = config.thinking ?? pi.getThinkingLevel();
       const reasoning: ThinkingLevel | undefined =
         thinkingLevel === 'off' ? undefined : (thinkingLevel as ThinkingLevel);
 

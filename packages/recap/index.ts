@@ -1,5 +1,7 @@
 import { uuidv7 } from '@earendil-works/pi-ai';
 import {
+  buildSessionContext,
+  convertToLlm,
   getAgentDir,
   getMarkdownTheme,
   type ExtensionAPI,
@@ -25,6 +27,7 @@ const ENTRY_TYPE = 'recap';
 const TICK_MS = 30_000;
 const MIN_BRANCH_LEN = 4;
 const MAX_CARD_LINES = 5;
+const MAX_TOOL_ARGS_CHARS = 200;
 
 let lastActivity = Date.now();
 let firedThisIdle = false;
@@ -49,7 +52,8 @@ function writeConfig(c: Config) {
   fs.writeFileSync(configPath(), JSON.stringify(c, null, 2));
 }
 
-type Entry = { type: string; message?: { role?: string; content?: unknown } };
+type Entry = { type: string; customType?: string };
+type Message = { role?: string; content?: unknown };
 type Block = { type?: string; text?: string; name?: string; arguments?: Record<string, unknown> };
 
 function textParts(content: unknown): string[] {
@@ -66,20 +70,24 @@ function toolLines(content: unknown): string[] {
   return content
     .filter((p): p is Block => !!p && typeof p === 'object')
     .filter((b) => b.type === 'toolCall' && typeof b.name === 'string')
-    .map((b) => `Tool ${b.name} called with ${JSON.stringify(b.arguments ?? {})}`);
+    .map((b) => `Tool ${b.name} called with ${capArgs(JSON.stringify(b.arguments ?? {}))}`);
 }
 
-function buildConversation(entries: Entry[]): string {
+// write/edit calls carry whole file bodies; the recap only needs the gist.
+function capArgs(args: string): string {
+  return args.length <= MAX_TOOL_ARGS_CHARS ? args : args.slice(0, MAX_TOOL_ARGS_CHARS) + '…';
+}
+
+function buildConversation(messages: Message[]): string {
   const sections: string[] = [];
-  for (const e of entries) {
-    if (e.type !== 'message' || !e.message?.role) continue;
-    const role = e.message.role;
+  for (const m of messages) {
+    const role = m.role;
     if (role !== 'user' && role !== 'assistant') continue;
     const lines: string[] = [];
-    const tp = textParts(e.message.content);
+    const tp = textParts(m.content);
     const t = tp.join('\n').trim();
     if (t) lines.push(`${role === 'user' ? 'User' : 'Assistant'}: ${t}`);
-    if (role === 'assistant') lines.push(...toolLines(e.message.content));
+    if (role === 'assistant') lines.push(...toolLines(m.content));
     if (lines.length) sections.push(lines.join('\n'));
   }
   return sections.join('\n\n');
@@ -115,7 +123,8 @@ async function generateSummary(ctx: ExtensionContext): Promise<string> {
     ctx.ui.notify('recap: no model available', 'warning');
     return '';
   }
-  const conversation = buildConversation(ctx.sessionManager.getBranch());
+  // Active context only: compaction summary + kept messages, not pre-compaction history.
+  const conversation = buildConversation(convertToLlm(buildSessionContext(ctx.sessionManager.getBranch()).messages));
   if (!conversation.trim()) return '';
   const response = await ctx.modelRegistry.complete(
     model,
@@ -150,7 +159,16 @@ async function maybeFire(ctx: ExtensionContext) {
   if (!ctx.isIdle() || firedThisIdle) return;
   const cfg = readConfig();
   if (Date.now() - lastActivity < cfg.idleMinutes * 60_000) return;
-  if (ctx.sessionManager.getBranch().length < MIN_BRANCH_LEN) return;
+  const branch: Entry[] = ctx.sessionManager.getBranch();
+  if (branch.filter((e) => e.type === 'message').length < MIN_BRANCH_LEN) return;
+  // Nothing new since the last recap (e.g. a reopened session): don't re-fire.
+  const last = [...branch]
+    .reverse()
+    .find(
+      (e) =>
+        e.type === 'message' || e.type === 'custom_message' || (e.type === 'custom' && e.customType === ENTRY_TYPE),
+    );
+  if (last?.type === 'custom') return;
   firedThisIdle = true;
   await injectRecap(ctx);
 }

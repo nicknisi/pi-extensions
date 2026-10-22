@@ -320,6 +320,9 @@ async function runCouncil(
   council: ResolvedCouncil,
   signal: AbortSignal | undefined,
   onUpdate: (details: CouncilDetails) => void,
+  // The chairman synthesizes member answers; it only needs the bare question,
+  // not the conversation context members were given.
+  chairmanQuestion = question,
 ): Promise<{ content: { type: 'text'; text: string }[]; details: CouncilDetails }> {
   signal?.throwIfAborted();
   const memberSpawn = {
@@ -411,7 +414,7 @@ async function runCouncil(
   details.stage = 'chairman';
   emit();
 
-  let chairmanPrompt = `Question: ${question}\n\nHere are answers from council members:\n`;
+  let chairmanPrompt = `Question: ${chairmanQuestion}\n\nHere are answers from council members:\n`;
   for (const m of successfulMembers) {
     if (council.chairman.exposePersonas && m.systemPrompt) {
       chairmanPrompt += `\n--- Member ${m.label} (persona: "${m.systemPrompt}") ---\n${m.text}\n`;
@@ -622,19 +625,27 @@ export default function (pi: ExtensionAPI) {
             const progress = new Text('', 0, 1);
             loader.addChild(progress);
             loader.onAbort = () => done(null);
-            runCouncil(subagents, prompt, ctx.cwd, council, loader.signal, (details) => {
-              if (loader.signal.aborted) return;
-              progress.setText(
-                renderMemberTree(details, theme, 0, {
-                  memberSubLine: (member) => memberLiveSubLine(member, theme),
-                  chairmanSubLine:
-                    details.stage === 'chairman'
-                      ? CONFIG.shared.status.synthesizingLabel
-                      : CONFIG.shared.status.waitingLabel,
-                }).join('\n'),
-              );
-              tui.requestRender();
-            }).then(
+            runCouncil(
+              subagents,
+              prompt,
+              ctx.cwd,
+              council,
+              loader.signal,
+              (details) => {
+                if (loader.signal.aborted) return;
+                progress.setText(
+                  renderMemberTree(details, theme, 0, {
+                    memberSubLine: (member) => memberLiveSubLine(member, theme),
+                    chairmanSubLine:
+                      details.stage === 'chairman'
+                        ? CONFIG.shared.status.synthesizingLabel
+                        : CONFIG.shared.status.waitingLabel,
+                  }).join('\n'),
+                );
+                tui.requestRender();
+              },
+              question,
+            ).then(
               (value) => {
                 if (!loader.signal.aborted) done(value);
               },

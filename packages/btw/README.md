@@ -66,7 +66,7 @@ Fork happens _before_ the transcript card is persisted, so the forked session do
 ## How it works
 
 - On `/btw`, the current branch (`ctx.sessionManager.getBranch()`) is converted to LLM messages with `convertToLlm()`. Assistant tool calls with no matching `toolResult` are dropped first, because `/btw` can run mid-turn when tool calls are still unanswered, and Anthropic rejects `tool_use` blocks without a matching `tool_result`.
-- The side thread starts from that snapshot. Each question is sent to the configured model override, or the current session model if no override is configured or it cannot be resolved, with a fixed system prompt (concise, no tool suggestions) via `ctx.modelRegistry.streamSimple(...)` with the current thinking level (`off` maps to `undefined`). The registry applies `models.json` overrides and extension-registered providers and resolves auth per request; a `getApiKeyAndHeaders()` pre-check only produces a friendly error when no key is configured. Completed Q&A pairs are appended to the side thread, so follow-ups have full side-thread history plus the original branch snapshot.
+- The side thread starts from that snapshot. Each question is sent to the configured model override, or the current session model if no override is configured or it cannot be resolved, with a fixed system prompt (concise, no tool suggestions) via `ctx.modelRegistry.streamSimple(...)` with the configured `thinking` level, or the current session thinking level if unset (`off` maps to `undefined`). The registry applies `models.json` overrides and extension-registered providers and resolves auth per request; a `getApiKeyAndHeaders()` pre-check only produces a friendly error when no key is configured. Completed Q&A pairs are appended to the side thread, so follow-ups have full side-thread history plus the original branch snapshot.
 - The overlay is a `Component`/`Focusable` from `@earendil-works/pi-tui`, rendering a bordered box (max width 100, body capped at 30 rows or `terminal.rows - 14`) with a spinner while streaming and markdown-rendered answers.
 - On close with at least one completed turn, the thread is persisted via `pi.appendEntry<BtwEntryData>("btw-answer", { model, turns })`.
 
@@ -80,11 +80,16 @@ Optional global config: `~/.pi/agent/configs/btw.json`. Changes take effect on t
 
 ```json
 {
-  "model": "fireworks/glm-latest"
+  "model": "fireworks/glm-latest",
+  "thinking": "low"
 }
 ```
 
-`model` is an optional `provider/model-id` override registered in Pi with working authentication. Model IDs may contain additional slashes; only the first slash separates the provider. If it is omitted or cannot be resolved, `/btw` uses the current session model. Invalid config emits a warning. See [`btw.example.json`](./btw.example.json).
+`model` is an optional `provider/model-id` override registered in Pi with working authentication. Model IDs may contain additional slashes; only the first slash separates the provider. If it is omitted or cannot be resolved, `/btw` uses the current session model.
+
+`thinking` is an optional thinking level for side questions: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. If it is omitted, `/btw` uses the current session thinking level. Use it to keep quick side questions cheap when the main session runs at `xhigh`.
+
+Invalid values emit a warning and are ignored; other valid keys still apply. See [`btw.example.json`](./btw.example.json).
 
 | Variable       | Values   | Default                                                                  |
 | -------------- | -------- | ------------------------------------------------------------------------ |

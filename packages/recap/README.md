@@ -17,11 +17,12 @@ Idle is tracked via `lastActivity`, reset by `before_agent_start` and `agent_set
 1. `ctx.isIdle()` — agent not running
 2. `firedThisIdle` — only one recap per idle period (reset on next activity)
 3. Elapsed time since `lastActivity` >= `idleMinutes`
-4. Branch length >= 4 entries (skips trivial sessions)
+4. Branch has >= 4 message entries (skips trivial sessions; non-message entries don't count)
+5. The last message-bearing branch entry is not already a `recap` entry (so reopening a session that ended with a recap doesn't fire another one)
 
-If all pass, it builds a plain-text transcript of the current branch (user/assistant text plus one line per tool call: `Tool <name> called with <args JSON>`), sends it to the model with a "summarize tersely, 6-8 lines, short markdown headings" prompt, and appends the result as a `recap` entry via `pi.appendEntry`.
+If all pass, it builds a plain-text transcript of the active context — the same compacted view pi sends the model (`buildSessionContext`), so history before a compaction is represented only by its summary. It includes user/assistant text plus one line per tool call: `Tool <name> called with <args JSON>`, with the args JSON capped at 200 characters. It sends it to the model with a "summarize tersely, 6-8 lines, short markdown headings" prompt, and appends the result as a `recap` entry via `pi.appendEntry`.
 
-The renderer draws a `Box` containing a bold "Recap · <time>" header and the summary as Markdown, capped at 5 lines (truncated with ` …`). The card is dimmed and given a hardcoded truecolor background (`#131320`) so it reads as distinct from user/assistant messages.
+The renderer draws a `Box` containing a bold "Recap · <time>" header and the summary as Markdown, capped at 5 lines (truncated with ` …`). The card is dimmed and uses the theme's `customMessageBg` background so it reads as distinct from user/assistant messages.
 
 ## Usage
 
@@ -52,7 +53,8 @@ No environment variables are read.
 ## Constants (not configurable)
 
 - `TICK_MS = 30_000` — idle check interval
-- `MIN_BRANCH_LEN = 4` — minimum session entries before auto-firing
+- `MIN_BRANCH_LEN = 4` — minimum message entries before auto-firing
+- `MAX_TOOL_ARGS_CHARS = 200` — per-tool-call args cap in the transcript
 - `MAX_CARD_LINES = 5` — rendered summary line cap
 - Summarization call runs with `reasoningEffort: "low"`, `cacheRetention: "none"`
 
@@ -61,7 +63,7 @@ No environment variables are read.
 Peer deps (all `@earendil-works/*`, provided by the pi host):
 
 - `@earendil-works/pi-ai` — `uuidv7` (session id for the completion call)
-- `@earendil-works/pi-coding-agent` — `ExtensionAPI`, `getMarkdownTheme`; uses `pi.registerCommand`, `pi.registerEntryRenderer`, `pi.appendEntry`, `pi.on`, `ctx.sessionManager.getBranch`, `ctx.modelRegistry.complete`, `ctx.isIdle`, `ctx.ui.notify`
+- `@earendil-works/pi-coding-agent` — `ExtensionAPI`, `getMarkdownTheme`; uses `pi.registerCommand`, `pi.registerEntryRenderer`, `pi.appendEntry`, `pi.on`, `buildSessionContext`, `convertToLlm`, `ctx.sessionManager.getBranch`, `ctx.modelRegistry.complete`, `ctx.isIdle`, `ctx.ui.notify`
 - `@earendil-works/pi-tui` — `Box`, `Text`, `Markdown` for the card renderer
 
 No npm runtime deps, no workspace deps.
@@ -72,7 +74,6 @@ No npm runtime deps, no workspace deps.
 - Depends on several pi internals that could change across versions: `sessionManager.getBranch()`, `modelRegistry.complete()`, `ctx.isIdle()`, and the `session_start`/`before_agent_start`/`agent_settled` event names.
 - A configured model is resolved and completed through `ctx.modelRegistry`, so registered custom providers work. An omitted or unresolved override falls back to the current session model.
 - Background recap failures are reported as warnings and never terminate the pi process.
-- The card background is a hardcoded truecolor escape (`#131320`) chosen to sit darker than the tokyonight base/message backgrounds (`theme.bg` only accepts named tokens). With other themes it may clash.
 - Entry content extraction is structural (filters blocks by `type === "text"` / `type === "toolCall"`), so changes to pi's message block shape would silently empty the transcript it summarizes.
 - The timer is cleared on `session_shutdown`; if a session never shuts down cleanly the interval lives until process exit.
 
