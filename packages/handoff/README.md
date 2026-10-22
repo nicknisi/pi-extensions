@@ -23,7 +23,7 @@ Flow:
 3. Walks the `parentSession` chain (reading the first line of each parent session file with `head -1`) to build a session-history list.
 4. Streams a request to the current model with a fixed system prompt ("context transfer assistant") and a user message containing the conversation history and your goal.
 5. Appends a `## Session History` section listing session files, most recent first.
-6. Opens the result in the editor overlay; on confirm, calls `ctx.newSession({ parentSession })` and sets the edited prompt as the editor draft with `ctx.ui.setEditorText`. You submit it yourself.
+6. Opens the result in the editor overlay; on confirm, calls `ctx.newSession({ parentSession, withSession })` and sets the edited prompt as the new session's editor draft from the `withSession` callback (the old `ctx` is stale after the switch). You submit it yourself.
 
 Aborting the loader or closing the editor without confirming cancels with a notification; no new session is created.
 

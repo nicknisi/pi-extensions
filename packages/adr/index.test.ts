@@ -13,6 +13,14 @@ describe('findAdrDir', () => {
     expect(findAdrDir(nested)).toBe(join(root, 'docs', 'decisions'));
   });
 
+  it('stops at the repo root', () => {
+    const outer = mkdtempSync(join(tmpdir(), 'adr-'));
+    mkdirSync(join(outer, 'docs', 'decisions'), { recursive: true });
+    const repo = join(outer, 'repo');
+    mkdirSync(join(repo, '.git'), { recursive: true });
+    expect(findAdrDir(join(repo))).toBeNull();
+  });
+
   it('returns null when nothing exists', () => {
     const root = mkdtempSync(join(tmpdir(), 'adr-'));
     expect(findAdrDir(root)).toBeNull();
@@ -47,5 +55,19 @@ describe('before_agent_start', () => {
     expect(sections.decision_records).toContain('- docs/decisions/0001-first.md');
     handler({ systemPromptOptions: { sections } }, { cwd: mkdtempSync(join(tmpdir(), 'adr-')) });
     expect(sections.decision_records).toBeUndefined();
+  });
+
+  it('lists paths relative to cwd when pi runs in a subdirectory', async () => {
+    const { default: extension } = await import('./index.js');
+    let handler!: (event: any, ctx: any) => unknown;
+    extension({ on: (_name: string, fn: typeof handler) => (handler = fn) } as never);
+    const root = mkdtempSync(join(tmpdir(), 'adr-'));
+    mkdirSync(join(root, 'docs', 'decisions'), { recursive: true });
+    writeFileSync(join(root, 'docs', 'decisions', '0001-first.md'), '');
+    const nested = join(root, 'packages', 'foo');
+    mkdirSync(nested, { recursive: true });
+    const sections: Record<string, string> = {};
+    handler({ systemPromptOptions: { sections } }, { cwd: nested });
+    expect(sections.decision_records).toContain('- ../../docs/decisions/0001-first.md');
   });
 });

@@ -180,19 +180,19 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // Create new session with parent tracking
+      // Create new session with parent tracking. The old ctx is stale once the
+      // session is replaced, so the draft goes in through the new session's ctx.
       const newSessionResult = await ctx.newSession({
         ...(currentSessionFile !== undefined && { parentSession: currentSessionFile }),
+        withSession: async (newCtx) => {
+          newCtx.ui.setEditorText(editedPrompt);
+          newCtx.ui.notify('Handoff ready. Submit when ready.', 'info');
+        },
       });
 
       if (newSessionResult.cancelled) {
         ctx.ui.notify('New session cancelled', 'info');
-        return;
       }
-
-      // Set the edited prompt in the main editor for submission
-      ctx.ui.setEditorText(editedPrompt);
-      ctx.ui.notify('Handoff ready. Submit when ready.', 'info');
     },
   });
 }
