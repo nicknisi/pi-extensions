@@ -38,7 +38,12 @@ function harness(reply = NOTE, registry: Record<string, unknown> = {}) {
   let widget: Factory | undefined;
   let panelKeys: string[] = [];
   const complete = vi.fn(
-    async () => ({ content: [{ type: 'text', text: reply }], stopReason: 'stop' }) as unknown as AssistantMessage,
+    async () =>
+      ({
+        content: [{ type: 'text', text: reply }],
+        stopReason: 'stop',
+        usage: { cost: { total: 0.12 } },
+      }) as unknown as AssistantMessage,
   );
 
   const pi = {
@@ -113,6 +118,17 @@ describe('heads-up', () => {
     expect(h.band()).toContain('migration test');
     expect(readStore().offered).toEqual(['The agent skipped the migration test because it needs a live database.']);
     expect(readStore().events.map((e) => e.kind)).toEqual(['proposed']);
+    expect(readStore().events[0]?.cost).toBe(0.12);
+  });
+
+  it('a check that finds nothing is logged with its cost', async () => {
+    const h = harness('learn: none');
+    await h.fire('session_start');
+    await h.longTurn();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(readStore().events).toEqual([expect.objectContaining({ kind: 'none', cost: 0.12 })]);
+    await h.commands.get('heads-up')!('', h.ctx);
+    expect(h.notify).toHaveBeenLastCalledWith(expect.stringContaining('Logged check cost: $0.12.'), 'info');
   });
 
   it('a short turn makes no check', async () => {

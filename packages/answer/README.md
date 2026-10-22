@@ -65,7 +65,7 @@ Optional global config: `~/.pi/agent/configs/answer.json`. Changes take effect o
 
 ```json
 {
-  "extractionModels": ["anthropic/claude-fable-5", "anthropic/claude-opus-5"],
+  "extractionModels": ["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-5"],
   "hintModels": ["typesafe/jev-latest", "openrouter/typesafe/jev-1.14"]
 }
 ```
@@ -74,7 +74,7 @@ Optional global config: `~/.pi/agent/configs/answer.json`. Changes take effect o
 
 `hintModels` is an ordered list of classifier `provider/model-id` strings for the [answer hint](#answer-hint); the first with working credentials wins. It defaults to Jev on every provider pi lists it under. `[]` turns the hint off. An invalid list warns and keeps the default. See [`answer.example.json`](./answer.example.json).
 
-The current session model (`ctx.model`) is **not** used for extraction—only checked for presence as a guard. API keys come from Pi's normal model authentication.
+The current session model (`ctx.model`) is **not** used for extraction, and `/answer` works without one. API keys come from Pi's normal model authentication.
 
 ## Dependencies
 

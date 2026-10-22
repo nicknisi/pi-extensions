@@ -21,7 +21,8 @@ export interface ModelPreference {
 }
 
 export const DEFAULT_ANSWER_CONFIG: AnswerConfig = {
-  extractionModels: ['anthropic/claude-fable-5', 'anthropic/claude-opus-5'],
+  // Pulling questions out of one message is easy: fast, cheap models first.
+  extractionModels: ['anthropic/claude-haiku-4-5', 'anthropic/claude-sonnet-5'],
   hintModels: [...DEFAULT_CLASSIFIERS],
 };
 

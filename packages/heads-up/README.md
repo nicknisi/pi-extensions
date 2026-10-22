@@ -117,7 +117,7 @@ Submitting a prompt while a note is showing clears the note and logs it as `igno
 ### Command
 
 ```
-/heads-up          status: on/off, thresholds, model, known count, event tally
+/heads-up          status: on/off, thresholds, model, gate, known count, event tally, logged check cost
 /heads-up off      stop checking and clear any note (persists across sessions)
 /heads-up on       resume
 /heads-up check    run a check now (ignores the run-length trigger and cooldown)
@@ -165,9 +165,9 @@ Invalid values fall back to the defaults. An unknown `model` falls back to the s
 | `known`    | Topics marked understood (at most 50)            |
 | `offered`  | Last 5 suggestions, so the next check skips them |
 | `disabled` | Set by `/heads-up off`                           |
-| `events`   | `{ ts, kind, learn, score? }`, last 500          |
+| `events`   | `{ ts, kind, learn, score?, cost? }`, last 2000  |
 
-Event kinds: `proposed`, `explained`, `page`, `chat`, `known`, `dismissed`, `ignored_submit`, plus `none` and `gated` from the classifier gate. `score` is the gate's probability for the check, present only when a classifier answered. Use them to tune: a high dismiss or ignore rate means the bar is too low, and engaged notes that scored low mean the gate threshold is too high. `/heads-up` shows the tally.
+Event kinds: `proposed`, `explained`, `page`, `chat`, `known`, `dismissed`, `ignored_submit`, `none` (a check that found nothing), and `gated` (a check the classifier gate skipped). `score` is the gate's probability for the check, present only when a classifier answered. `cost` is the check's side-request cost in USD at catalog prices, when the provider reports usage. These side requests are not part of the session, so they never show in the footer's cost; `/heads-up` shows the logged total. Use them to tune: a high dismiss or ignore rate means the bar is too low, and engaged notes that scored low mean the gate threshold is too high. `/heads-up` shows the tally.
 
 The note itself lives in memory and does not survive a restart.
 
@@ -181,7 +181,7 @@ The note itself lives in memory and does not survive a restart.
 
 ## Caveats
 
-- Each check is one full-digest request without caching, up to about 30k input tokens by default. With a large session model, set `model` to something cheaper, lower `maxDigestChars`, or enforce the [classifier gate](#the-classifier-gate).
+- Each check is one full-digest request without caching, up to about 30k input tokens by default. Its cost is logged on the check's event but never reaches the session cost. With a large session model, set `model` to something cheaper, lower `maxDigestChars`, or enforce the [classifier gate](#the-classifier-gate).
 - The thresholds are guesses, carried over from the Claude Code mod. The built-in mod's firing rule is compiled in and unreadable.
 - No idle-time checks. A check only follows agent activity.
 - A background check that fails warns once, then stays quiet until a check succeeds.

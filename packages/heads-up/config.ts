@@ -106,12 +106,25 @@ export type Kind =
   | 'known'
   | 'dismissed'
   | 'ignored_submit'
-  // A scored check: 'none' found nothing to say; 'gated' was skipped by the classifier gate.
+  // 'none': a check found nothing to say. 'gated': the classifier gate skipped the check.
   | 'none'
   | 'gated';
 
-/** `score` is the classifier gate's probability for the check that proposed the note (or found none). */
-export type HeadsUpEvent = { ts: number; kind: Kind; learn: string; score?: number };
+/**
+ * `score` is the classifier gate's probability for the check behind the event.
+ * `cost` is that check's side-request cost in USD at catalog prices.
+ */
+export type HeadsUpEvent = { ts: number; kind: Kind; learn: string; score?: number; cost?: number };
+
+export type EventExtra = { score?: number | undefined; cost?: number | undefined };
+
+/** An event, leaving out unknown score and cost. */
+export const makeEvent = (kind: Kind, learn: string, extra: EventExtra = {}): HeadsUpEvent => {
+  const event: HeadsUpEvent = { ts: Date.now(), kind, learn };
+  if (extra.score !== undefined) event.score = extra.score;
+  if (extra.cost !== undefined) event.cost = extra.cost;
+  return event;
+};
 
 export interface Store {
   /** Topics marked understood; the check prompt excludes them. */
@@ -126,7 +139,8 @@ export interface Store {
 
 export const MAX_KNOWN = 50;
 export const MAX_OFFERED = 5;
-export const MAX_EVENTS = 500;
+// Every check logs an event, so this holds a few weeks of checks plus their feedback.
+export const MAX_EVENTS = 2000;
 
 const strings = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
@@ -162,9 +176,8 @@ export function updateStore(change: (store: Store) => void, agentDir = getAgentD
 export const pushFront = (list: string[], item: string, max: number): string[] =>
   [item, ...list.filter((i) => i !== item)].slice(0, max);
 
-export const logEvent = (kind: Kind, learn: string, score?: number): void => {
-  const event: HeadsUpEvent =
-    score === undefined ? { ts: Date.now(), kind, learn } : { ts: Date.now(), kind, learn, score };
+export const logEvent = (kind: Kind, learn: string, extra?: EventExtra): void => {
+  const event = makeEvent(kind, learn, extra);
   updateStore((s) => {
     s.events = [...s.events, event].slice(-MAX_EVENTS);
   });

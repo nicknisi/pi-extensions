@@ -30,6 +30,7 @@ import {
   type Kind,
   loadConfig,
   logEvent,
+  makeEvent,
   MAX_EVENTS,
   MAX_KNOWN,
   MAX_OFFERED,
@@ -290,7 +291,7 @@ export default function headsUp(pi: ExtensionAPI) {
     return configured ?? ctx.model;
   };
 
-  /** One tool-less side request over a digest of the session. */
+  /** One tool-less side request over a digest of the session: its text and its cost in USD. */
   const ask = async (ctx: ExtensionContext, systemPrompt: string, text: string, signal: AbortSignal) => {
     const model = resolveModel(ctx);
     if (!model) throw new Error('no model available');
@@ -301,11 +302,12 @@ export default function headsUp(pi: ExtensionAPI) {
     );
     if (reply.stopReason === 'aborted') return null;
     if (reply.stopReason === 'error') throw new Error(reply.errorMessage ?? 'request failed');
-    return reply.content
+    const replyText = reply.content
       .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
       .map((c) => c.text)
       .join('\n')
       .trim();
+    return { text: replyText, cost: reply.usage?.cost.total };
   };
 
   const sessionDigest = (ctx: ExtensionContext) =>
@@ -340,20 +342,23 @@ export default function headsUp(pi: ExtensionAPI) {
       const score = manual ? undefined : await gateScore(ctx, transcript, store, signal);
       if (signal.aborted) return;
       if (score !== undefined && config.gateEnforce && score < config.gateThreshold) {
-        logEvent('gated', '', score);
+        logEvent('gated', '', { score });
         return;
       }
       const reply = await ask(ctx, checkSystem, checkPrompt(transcript, store.offered, store.known), signal);
+      if (!reply || signal.aborted) return;
       warnedError = false;
-      const note = reply ? parse(reply) : null;
-      if (!note && score !== undefined && !signal.aborted) logEvent('none', '', score);
-      if (!note || signal.aborted || shown || readStore().disabled) return;
-      const scored = score === undefined ? {} : { score };
+      const extra = { score, cost: reply.cost };
+      const note = reply.text ? parse(reply.text) : null;
+      if (!note) {
+        // Log every completed check, so the store shows what checks cost and how often they find something.
+        logEvent('none', '', extra);
+        return;
+      }
+      if (shown || readStore().disabled) return;
       updateStore((s) => {
         s.offered = pushFront(s.offered, note.learn, MAX_OFFERED);
-        s.events = [...s.events, { ts: Date.now(), kind: 'proposed' as const, learn: note.learn, ...scored }].slice(
-          -MAX_EVENTS,
-        );
+        s.events = [...s.events, makeEvent('proposed', note.learn, extra)].slice(-MAX_EVENTS);
       });
       shown = { note, view: 'collapsed', rewrite: null, at: Date.now() };
       renderBand(ctx);
@@ -443,13 +448,13 @@ export default function headsUp(pi: ExtensionAPI) {
             theme,
             current,
             async (variant, signal) => {
-              const text = await ask(
+              const reply = await ask(
                 ctx,
                 variantSystem,
                 variantPrompt(sessionDigest(ctx), current.note, variant),
                 signal,
               );
-              return text || null;
+              return reply?.text || null;
             },
             () => logEvent('explained', current.note.learn),
             done,
@@ -513,7 +518,11 @@ export default function headsUp(pi: ExtensionAPI) {
       }
       const store = readStore();
       const counts = new Map<string, number>();
-      for (const e of store.events) counts.set(e.kind, (counts.get(e.kind) ?? 0) + 1);
+      let spent = 0;
+      for (const e of store.events) {
+        counts.set(e.kind, (counts.get(e.kind) ?? 0) + 1);
+        spent += e.cost ?? 0;
+      }
       const tally = [...counts].map(([kind, n]) => `${kind} ${n}`).join(', ');
       const gateModel = await resolveGate(ctx);
       const gateMode = config.gateEnforce ? `skips checks below ${config.gateThreshold}` : 'shadow, scores only';
@@ -523,6 +532,7 @@ export default function headsUp(pi: ExtensionAPI) {
           `Model: ${config.model ?? 'session model'}. ${store.known.length} topics marked known.`,
           `Gate: ${gateModel ? `${gateModel.provider}/${gateModel.id} (${gateMode})` : 'off (no classifier available)'}.`,
           tally ? `Events: ${tally}.` : '',
+          spent ? `Logged check cost: $${spent.toFixed(2)}.` : '',
         ]
           .filter(Boolean)
           .join('\n'),

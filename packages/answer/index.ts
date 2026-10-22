@@ -519,11 +519,6 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    if (!ctx.model) {
-      ctx.ui.notify('No model selected', 'error');
-      return;
-    }
-
     const { text: lastAssistantText, skippedIncomplete } = findLastCompletedAssistantMessage(ctx);
     if (!lastAssistantText) {
       ctx.ui.notify(
@@ -555,15 +550,6 @@ export default function (pi: ExtensionAPI) {
       loader.onAbort = () => done({ type: 'cancelled' });
 
       const doExtract = async () => {
-        const auth = await ctx.modelRegistry.getApiKeyAndHeaders(extractionModel);
-        if (!auth.ok) {
-          const authError = 'error' in auth ? auth.error : 'Unknown auth error';
-          return {
-            type: 'error',
-            message: `No auth available for ${extractionModel.provider}/${extractionModel.id}: ${authError}`,
-          } as ExtractionOutcome;
-        }
-
         const userMessage: UserMessage = {
           role: 'user',
           content: [{ type: 'text', text: lastAssistantText }],
