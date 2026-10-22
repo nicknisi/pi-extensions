@@ -183,6 +183,27 @@ describe('worktree primitives', () => {
     expect(fs.existsSync(added.path)).toBe(false);
   });
 
+  it('captureHandoff writes large (>1 MB) and binary diffs as applyable patches', () => {
+    const repo = gitRepo();
+    const added = addWorktree(repo, 'test-run-big');
+    if (!('path' in added)) throw new Error('setup failed');
+    const big = Array.from({ length: 40_000 }, (_, i) => `line ${i} ${'x'.repeat(40)}`).join('\n');
+    fs.writeFileSync(path.join(added.path, 'big.txt'), big);
+    const binary = Buffer.from([0, 1, 2, 255, 0, 3, 4, 254]);
+    fs.writeFileSync(path.join(added.path, 'blob.bin'), binary);
+
+    const patchPath = path.join(tmpRoot(), 'big.patch');
+    const handoff = captureHandoff(added.path, patchPath);
+    expect(handoff.patchPath).toBe(patchPath);
+    expect(fs.statSync(patchPath).size).toBeGreaterThan(1024 * 1024);
+    expect(fs.readFileSync(patchPath, 'utf8')).toContain('GIT binary patch');
+
+    execFileSync('git', ['apply', patchPath], { cwd: repo });
+    expect(fs.readFileSync(path.join(repo, 'big.txt'), 'utf8')).toBe(big);
+    expect(fs.readFileSync(path.join(repo, 'blob.bin'))).toEqual(binary);
+    removeWorktree(repo, added.path);
+  });
+
   it('captureHandoff reports no patch when nothing changed', () => {
     const repo = gitRepo();
     const added = addWorktree(repo, 'test-run-clean');
