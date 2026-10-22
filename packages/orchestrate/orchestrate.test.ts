@@ -21,7 +21,7 @@ function entry(id: string, role: string, text: string, extra = {}) {
   };
 }
 
-function makeHarness() {
+function makeHarness(sessionFile = 'session.jsonl') {
   const commands = new Map<string, Handler>();
   const events = new Map<string, Handler>();
   const sent: string[] = [];
@@ -46,7 +46,7 @@ function makeHarness() {
       setStatus: (_key: string, status: string) => statuses.push(status),
     },
     sessionManager: {
-      getSessionFile: () => path.join(cwd, 'session.jsonl'),
+      getSessionFile: () => path.join(cwd, sessionFile),
       getBranch: () => entries,
     },
     isIdle: () => true,
@@ -87,8 +87,8 @@ function verdict(verdict: string, evidence: string[] = [], basis = 'tool') {
   });
 }
 
-function saved() {
-  return JSON.parse(fs.readFileSync(path.join(cwd, '.pi-goal/state.json'), 'utf8'));
+function saved(name = 'session') {
+  return JSON.parse(fs.readFileSync(path.join(cwd, `.pi-goal/${name}.json`), 'utf8'));
 }
 
 beforeEach(() => {
@@ -164,7 +164,7 @@ describe('evidence-based evaluation', () => {
     expect(h.notifications.at(-1)).toContain('Goal achieved');
     expect(h.notifications.at(-1)).toContain('Evidence: result');
     expect(h.sent).toHaveLength(1);
-    expect(fs.existsSync(path.join(cwd, '.pi-goal/state.json'))).toBe(false);
+    expect(fs.existsSync(path.join(cwd, '.pi-goal/session.json'))).toBe(false);
   });
 
   it('accepts a single JSON fence without accepting surrounding prose', async () => {
@@ -414,5 +414,68 @@ describe('continuation budgets and recovery', () => {
     await h.command('new goal');
     await vi.advanceTimersByTimeAsync(3000);
     expect(h.sent).toEqual(['old goal', 'new goal']);
+  });
+
+  it('does not tick a self-paced loop after compaction when agent_settled already started a run', async () => {
+    vi.useFakeTimers();
+    const h = makeHarness();
+    await h.commands.get('loop')!('keep going', h.ctx);
+    await h.event('agent_end');
+    await h.event('session_compact');
+    await h.event('agent_settled');
+    h.ctx.isIdle = () => false;
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(h.sent).toEqual(['keep going', 'keep going']);
+  });
+
+  it('skips the compaction loop tick while a settle tick is pending or work is queued', async () => {
+    vi.useFakeTimers();
+    const h = makeHarness();
+    await h.commands.get('loop')!('keep going', h.ctx);
+    await h.event('agent_end');
+    await h.event('session_compact');
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(h.sent).toHaveLength(1);
+    await h.event('agent_settled');
+    expect(h.sent).toHaveLength(2);
+    h.ctx.hasPendingMessages = () => true;
+    await h.event('session_compact');
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(h.sent).toHaveLength(2);
+  });
+
+  it('still ticks a self-paced loop after a manual compaction when idle', async () => {
+    vi.useFakeTimers();
+    const h = makeHarness();
+    await h.commands.get('loop')!('keep going', h.ctx);
+    await h.event('session_compact');
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(h.sent).toEqual(['keep going', 'keep going']);
+  });
+});
+
+describe('per-session persistence', () => {
+  it('a second session in the same cwd never overwrites or deletes the first session state', async () => {
+    const a = makeHarness('a.jsonl');
+    fs.writeFileSync(path.join(cwd, 'a.jsonl'), '');
+    await a.command('all tests pass');
+    expect(saved('a').owner).toBe(path.join(cwd, 'a.jsonl'));
+    cleanup?.();
+
+    const b = makeHarness('b.jsonl');
+    await b.command('clear');
+    await b.commands.get('loop')!('5m other work', b.ctx);
+    await b.commands.get('loop')!('stop', b.ctx);
+    await b.command('other goal');
+    expect(saved('b').goal.condition).toBe('other goal');
+    expect(saved('a').goal.condition).toBe('all tests pass');
+    await b.command('clear');
+    expect(fs.existsSync(path.join(cwd, '.pi-goal/b.json'))).toBe(false);
+    cleanup?.();
+
+    // --resume of the first session restores its goal.
+    const resumed = makeHarness('a.jsonl');
+    await resumed.command('');
+    expect(resumed.notifications.at(-1)).toContain('Goal: all tests pass');
   });
 });
