@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-header",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Animated header with custom frames for the pi TUI",
   "keywords": [
     "pi",

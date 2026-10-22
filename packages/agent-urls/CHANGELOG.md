@@ -1,5 +1,12 @@
 # @nicknisi/pi-agent-urls
 
+## 0.2.3
+
+### Patch Changes
+
+- Updated dependencies [245ee0f]
+  - @nicknisi/pi-shared@0.8.1
+
 ## 0.2.2
 
 ### Patch Changes

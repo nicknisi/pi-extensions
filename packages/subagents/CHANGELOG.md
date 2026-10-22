@@ -1,5 +1,12 @@
 # @nicknisi/pi-subagents
 
+## 0.5.3
+
+### Patch Changes
+
+- Updated dependencies [245ee0f]
+  - @nicknisi/pi-shared@0.8.1
+
 ## 0.5.2
 
 ### Patch Changes
