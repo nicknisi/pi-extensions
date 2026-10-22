@@ -18,10 +18,11 @@
  * /loop stop            stop the loop.
  *
  * One goal per session. One loop per session. State persists to
- * <cwd>/.pi-goal/state.json so it survives --resume — but it is stamped with
- * the owning session file and is ONLY re-adopted by that exact session.
- * Other instances in the same cwd ignore it (a cwd-keyed file with no owner
- * check used to leak goals into every concurrent session). Ephemeral
+ * <cwd>/.pi-goal/<session-file-name>.json so it survives --resume — one file
+ * per session, stamped with the owning session file and ONLY read, written,
+ * or deleted by that exact session. Other instances in the same cwd never
+ * touch it (a shared cwd-keyed file used to leak goals into, or get
+ * clobbered by, every concurrent session). Ephemeral
  * sessions keep goal/loop state in memory only. The evaluator reads bounded
  * branch evidence and calls no tools. Paused goals require /goal resume.
  */
@@ -85,8 +86,9 @@ function stateDir(cwd: string): string {
   return path.join(cwd, '.pi-goal');
 }
 
-function statePath(cwd: string): string {
-  return path.join(stateDir(cwd), 'state.json');
+/** One state file per session, named after the owning session file. */
+function statePath(cwd: string, owner: string): string {
+  return path.join(stateDir(cwd), `${path.basename(owner, '.jsonl')}.json`);
 }
 
 function sessionFileOf(ctx: ExtensionContext): string | null {
@@ -105,7 +107,7 @@ function persist(ctx: ExtensionContext): void {
     if (!owner) return;
     fs.mkdirSync(stateDir(ctx.cwd), { recursive: true });
     const data: SavedState = { owner, goal, loop };
-    fs.writeFileSync(statePath(ctx.cwd), JSON.stringify(data, null, 2));
+    fs.writeFileSync(statePath(ctx.cwd, owner), JSON.stringify(data, null, 2));
   } catch {
     /* persistence is advisory — never block the loop on it */
   }
@@ -114,18 +116,15 @@ function persist(ctx: ExtensionContext): void {
 function loadState(ctx: ExtensionContext): void {
   goal = null;
   loop = null;
+  const owner = sessionFileOf(ctx);
+  if (!owner) return;
   try {
-    const raw = fs.readFileSync(statePath(ctx.cwd), 'utf8');
+    const raw = fs.readFileSync(statePath(ctx.cwd, owner), 'utf8');
     const data = JSON.parse(raw) as SavedState;
-    const owner = sessionFileOf(ctx);
     // Adopt persisted state only in the session that created it (--resume).
-    // Anything else — different session, ephemeral session, or legacy state
-    // with no owner stamp — is ignored so goals cannot leak across instances.
-    if (!data.owner || !owner || data.owner !== owner) {
-      // Prune orphaned state whose owning session no longer exists.
-      if (data.owner && !fs.existsSync(data.owner)) clearStateFile(ctx.cwd);
-      return;
-    }
+    // Each session reads only its own file; the owner stamp guards against
+    // basename collisions so goals cannot leak across instances.
+    if (data.owner !== owner) return;
     goal = data.goal ?? null;
     loop = data.loop ?? null;
   } catch {
@@ -133,9 +132,11 @@ function loadState(ctx: ExtensionContext): void {
   }
 }
 
-function clearStateFile(cwd: string): void {
+function clearStateFile(ctx: ExtensionContext): void {
+  const owner = sessionFileOf(ctx);
+  if (!owner) return;
   try {
-    fs.rmSync(statePath(cwd), { force: true });
+    fs.rmSync(statePath(ctx.cwd, owner), { force: true });
   } catch {
     /* advisory */
   }
@@ -444,7 +445,7 @@ function clearGoal(ctx: ExtensionContext, silent = false): void {
   const stoppedLoop = loop ? { prompt: loop.prompt, iterations: loop.iterations } : null;
   if (loop) stopLoop(ctx, true);
   persist(ctx);
-  if (!goal && !loop) clearStateFile(ctx.cwd);
+  if (!goal && !loop) clearStateFile(ctx);
   refreshStatus(ctx);
   if (cond !== undefined || stoppedLoop) {
     try {
@@ -570,7 +571,7 @@ function stopLoop(ctx: ExtensionContext, silent = false): void {
   const was = loop;
   loop = null;
   persist(ctx);
-  if (!goal && !loop) clearStateFile(ctx.cwd);
+  if (!goal && !loop) clearStateFile(ctx);
   refreshStatus(ctx);
   if (!silent)
     notify(ctx, `Loop stopped (${was.iterations} run${was.iterations === 1 ? '' : 's'}): ${short(was.prompt)}`);
@@ -629,7 +630,7 @@ async function onAgentEnd(event: AgentEndEvent, ctx: ExtensionContext): Promise<
         const cond = activeGoal.condition;
         goal = null;
         persist(ctx);
-        if (!loop) clearStateFile(ctx.cwd);
+        if (!loop) clearStateFile(ctx);
         refreshStatus(ctx);
         notify(ctx, `Goal achieved: ${short(cond, 200)}\n${result.reason}\nEvidence: ${result.evidence.join(', ')}`);
         return;
@@ -774,10 +775,11 @@ export default function (pi: ExtensionAPI): void {
       }, 2000);
     } else if (loop && loop.intervalMs === null) {
       setTimeout(() => {
-        if (loop && loop.intervalMs === null) {
-          const c = freshCtx();
-          if (c) loopTick(c);
-        }
+        // agent_settled may already have ticked (auto-compaction ends inside a
+        // run); never steer a duplicate loop prompt into queued or live work.
+        if (!loop || loop.intervalMs !== null || tickOnSettle) return;
+        const c = freshCtx();
+        if (c && c.isIdle() && !c.hasPendingMessages()) loopTick(c);
       }, 2000);
     }
   });

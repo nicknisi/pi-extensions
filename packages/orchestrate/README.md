@@ -1,13 +1,13 @@
 # @nicknisi/pi-orchestrate
 
-Evidence-aware `/goal` and recurring `/loop` for pi. `/goal <condition>` keeps working until a sidecar using the **current session's model** finds cited evidence of completion, or pauses when verification or continuation budgets fail. No Jev, separate provider, or additional credentials are needed. `/loop [interval] <prompt>` re-runs a prompt on a timer or self-paced after every run settles. One goal and one loop per session; state persists to disk keyed to the owning session file so it survives `--resume` without leaking into other sessions sharing the same cwd.
+Evidence-aware `/goal` and recurring `/loop` for pi. `/goal <condition>` keeps working until a sidecar using the **current session's model** finds cited evidence of completion, or pauses when verification or continuation budgets fail. No Jev, separate provider, or additional credentials are needed. `/loop [interval] <prompt>` re-runs a prompt on a timer or self-paced after every run settles. One goal and one loop per session; state persists to a per-session file so it survives `--resume` without leaking into, or being overwritten by, other sessions sharing the same cwd.
 
 ## What it adds
 
 - Slash commands: `/goal`, `/loop`
 - Status line entry (`pi-goal`): shows active/paused goal (duration, runs/budget) or loop (pace, runs)
 - Events hooked: `session_start`, `agent_end`, `agent_settled`, `session_compact`, `session_shutdown`, `turn_start`
-- Files read/written: `<cwd>/.pi-goal/state.json`, `<cwd>/.pi-loop.md`
+- Files read/written: `<cwd>/.pi-goal/<session>.json`, `<cwd>/.pi-loop.md`
 - No tools, no widgets, no keybindings, no custom message/entry types
 
 ## Commands
@@ -67,7 +67,7 @@ Run a maintenance check: review the repository state and address anything stale,
 
 ## Persistence
 
-State is written to `<cwd>/.pi-goal/state.json`:
+State is written to `<cwd>/.pi-goal/<session>.json`, where `<session>` is the owning session file's name without `.jsonl`:
 
 ```json
 {
@@ -89,13 +89,14 @@ State is written to `<cwd>/.pi-goal/state.json`:
 
 Semantics:
 
-- `owner` is the session file path. Persisted state is re-adopted **only** by that exact session (i.e. via `--resume`). Any other session in the same cwd — different session, ephemeral session, or legacy state with no owner stamp — ignores it. This is deliberate: an earlier cwd-keyed version leaked goals into every concurrent session in the directory.
-- Orphaned state whose owning session file no longer exists is pruned on load.
+- Each session reads, writes, and deletes only its own file, so concurrent sessions in the same cwd never clobber each other's goal or loop (an earlier single cwd-keyed file was overwritten or deleted by any `/goal` or `/loop` command in another session).
+- `owner` is the session file path. Persisted state is re-adopted **only** by that exact session (i.e. via `--resume`); a file whose `owner` does not match is ignored. A legacy `<cwd>/.pi-goal/state.json` is never read and can be deleted.
+- Files of deleted sessions are not pruned automatically; `<cwd>/.pi-goal/` is safe to delete when no session is using it.
 - Ephemeral sessions (no session file) never persist; goal/loop state is memory-only.
-- The state file is deleted when both goal and loop are cleared.
+- The session's state file is deleted when both its goal and loop are cleared.
 - Persistence is advisory: all fs errors are swallowed and never block the loop.
 
-Restoration happens on `session_start`; a timer-driven loop is re-armed. The legacy `turns` field counts completed agent runs in the current budget window. Optional verification fields are absent in older state files, which remain supported. On `session_compact`, an active goal continuation (subject to its budget) or self-paced loop tick is re-sent after 2s. Pending goal continuations are ignored after goal replacement, pause, or session shutdown.
+Restoration happens on `session_start`; a timer-driven loop is re-armed. The legacy `turns` field counts completed agent runs in the current budget window. Optional verification fields are absent in older state files, which remain supported. On `session_compact`, an active goal continuation (subject to its budget) or self-paced loop tick is re-sent after 2s. Pending goal continuations are ignored after goal replacement, pause, or session shutdown. Both are skipped if the agent is busy or messages are queued, and the loop tick is also skipped while an `agent_settled` tick is pending, so auto-compaction mid-run never queues a duplicate prompt.
 
 ## The evaluator
 
@@ -120,7 +121,7 @@ No settings file and no environment variables. Behavior is controlled entirely b
 - `/goal` and `/loop` arguments (including `/goal resume` to explicitly renew a paused goal)
 - built-in goal limits: 10 runs, 30 minutes between continuations, 2 consecutive unknown verdicts, and 60 seconds per evaluator prompt
 - optional `<cwd>/.pi-loop.md` — default loop prompt
-- `<cwd>/.pi-goal/state.json` — managed by the extension; do not hand-edit
+- `<cwd>/.pi-goal/<session>.json` — managed by the extension; do not hand-edit
 
 ## Dependencies
 
