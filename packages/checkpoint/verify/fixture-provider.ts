@@ -102,6 +102,10 @@ export async function createFixture(options: FixtureOptions = {}): Promise<Fixtu
     cwd: dir,
     agentDir,
     settingsManager,
+    // Keep the system prompt hermetic: user-global skills (~/.agents/skills) and
+    // ancestor AGENTS.md files would otherwise inflate token accounting.
+    noSkills: true,
+    noContextFiles: true,
     extensionFactories: [
       { name: 'faux-provider', factory: (pi) => pi.registerProvider(faux.provider) },
       {

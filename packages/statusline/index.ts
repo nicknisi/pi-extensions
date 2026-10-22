@@ -32,8 +32,17 @@ const execFileP = promisify(execFile);
 
 const statusDir = () => join(process.env.HOME || '', '.cache', 'pi-status');
 
+// Resolved once per process (and refreshed on session_start): writeStatus runs
+// on every tool call, and a synchronous tmux subprocess there blocks the TUI.
+let tmuxSession: { value: string | undefined } | undefined;
+
 function getTmuxSession(): string | undefined {
   if (!process.env.TMUX) return undefined;
+  tmuxSession ??= { value: resolveTmuxSession() };
+  return tmuxSession.value;
+}
+
+function resolveTmuxSession(): string | undefined {
   try {
     return execSync("tmux display-message -p '#{session_name}'", {
       encoding: 'utf-8',
@@ -330,6 +339,7 @@ export default function (pi: ExtensionAPI) {
   // ── Tmux status hooks ──────────────────────────────────────────────────
 
   pi.on('session_start', async () => {
+    tmuxSession = undefined; // pick up a renamed tmux session
     writeStatus('idle');
   });
 

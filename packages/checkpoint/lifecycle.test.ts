@@ -466,6 +466,32 @@ describe('threshold enforcement', () => {
     expect((blocked as { block?: boolean }).block).toBe(true);
   });
 
+  it('releases the hard lock when a larger-window model moves the cutoff above usage', async () => {
+    const flags = { 'compact-soft-at': '40%', 'compact-at': '50%', 'compact-buffer': '10%' };
+    const h = makeHarness({ contextWindow: 400_000, flags });
+    await h.fire('session_start');
+    h.setUsage(250000); // >= hard 240k on a 400k window
+    await h.fire('turn_end');
+    expect(h.active()).toEqual([TOOL_NAME]);
+    (h.ctx as { model: unknown }).model = { contextWindow: 1_000_000 }; // hard is now 600k
+    await h.fire('model_select', { type: 'model_select' });
+    expect(h.active()).toEqual(['read', 'bash', 'edit', 'write', TOOL_NAME]);
+    expect((await h.fire('tool_call', { toolName: 'bash' }))[0]).toBeUndefined();
+  });
+
+  it('keeps a pending handoff locked across a larger-window model switch', async () => {
+    const flags = { 'compact-soft-at': '40%', 'compact-at': '50%', 'compact-buffer': '10%' };
+    const h = makeHarness({ contextWindow: 400_000, flags });
+    await h.fire('session_start');
+    h.setUsage(250000);
+    await h.fire('turn_end');
+    await h.call('unfinished action');
+    (h.ctx as { model: unknown }).model = { contextWindow: 1_000_000 };
+    await h.fire('model_select', { type: 'model_select' });
+    expect(h.active()).toEqual([TOOL_NAME]);
+    expect((await h.fire('tool_call', { toolName: 'bash' }))[0]).toMatchObject({ block: true });
+  });
+
   it('delivers guidance without triggering a turn, so a finished task does not restart', async () => {
     const h = makeHarness({ contextWindow: 1_000_000 });
     await h.fire('session_start');

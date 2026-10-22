@@ -71,7 +71,9 @@ window (e.g. the `225k`/`250k` token defaults on a 200k-token model), the
 configuration fails closed: ordinary tool calls are blocked with an actionable
 error, and `/self-compact-info` shows the reason. Use window-independent
 percentages instead, e.g. `--compact-soft-at 20% --compact-at 50% --compact-buffer 10%`.
-Thresholds are re-resolved when you switch models.
+Thresholds are re-resolved when you switch models. Ordinary tools otherwise stay
+hard-paused until compaction, but if the new model's hard cutoff is above current
+usage, they are restored (unless a `self_compact` handoff is pending).
 
 ## Launch variants
 
