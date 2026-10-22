@@ -1,5 +1,13 @@
 # @nicknisi/pi-llm-council
 
+## 0.4.3
+
+### Patch Changes
+
+- 4786506: recap: summarize the compacted context instead of the raw branch, cap each tool call's arguments at 200 characters, and don't recap again when nothing happened since the last recap; the minimum session length now counts only messages. llm-council: `/council` sends the chairman only the question and the member answers, not the whole conversation. btw: new optional `thinking` config field that overrides the session thinking level for side questions.
+- Updated dependencies [245ee0f]
+  - @nicknisi/pi-shared@0.8.1
+
 ## 0.4.2
 
 ### Patch Changes

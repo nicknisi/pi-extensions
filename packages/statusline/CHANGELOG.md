@@ -1,5 +1,13 @@
 # @nicknisi/pi-statusline
 
+## 0.3.3
+
+### Patch Changes
+
+- 72d8cc5: checkpoint: switching to a model with a larger context window now lifts the hard-cutoff tool lock when usage is below the new cutoff, unless a handoff is pending. statusline: the tmux session name is resolved once per session instead of with a synchronous `tmux` call on every tool call.
+- Updated dependencies [245ee0f]
+  - @nicknisi/pi-shared@0.8.1
+
 ## 0.3.2
 
 ### Patch Changes

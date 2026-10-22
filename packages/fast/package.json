@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-fast",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Toggle faster premium inference for supported Claude and Codex models",
   "keywords": [
     "pi",
