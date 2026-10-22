@@ -1,3 +1,4 @@
 {
-  "model": "fireworks/glm-latest"
+  "model": "fireworks/glm-latest",
+  "thinking": "medium"
 }
