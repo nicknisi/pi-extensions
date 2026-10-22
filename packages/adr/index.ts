@@ -16,19 +16,21 @@
  * No-ops when no docs/decisions/ exists.
  */
 import { existsSync, readdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 const ADR_DIR = join('docs', 'decisions');
 const ADR_FILE = /^\d{4}-.+\.md$/;
 const SECTION = 'decision_records';
 
-/** Walk up from `start` to the filesystem root; first docs/decisions/ wins. */
+/** Walk up from `start` to the repo root (or filesystem root); first docs/decisions/ wins. */
 export function findAdrDir(start: string): string | null {
   let dir = start;
   for (;;) {
     const candidate = join(dir, ADR_DIR);
     if (existsSync(candidate)) return candidate;
+    // `.git` is a directory in a checkout and a file in a worktree; either marks the repo root.
+    if (existsSync(join(dir, '.git'))) return null;
     const parent = dirname(dir);
     if (parent === dir) return null;
     dir = parent;
@@ -57,7 +59,8 @@ export default function (pi: ExtensionAPI) {
       delete sections[SECTION];
       return;
     }
-    const list = adrs.map((f) => `- docs/decisions/${f}`).join('\n');
+    // Relative to cwd, so the paths resolve when pi runs in a subdirectory.
+    const list = adrs.map((f) => `- ${relative(ctx.cwd, join(dir!, f))}`).join('\n');
     sections[SECTION] = `${FRAMING}\n\n${list}`;
   });
 }
