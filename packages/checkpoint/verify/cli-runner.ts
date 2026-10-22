@@ -77,6 +77,7 @@ export async function runCli(options: CliRunOptions): Promise<CliRunResult> {
     sessionDir,
     '--offline',
     '--no-context-files',
+    '--no-skills',
     '-ne',
     '-e',
     HARNESS_PATH,

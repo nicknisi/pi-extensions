@@ -66,7 +66,7 @@ Path: `~/.cache/pi-status/<pane>.status` where `<pane>` is `TMUX_PANE` with the 
 - `state` is one of `working`, `permit`, `question`, `done`, `idle` (the function signature also accepts `completed`, unused in practice). `permit`/`question` match the states fleet's Claude Code hooks write for approval dialogs and questions; they need pi ≥0.85 (`ui_prompt_*` events).
 - `tool` is the tool name from `tool_execution_start`, else `""`.
 - `ts` is a unix timestamp; external consumers can treat a stale `working` state as idle (the code comments mention a 180s decay in "fleet").
-- The tmux session name is resolved with `tmux display-message -p '#{session_name}'`, falling back to parsing the socket path in `$TMUX`.
+- The tmux session name is resolved with `tmux display-message -p '#{session_name}'`, falling back to parsing the socket path in `$TMUX`. It is cached for the process and re-resolved on `session_start`, so a tmux session rename shows up at the next session start.
 - No-op when `TMUX_PANE` is unset. All write/remove failures are swallowed so they can't break the agent.
 
 ## Usage-limit segment (Anthropic only)

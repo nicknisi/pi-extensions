@@ -1058,6 +1058,17 @@ export default function (
 
   pi.on('model_select', async (_event, ctx) => {
     resolveConfig(ctx);
+    // A new window can move the hard cutoff above current usage. Release the
+    // latched hard lock then, unless a handoff owns tool state.
+    const state = currentState(ctx);
+    const tokens = measuredTokens(ctx);
+    if (
+      config?.ok &&
+      !(state && isLockedPhase(state.phase)) &&
+      tokens !== null &&
+      tokens < config.thresholds.hardTokens
+    )
+      exitHard();
     evaluateThresholds(ctx);
   });
 

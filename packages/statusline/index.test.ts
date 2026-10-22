@@ -6,11 +6,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import statusline from './index.js';
 
 // No real tmux or notifier: session names come from the $TMUX socket path fallback.
+const execSync = vi.hoisted(() =>
+  vi.fn(() => {
+    throw new Error('no tmux in tests');
+  }),
+);
 vi.mock('node:child_process', async (original) => ({
   ...(await original<typeof import('node:child_process')>()),
-  execSync: () => {
-    throw new Error('no tmux in tests');
-  },
+  execSync,
   spawn: () => ({ on: () => {}, unref: () => {} }),
 }));
 
@@ -159,6 +162,24 @@ describe('tmux status during ctx.ui prompts', () => {
       expect(h.status()).toMatchObject({ state: 'question', tool: '' });
       await h.fire('ui_prompt_end', { kind: 'select' });
       expect(h.status().state).toBe('working');
+    } finally {
+      h.dispose();
+      h.cleanup();
+    }
+  });
+
+  it('resolves the tmux session once per session_start, not on every tool call', async () => {
+    const h = tmuxSetup();
+    try {
+      await h.fire('session_start');
+      execSync.mockClear();
+      await h.fire('agent_start');
+      for (let i = 0; i < 3; i++) await h.fire('tool_execution_start', { toolName: 'bash' });
+      await h.fire('agent_end');
+      expect(execSync).not.toHaveBeenCalled();
+      expect(h.status()).toMatchObject({ state: 'done', session: 'main' });
+      await h.fire('session_start');
+      expect(execSync).toHaveBeenCalledTimes(1);
     } finally {
       h.dispose();
       h.cleanup();
