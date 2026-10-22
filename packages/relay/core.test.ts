@@ -421,7 +421,8 @@ it('builds, packs, installs, and imports the real core package without Pi or TUI
       dependencies: { [packageJson.name]: 'file:../relay.tgz' },
     }),
   );
-  execFileSync('pnpm', ['install', '--offline', '--ignore-scripts'], { cwd: appDir, stdio: 'pipe' });
+  // --prefer-offline, not --offline: CI's store has dependency tarballs but no registry metadata to resolve ranges.
+  execFileSync('pnpm', ['install', '--prefer-offline', '--ignore-scripts'], { cwd: appDir, stdio: 'pipe' });
 
   const installedDir = path.join(appDir, 'node_modules', '@nicknisi', 'pi-relay');
   const installedPackage = JSON.parse(fs.readFileSync(path.join(installedDir, 'package.json'), 'utf8')) as RelayPackage;
