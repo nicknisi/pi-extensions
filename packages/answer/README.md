@@ -9,6 +9,7 @@ Extracts unanswered questions from the last completed assistant message and pres
 - **Overlays (via `ctx.ui.custom`):**
   - A `BorderedLoader` while questions are being extracted by an LLM (abortable with Esc)
   - An `AnswerComponent` — a bordered, multi-question form with navigation, per-question status, and a submit confirmation step
+- **Footer hint:** `? ctrl+. to answer` (status key `answer-hint`) after a reply that asks you questions, when a classifier is available
 - No tools, no widgets, no custom message/entry types. The submitted answers go out as a regular user message via `pi.sendUserMessage`.
 
 ## How it works
@@ -27,6 +28,12 @@ Extracts unanswered questions from the last completed assistant message and pres
    ```
 
 5. If the session is idle (`ctx.isIdle()`), sends via `pi.sendUserMessage(answers)`. If the agent is still running, sends with `{ deliverAs: "followUp" }` and notifies that it was queued.
+
+## Answer hint
+
+After each completed reply that contains a `?`, a classifier (TypeSafe's Jev by default) judges whether the reply asks you questions that need answers. If it does (probability at least 0.5), the footer shows `? ctrl+. to answer`. The hint clears on your next prompt or when you run `/answer`. A reply without a `?` skips the classifier.
+
+The hint is optional. With no credentials for any of the `hintModels`, an older pi without classifier support, a failed classifier call, or `"hintModels": []`, no hint shows and `/answer` works as before. The last 16,000 characters of the reply go to the classifier's provider.
 
 ## Usage
 
@@ -58,19 +65,23 @@ Optional global config: `~/.pi/agent/configs/answer.json`. Changes take effect o
 
 ```json
 {
-  "extractionModels": ["anthropic/claude-fable-5", "anthropic/claude-opus-5"]
+  "extractionModels": ["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-5"],
+  "hintModels": ["typesafe/jev-latest", "openrouter/typesafe/jev-1.14"]
 }
 ```
 
-`extractionModels` is a non-empty ordered list of `provider/model-id` strings. The first model that both exists in `ctx.modelRegistry` and passes `getApiKeyAndHeaders()` is used. Model IDs may contain additional slashes; only the first slash separates the provider. Missing or invalid config falls back to the list above and invalid config emits a warning. See [`answer.example.json`](./answer.example.json).
+`extractionModels` is a non-empty ordered list of `provider/model-id` strings. The first model that both exists in `ctx.modelRegistry` and passes `getApiKeyAndHeaders()` is used. Model IDs may contain additional slashes; only the first slash separates the provider. Missing or invalid config falls back to the list above and invalid config emits a warning.
 
-The current session model (`ctx.model`) is **not** used for extraction—only checked for presence as a guard. API keys come from Pi's normal model authentication.
+`hintModels` is an ordered list of classifier `provider/model-id` strings for the [answer hint](#answer-hint); the first with working credentials wins. It defaults to Jev on every provider pi lists it under. `[]` turns the hint off. An invalid list warns and keeps the default. See [`answer.example.json`](./answer.example.json).
+
+The current session model (`ctx.model`) is **not** used for extraction, and `/answer` works without one. API keys come from Pi's normal model authentication.
 
 ## Dependencies
 
 - `@earendil-works/pi-coding-agent` (peer, `>=0.86.0`) — `ExtensionAPI`, `ExtensionContext`, `BorderedLoader`, `Theme`; extraction runs through `ctx.modelRegistry.complete(model, { systemPrompt, messages }, { signal })`, which applies `models.json` overrides, extension-registered providers, and request-time auth
 - `@earendil-works/pi-tui` — `Component`, `Focusable`, `Editor`, `EditorTheme`, `Key`, `matchesKey`, `TUI`, `truncateToWidth`, `visibleWidth`, `wrapTextWithAnsi`
 - `@earendil-works/pi-ai` — types only (`Api`, `Model`, `UserMessage`)
+- `@nicknisi/pi-shared` — `findClassifier` and `classifyBool` for the answer hint
 
 No third-party npm dependencies.
 

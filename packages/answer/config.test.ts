@@ -49,9 +49,23 @@ describe('loadAnswerConfig', () => {
     });
 
     expect(loadAnswerConfig(agentDir)).toEqual({
-      config: { extractionModels: ['fireworks/glm-latest', 'anthropic/claude-fable-5'] },
+      config: { ...DEFAULT_ANSWER_CONFIG, extractionModels: ['fireworks/glm-latest', 'anthropic/claude-fable-5'] },
       warnings: [],
     });
+  });
+
+  it('loads hint classifiers on their own, and an empty list turns the hint off', () => {
+    const agentDir = tempDir();
+    writeConfig(agentDir, { hintModels: [] });
+    expect(loadAnswerConfig(agentDir)).toEqual({ config: { ...DEFAULT_ANSWER_CONFIG, hintModels: [] }, warnings: [] });
+  });
+
+  it('warns and keeps the default hint classifiers for an invalid list', () => {
+    const agentDir = tempDir();
+    writeConfig(agentDir, { hintModels: ['jev'] });
+    const result = loadAnswerConfig(agentDir);
+    expect(result.config).toEqual(DEFAULT_ANSWER_CONFIG);
+    expect(result.warnings[0]).toContain('hintModels');
   });
 
   it('warns and falls back for invalid JSON', () => {

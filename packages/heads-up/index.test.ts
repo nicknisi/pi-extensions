@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
@@ -19,7 +19,17 @@ type Factory = (tui: unknown, theme: unknown, kb?: unknown, done?: (v: unknown) 
 
 const theme = { fg: (_c: string, s: string) => s, bg: (_c: string, s: string) => s, bold: (s: string) => s };
 
-function harness(reply = NOTE) {
+/** A registry with one available classifier answering `probability`, or failing when undefined. */
+const withClassifier = (probability?: number) => ({
+  getAvailableOfType: vi.fn(async () => [{ provider: 'typesafe', id: 'jev-latest' }]),
+  classify: vi.fn(async () =>
+    probability === undefined
+      ? { stopReason: 'error', errorMessage: 'boom', answers: {} }
+      : { stopReason: 'stop', answers: { q: { type: 'bool', probability } } },
+  ),
+});
+
+function harness(reply = NOTE, registry: Record<string, unknown> = {}) {
   const handlers = new Map<string, Handler>();
   const commands = new Map<string, (args: string, ctx: ExtensionContext) => Promise<void>>();
   const shortcuts = new Map<string, (ctx: ExtensionContext) => Promise<void>>();
@@ -28,7 +38,12 @@ function harness(reply = NOTE) {
   let widget: Factory | undefined;
   let panelKeys: string[] = [];
   const complete = vi.fn(
-    async () => ({ content: [{ type: 'text', text: reply }], stopReason: 'stop' }) as unknown as AssistantMessage,
+    async () =>
+      ({
+        content: [{ type: 'text', text: reply }],
+        stopReason: 'stop',
+        usage: { cost: { total: 0.12 } },
+      }) as unknown as AssistantMessage,
   );
 
   const pi = {
@@ -44,7 +59,7 @@ function harness(reply = NOTE) {
     mode: 'tui',
     model: { provider: 'p', id: 'm' },
     isIdle: () => true,
-    modelRegistry: { complete, find: () => undefined },
+    modelRegistry: { complete, find: () => undefined, ...registry },
     sessionManager: {
       buildContextEntries: () => [{ type: 'message', message: { role: 'user', content: 'do the thing' } }],
     },
@@ -103,6 +118,17 @@ describe('heads-up', () => {
     expect(h.band()).toContain('migration test');
     expect(readStore().offered).toEqual(['The agent skipped the migration test because it needs a live database.']);
     expect(readStore().events.map((e) => e.kind)).toEqual(['proposed']);
+    expect(readStore().events[0]?.cost).toBe(0.12);
+  });
+
+  it('a check that finds nothing is logged with its cost', async () => {
+    const h = harness('learn: none');
+    await h.fire('session_start');
+    await h.longTurn();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(readStore().events).toEqual([expect.objectContaining({ kind: 'none', cost: 0.12 })]);
+    await h.commands.get('heads-up')!('', h.ctx);
+    expect(h.notify).toHaveBeenLastCalledWith(expect.stringContaining('Logged check cost: $0.12.'), 'info');
   });
 
   it('a short turn makes no check', async () => {
@@ -185,6 +211,52 @@ describe('heads-up', () => {
     await h.fire('input', { source: 'interactive', text: 'next' });
     expect(h.band()).toBeUndefined();
     expect(readStore().events.map((e) => e.kind)).toEqual(['proposed', 'ignored_submit']);
+  });
+
+  it('the gate in shadow mode scores the check but still runs it', async () => {
+    const registry = withClassifier(0.2);
+    const h = harness(NOTE, registry);
+    await h.fire('session_start');
+    await h.longTurn();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(registry.classify).toHaveBeenCalledTimes(1);
+    expect(h.complete).toHaveBeenCalledTimes(1);
+    expect(readStore().events).toMatchObject([{ kind: 'proposed', score: 0.2 }]);
+  });
+
+  it('the gate logs a scored check that found nothing', async () => {
+    const h = harness('learn: none', withClassifier(0.7));
+    await h.fire('session_start');
+    await h.longTurn();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(readStore().events).toMatchObject([{ kind: 'none', score: 0.7 }]);
+  });
+
+  it('an enforced gate skips checks below the threshold', async () => {
+    mkdirSync(join(dir, 'configs'), { recursive: true });
+    writeFileSync(join(dir, 'configs', 'heads-up.json'), JSON.stringify({ gateEnforce: true, gateThreshold: 0.5 }));
+    const h = harness(NOTE, withClassifier(0.2));
+    await h.fire('session_start');
+    await h.longTurn();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(h.complete).not.toHaveBeenCalled();
+    expect(h.band()).toBeUndefined();
+    expect(readStore().events).toMatchObject([{ kind: 'gated', score: 0.2 }]);
+  });
+
+  it('an enforced gate that fails lets the check run', async () => {
+    mkdirSync(join(dir, 'configs'), { recursive: true });
+    writeFileSync(join(dir, 'configs', 'heads-up.json'), JSON.stringify({ gateEnforce: true }));
+    const h = harness(NOTE, withClassifier(undefined));
+    await h.fire('session_start');
+    await h.longTurn();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(h.complete).toHaveBeenCalledTimes(1);
+    expect(readStore().events).toEqual([expect.objectContaining({ kind: 'proposed' })]);
+    expect(readStore().events[0]).not.toHaveProperty('score');
   });
 
   it('/heads-up off stops checks', async () => {

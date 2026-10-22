@@ -46,6 +46,16 @@ export const checkSystem = SYSTEM;
 
 const session = (digest: string): string => `<session>\n${digest}\n</session>`;
 
+/** The classifier gate's yes/no, asked ahead of the side request. Mirrors the bar in SYSTEM. */
+export const gateQuestion = {
+  instructions:
+    'Does `session`, a digest of a coding session, contain something with real consequences that the person will plausibly miss? Count a decision the agent made in passing, a result that may be wrong, a skipped check, or a cost, data, or security tradeoff. Do not count anything the person already asked about or discussed, trivia, routine plumbing, or topics listed in `alreadyOffered` or `alreadyKnown`.',
+  criteria: {
+    true: 'A consequential, easy-to-miss point worth a short note',
+    false: 'Only routine work, trivia, or points the person already discussed',
+  },
+};
+
 export const checkPrompt = (digest: string, offered: string[], known: string[]): string =>
   [
     session(digest),

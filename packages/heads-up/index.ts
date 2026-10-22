@@ -25,10 +25,12 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from '@earendil-works/pi-tui';
+import { type Classifier, classifyBool, findClassifier } from '@nicknisi/pi-shared';
 import {
   type Kind,
   loadConfig,
   logEvent,
+  makeEvent,
   MAX_EVENTS,
   MAX_KNOWN,
   MAX_OFFERED,
@@ -44,6 +46,7 @@ import {
   checkPrompt,
   checkSystem,
   digest,
+  gateQuestion,
   pagePrompt,
   type Variant,
   variantPrompt,
@@ -254,6 +257,8 @@ export default function headsUp(pi: ExtensionAPI) {
   let warnedModel = false;
   let timer: ReturnType<typeof setInterval> | undefined;
   let inflight: AbortController | undefined;
+  // Resolved once per session; undefined means no classifier, so checks run ungated.
+  let gate: Promise<Classifier | undefined> | undefined;
 
   const isLong = (now: number) => turn.tools >= config.minTools || now - turn.startedAt >= minMs;
 
@@ -286,7 +291,7 @@ export default function headsUp(pi: ExtensionAPI) {
     return configured ?? ctx.model;
   };
 
-  /** One tool-less side request over a digest of the session. */
+  /** One tool-less side request over a digest of the session: its text and its cost in USD. */
   const ask = async (ctx: ExtensionContext, systemPrompt: string, text: string, signal: AbortSignal) => {
     const model = resolveModel(ctx);
     if (!model) throw new Error('no model available');
@@ -297,15 +302,31 @@ export default function headsUp(pi: ExtensionAPI) {
     );
     if (reply.stopReason === 'aborted') return null;
     if (reply.stopReason === 'error') throw new Error(reply.errorMessage ?? 'request failed');
-    return reply.content
+    const replyText = reply.content
       .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
       .map((c) => c.text)
       .join('\n')
       .trim();
+    return { text: replyText, cost: reply.usage?.cost.total };
   };
 
   const sessionDigest = (ctx: ExtensionContext) =>
     digest(ctx.sessionManager.buildContextEntries(), config.maxDigestChars);
+
+  const resolveGate = (ctx: ExtensionContext) => (gate ??= findClassifier(ctx.modelRegistry, config.gateModels));
+
+  /** Classifier probability that the check will find something; undefined without a working classifier. */
+  const gateScore = async (
+    ctx: ExtensionContext,
+    transcript: string,
+    store: { offered: string[]; known: string[] },
+    signal: AbortSignal,
+  ) => {
+    const model = await resolveGate(ctx);
+    if (!model) return undefined;
+    const state = { session: transcript, alreadyOffered: store.offered, alreadyKnown: store.known };
+    return classifyBool(ctx.modelRegistry, model, state, gateQuestion, signal);
+  };
 
   /** Returns the error message when the check failed, so a manual check can report it. */
   const runCheck = async (ctx: ExtensionContext, manual = false): Promise<string | undefined> => {
@@ -317,13 +338,27 @@ export default function headsUp(pi: ExtensionAPI) {
       const transcript = sessionDigest(ctx);
       if (!transcript.trim()) return;
       const store = readStore();
+      // A manual check always runs the side request; the gate only screens automatic ones.
+      const score = manual ? undefined : await gateScore(ctx, transcript, store, signal);
+      if (signal.aborted) return;
+      if (score !== undefined && config.gateEnforce && score < config.gateThreshold) {
+        logEvent('gated', '', { score });
+        return;
+      }
       const reply = await ask(ctx, checkSystem, checkPrompt(transcript, store.offered, store.known), signal);
+      if (!reply || signal.aborted) return;
       warnedError = false;
-      const note = reply ? parse(reply) : null;
-      if (!note || signal.aborted || shown || readStore().disabled) return;
+      const extra = { score, cost: reply.cost };
+      const note = reply.text ? parse(reply.text) : null;
+      if (!note) {
+        // Log every completed check, so the store shows what checks cost and how often they find something.
+        logEvent('none', '', extra);
+        return;
+      }
+      if (shown || readStore().disabled) return;
       updateStore((s) => {
         s.offered = pushFront(s.offered, note.learn, MAX_OFFERED);
-        s.events = [...s.events, { ts: Date.now(), kind: 'proposed' as const, learn: note.learn }].slice(-MAX_EVENTS);
+        s.events = [...s.events, makeEvent('proposed', note.learn, extra)].slice(-MAX_EVENTS);
       });
       shown = { note, view: 'collapsed', rewrite: null, at: Date.now() };
       renderBand(ctx);
@@ -352,6 +387,7 @@ export default function headsUp(pi: ExtensionAPI) {
   };
 
   pi.on('session_start', async (_event, ctx) => {
+    gate = undefined;
     for (const warning of warnings) ctx.ui.notify(warning, 'warning');
     if (ctx.mode !== 'tui') return;
     if (timer) clearInterval(timer);
@@ -412,13 +448,13 @@ export default function headsUp(pi: ExtensionAPI) {
             theme,
             current,
             async (variant, signal) => {
-              const text = await ask(
+              const reply = await ask(
                 ctx,
                 variantSystem,
                 variantPrompt(sessionDigest(ctx), current.note, variant),
                 signal,
               );
-              return text || null;
+              return reply?.text || null;
             },
             () => logEvent('explained', current.note.learn),
             done,
@@ -482,13 +518,21 @@ export default function headsUp(pi: ExtensionAPI) {
       }
       const store = readStore();
       const counts = new Map<string, number>();
-      for (const e of store.events) counts.set(e.kind, (counts.get(e.kind) ?? 0) + 1);
+      let spent = 0;
+      for (const e of store.events) {
+        counts.set(e.kind, (counts.get(e.kind) ?? 0) + 1);
+        spent += e.cost ?? 0;
+      }
       const tally = [...counts].map(([kind, n]) => `${kind} ${n}`).join(', ');
+      const gateModel = await resolveGate(ctx);
+      const gateMode = config.gateEnforce ? `skips checks below ${config.gateThreshold}` : 'shadow, scores only';
       ctx.ui.notify(
         [
           `heads-up is ${store.disabled ? 'off' : 'on'}. A long turn is ${config.minTools} tool calls or ${config.minSeconds}s; checks at most every ${config.cooldownSeconds}s.`,
           `Model: ${config.model ?? 'session model'}. ${store.known.length} topics marked known.`,
+          `Gate: ${gateModel ? `${gateModel.provider}/${gateModel.id} (${gateMode})` : 'off (no classifier available)'}.`,
           tally ? `Events: ${tally}.` : '',
+          spent ? `Logged check cost: $${spent.toFixed(2)}.` : '',
         ]
           .filter(Boolean)
           .join('\n'),

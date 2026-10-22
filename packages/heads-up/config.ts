@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
+import { DEFAULT_CLASSIFIERS } from '@nicknisi/pi-shared';
 
 export interface HeadsUpConfig {
   /** A turn with at least this many tool calls counts as long. */
@@ -15,6 +16,12 @@ export interface HeadsUpConfig {
   shortcut: string;
   /** Transcript digest budget in characters (most recent kept). */
   maxDigestChars: number;
+  /** Classifiers (provider/model-id) that score each check first; the first available wins. Empty turns the gate off. */
+  gateModels: string[];
+  /** With gateEnforce, checks scoring below this skip the side request. */
+  gateThreshold: number;
+  /** false (shadow): score and log only. true: skip checks below gateThreshold. */
+  gateEnforce: boolean;
 }
 
 export const DEFAULT_CONFIG: HeadsUpConfig = {
@@ -23,6 +30,9 @@ export const DEFAULT_CONFIG: HeadsUpConfig = {
   cooldownSeconds: 300,
   shortcut: 'alt+h',
   maxDigestChars: 120_000,
+  gateModels: [...DEFAULT_CLASSIFIERS],
+  gateThreshold: 0.5,
+  gateEnforce: false,
 };
 
 export const configPath = (agentDir = getAgentDir()): string => join(agentDir, 'configs', 'heads-up.json');
@@ -67,7 +77,18 @@ export function loadConfig(agentDir = getAgentDir()): { config: HeadsUpConfig; w
     cooldownSeconds: positive(o.cooldownSeconds, DEFAULT_CONFIG.cooldownSeconds),
     shortcut: typeof o.shortcut === 'string' && o.shortcut.trim() ? o.shortcut.trim() : DEFAULT_CONFIG.shortcut,
     maxDigestChars: positive(o.maxDigestChars, DEFAULT_CONFIG.maxDigestChars),
+    gateModels: DEFAULT_CONFIG.gateModels,
+    gateThreshold:
+      typeof o.gateThreshold === 'number' && o.gateThreshold >= 0 && o.gateThreshold <= 1
+        ? o.gateThreshold
+        : DEFAULT_CONFIG.gateThreshold,
+    gateEnforce: o.gateEnforce === true,
   };
+  if (o.gateModels !== undefined) {
+    if (Array.isArray(o.gateModels) && o.gateModels.every((m) => typeof m === 'string' && parseModelSpec(m)))
+      config.gateModels = o.gateModels.map((m: string) => m.trim());
+    else warnings.push('heads-up: config gateModels must be an array of provider/model-id strings; using the default');
+  }
   if (o.model !== undefined) {
     if (typeof o.model === 'string' && parseModelSpec(o.model)) config.model = o.model.trim();
     else warnings.push(`heads-up: config model must be a provider/model-id string; using the session model`);
@@ -77,9 +98,33 @@ export function loadConfig(agentDir = getAgentDir()): { config: HeadsUpConfig; w
 
 // ── Store: cross-session state, local only ───────────────────────────────
 
-export type Kind = 'proposed' | 'explained' | 'page' | 'chat' | 'known' | 'dismissed' | 'ignored_submit';
+export type Kind =
+  | 'proposed'
+  | 'explained'
+  | 'page'
+  | 'chat'
+  | 'known'
+  | 'dismissed'
+  | 'ignored_submit'
+  // 'none': a check found nothing to say. 'gated': the classifier gate skipped the check.
+  | 'none'
+  | 'gated';
 
-export type HeadsUpEvent = { ts: number; kind: Kind; learn: string };
+/**
+ * `score` is the classifier gate's probability for the check behind the event.
+ * `cost` is that check's side-request cost in USD at catalog prices.
+ */
+export type HeadsUpEvent = { ts: number; kind: Kind; learn: string; score?: number; cost?: number };
+
+export type EventExtra = { score?: number | undefined; cost?: number | undefined };
+
+/** An event, leaving out unknown score and cost. */
+export const makeEvent = (kind: Kind, learn: string, extra: EventExtra = {}): HeadsUpEvent => {
+  const event: HeadsUpEvent = { ts: Date.now(), kind, learn };
+  if (extra.score !== undefined) event.score = extra.score;
+  if (extra.cost !== undefined) event.cost = extra.cost;
+  return event;
+};
 
 export interface Store {
   /** Topics marked understood; the check prompt excludes them. */
@@ -94,7 +139,8 @@ export interface Store {
 
 export const MAX_KNOWN = 50;
 export const MAX_OFFERED = 5;
-export const MAX_EVENTS = 500;
+// Every check logs an event, so this holds a few weeks of checks plus their feedback.
+export const MAX_EVENTS = 2000;
 
 const strings = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
@@ -130,8 +176,9 @@ export function updateStore(change: (store: Store) => void, agentDir = getAgentD
 export const pushFront = (list: string[], item: string, max: number): string[] =>
   [item, ...list.filter((i) => i !== item)].slice(0, max);
 
-export const logEvent = (kind: Kind, learn: string): void => {
+export const logEvent = (kind: Kind, learn: string, extra?: EventExtra): void => {
+  const event = makeEvent(kind, learn, extra);
   updateStore((s) => {
-    s.events = [...s.events, { ts: Date.now(), kind, learn }].slice(-MAX_EVENTS);
+    s.events = [...s.events, event].slice(-MAX_EVENTS);
   });
 };

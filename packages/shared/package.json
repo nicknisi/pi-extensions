@@ -21,7 +21,8 @@
     "workflow.ts",
     "tools.ts",
     "tui-utils.ts",
-    "searchable-select-list.ts"
+    "searchable-select-list.ts",
+    "classifier.ts"
   ],
   "type": "module",
   "exports": {

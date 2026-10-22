@@ -1,5 +1,6 @@
 import type { Api, Model, UserMessage } from '@earendil-works/pi-ai';
 import { BorderedLoader, Theme, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { type Classifier, classifyBool, findClassifier } from '@nicknisi/pi-shared';
 import { loadAnswerConfig, parseModelPreference, type ModelPreference } from './config.js';
 import {
   type Component,
@@ -54,6 +55,15 @@ Rules:
 - When unsure, favor completeness and clarity over brevity.
 - Do not add commentary outside the JSON object.
 - If there are no user-answerable questions, return {"questions": []}.`;
+
+const HINT_KEY = 'answer-hint';
+/** Questions sit at the end of a reply; the tail keeps long replies within the classifier's context. */
+const HINT_CHARS = 16_000;
+const HINT_QUESTION = {
+  instructions:
+    'Does `message`, the latest reply from a coding agent, ask the user questions they need to answer before the work can continue, such as a choice, a confirmation, or a missing detail? Rhetorical questions, questions the agent answers itself, and "?" inside code, commands, or URLs do not count.',
+  criteria: { true: 'Asks the user questions that need answers', false: 'Has no questions for the user' },
+};
 
 function formatExtractionModelPreferences(preferences: readonly ModelPreference[]): string {
   return preferences.map((candidate) => `${candidate.provider}/${candidate.modelId}`).join(', ');
@@ -460,18 +470,52 @@ export default function (pi: ExtensionAPI) {
   const { config, warnings } = loadAnswerConfig();
   const extractionModelPreferences = config.extractionModels.map((model) => parseModelPreference(model)!);
 
+  // Hint: after a reply that asks questions, show the shortcut in the footer.
+  // Without an available classifier there is no hint and /answer works as before.
+  let hintClassifier: Promise<Classifier | undefined> | undefined;
+  // Bumped by each new prompt, so a slow classifier cannot show a stale hint.
+  let hintTurn = 0;
+  const clearHint = (ctx: ExtensionContext) => {
+    hintTurn += 1;
+    if (ctx.hasUI) ctx.ui.setStatus(HINT_KEY, undefined);
+  };
+
   pi.on('session_start', async (_event, ctx) => {
+    hintClassifier = undefined;
     for (const warning of warnings) ctx.ui.notify(warning, 'warning');
   });
 
+  pi.on('input', async (_event, ctx) => {
+    clearHint(ctx);
+    return { action: 'continue' } as const;
+  });
+
+  pi.on('agent_end', async (event, ctx) => {
+    if (!ctx.hasUI || config.hintModels.length === 0) return;
+    const last = [...event.messages].reverse().find((message) => message.role === 'assistant');
+    if (!last || last.role !== 'assistant' || last.stopReason !== 'stop') return;
+    const text = getTextParts(last.content).join('\n').trim();
+    // shortcut: a reply without "?" gets no hint, which skips the classifier on most turns; drop this if hints go missing.
+    if (!text.includes('?')) return;
+    const turn = hintTurn;
+    void (async () => {
+      const model = await (hintClassifier ??= findClassifier(ctx.modelRegistry, config.hintModels));
+      if (!model) return;
+      const probability = await classifyBool(
+        ctx.modelRegistry,
+        model,
+        { message: text.slice(-HINT_CHARS) },
+        HINT_QUESTION,
+      );
+      if (probability !== undefined && probability >= 0.5 && turn === hintTurn)
+        ctx.ui.setStatus(HINT_KEY, ctx.ui.theme.fg('accent', '? ctrl+. to answer'));
+    })().catch(() => {}); // The session may be gone by the time the classifier answers.
+  });
+
   const answerHandler = async (ctx: ExtensionContext) => {
+    clearHint(ctx);
     if (!ctx.hasUI) {
       ctx.ui.notify('answer requires interactive mode', 'error');
-      return;
-    }
-
-    if (!ctx.model) {
-      ctx.ui.notify('No model selected', 'error');
       return;
     }
 
@@ -506,15 +550,6 @@ export default function (pi: ExtensionAPI) {
       loader.onAbort = () => done({ type: 'cancelled' });
 
       const doExtract = async () => {
-        const auth = await ctx.modelRegistry.getApiKeyAndHeaders(extractionModel);
-        if (!auth.ok) {
-          const authError = 'error' in auth ? auth.error : 'Unknown auth error';
-          return {
-            type: 'error',
-            message: `No auth available for ${extractionModel.provider}/${extractionModel.id}: ${authError}`,
-          } as ExtractionOutcome;
-        }
-
         const userMessage: UserMessage = {
           role: 'user',
           content: [{ type: 'text', text: lastAssistantText }],
