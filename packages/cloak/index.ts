@@ -16,6 +16,8 @@ interface CloakRuleConfig {
   filePattern: string | string[];
   cloakPattern: CloakPatternSpec | CloakPatternSpec[];
   replace?: string;
+  /** Apply to every read/bash/grep result, not only output from files matching `filePattern`. */
+  global?: boolean;
 }
 
 interface CloakConfig {
@@ -33,6 +35,7 @@ interface CompiledCloakPattern {
 }
 
 interface CompiledCloakRule {
+  global: boolean;
   filePatterns: string[];
   fileRegexes: RegExp[];
   patterns: CompiledCloakPattern[];
@@ -43,7 +46,15 @@ interface RuntimeState {
   config: CloakConfig;
   rules: CompiledCloakRule[];
   error?: string;
+  /** Config file exists but could not be loaded: withhold tool output instead of passing it through. */
+  failClosed?: boolean;
 }
+
+function missingConfigMessage(configPath: string): string {
+  return `pi-cloak config not found at ${configPath}`;
+}
+
+const CLOAKED_TOOLS = new Set(['read', 'bash', 'grep']);
 
 const DEFAULT_CONFIG_PATH = join(getAgentDir(), 'cloak.json');
 const DEFAULT_CONFIG: CloakConfig = {
@@ -118,9 +129,11 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(pattern);
 }
 
+// Patterns run over the whole text; `m` keeps `^`/`$` anchored per line as when patterns ran line-by-line.
 function ensureGlobalFlags(flags?: string): string {
   const unique = new Set((flags ?? '').split('').filter(Boolean));
   unique.add('g');
+  unique.add('m');
   return Array.from(unique).join('');
 }
 
@@ -128,7 +141,7 @@ function compilePattern(spec: CloakPatternSpec, ruleReplace?: string): CompiledC
   if (typeof spec === 'string') {
     return {
       source: spec,
-      regex: new RegExp(spec, 'g'),
+      regex: new RegExp(spec, ensureGlobalFlags()),
       replace: ruleReplace,
     };
   }
@@ -145,6 +158,7 @@ function compileRule(rule: CloakRuleConfig): CompiledCloakRule {
   const cloakPatterns = toArray(rule.cloakPattern);
 
   return {
+    global: rule.global === true,
     filePatterns,
     fileRegexes: filePatterns.map(globToRegExp),
     patterns: cloakPatterns.map((pattern) => compilePattern(pattern, rule.replace)),
@@ -161,10 +175,23 @@ export function loadState(configPath: string = DEFAULT_CONFIG_PATH): RuntimeStat
       patterns: parsed.patterns ?? [],
     };
 
+    const rules: CompiledCloakRule[] = [];
+    const ruleErrors: string[] = [];
+    (config.patterns ?? []).forEach((rule, index) => {
+      try {
+        rules.push(compileRule(rule));
+      } catch (error) {
+        ruleErrors.push(
+          `pi-cloak skipped rule #${index + 1} in ${configPath}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    });
+
     return {
       configPath,
       config,
-      rules: (config.patterns ?? []).map(compileRule),
+      rules,
+      ...(ruleErrors.length > 0 ? { error: ruleErrors.join('\n') } : {}),
     };
   } catch (error) {
     const isMissingFile = error instanceof Error && 'code' in error && error.code === 'ENOENT';
@@ -174,8 +201,9 @@ export function loadState(configPath: string = DEFAULT_CONFIG_PATH): RuntimeStat
       config: DEFAULT_CONFIG,
       rules: [],
       error: isMissingFile
-        ? `pi-cloak config not found at ${configPath}`
+        ? missingConfigMessage(configPath)
         : `pi-cloak failed to load ${configPath}: ${error instanceof Error ? error.message : String(error)}`,
+      ...(isMissingFile ? {} : { failClosed: true }),
     };
   }
 }
@@ -267,18 +295,39 @@ function buildMaskedReplacement(
   return truncatedVisible + repeatToLength(cloakCharacter, maskedLength);
 }
 
-function applyPatternsToLine(
-  line: string,
+function lineBounds(text: string, start: number, end: number): [number, number] {
+  const lineStart = text.lastIndexOf('\n', start - 1) + 1;
+  const lineEnd = text.indexOf('\n', end);
+  return [lineStart, lineEnd === -1 ? text.length : lineEnd];
+}
+
+function applyPatterns(
+  text: string,
   patterns: CompiledCloakPattern[],
   config: CloakConfig,
-): { line: string; changed: boolean } {
-  let updated = line;
+): { text: string; changed: boolean } {
+  let updated = text;
   let changed = false;
+  // Per-character "changed by an earlier pattern" marks, so tryAllPatterns=false still stops per line.
+  let marks: boolean[] | undefined;
+
+  const trackMarks = !config.tryAllPatterns;
 
   for (const pattern of patterns) {
+    let next = '';
+    const nextMarks: boolean[] = [];
+    let last = 0;
     let matchedThisPattern = false;
-    const next = updated.replace(pattern.regex, (match: string, ...args: unknown[]) => {
-      const captures = args.slice(0, Math.max(0, args.length - 2)).map((value) => String(value ?? ''));
+
+    for (const found of updated.matchAll(pattern.regex)) {
+      const match = found[0];
+      const index = found.index;
+      if (marks) {
+        const [lineStart, lineEnd] = lineBounds(updated, index, index + match.length);
+        if (marks.slice(lineStart, lineEnd).some(Boolean)) continue;
+      }
+
+      const captures = found.slice(1).map((value) => String(value ?? ''));
       const replacement = buildMaskedReplacement(
         match,
         captures,
@@ -286,51 +335,56 @@ function applyPatternsToLine(
         config.cloakCharacter ?? '*',
         config.cloakLength,
       );
+      if (replacement === match) continue;
 
-      if (replacement !== match) {
-        matchedThisPattern = true;
+      matchedThisPattern = true;
+      next += updated.slice(last, index) + replacement;
+      if (trackMarks) {
+        for (let i = last; i < index; i++) nextMarks.push(marks?.[i] ?? false);
+        for (let i = 0; i < replacement.length; i++) nextMarks.push(true);
       }
-
-      return replacement;
-    });
+      last = index + match.length;
+    }
 
     if (matchedThisPattern) {
+      if (trackMarks) {
+        for (let i = last; i < updated.length; i++) nextMarks.push(marks?.[i] ?? false);
+        marks = nextMarks;
+      }
+      next += updated.slice(last);
       updated = next;
       changed = true;
-      if (!config.tryAllPatterns) {
-        break;
-      }
     }
   }
 
-  return { line: updated, changed };
+  return { text: updated, changed };
 }
 
-export function cloakText(rawText: string, rawPath: string, cwd: string, state: RuntimeState): string {
+/**
+ * Cloak `rawText` with the rules that are `global` or whose file glob matches one of `rawPaths`:
+ * the read path, the files a bash command names, or grep's path and glob.
+ */
+export function cloakText(rawText: string, rawPaths: string | string[], cwd: string, state: RuntimeState): string {
   if (!state.config.enabled) return rawText;
 
-  const matchingRules = state.rules.filter((rule) => ruleMatchesPath(rule, rawPath, cwd));
+  const paths = typeof rawPaths === 'string' ? [rawPaths] : rawPaths;
+  const matchingRules = state.rules.filter(
+    (rule) => rule.global || paths.some((path) => ruleMatchesPath(rule, path, cwd)),
+  );
   if (matchingRules.length === 0) return rawText;
 
-  const newline = rawText.includes('\r\n') ? '\r\n' : '\n';
-  const lines = rawText.split(/\r?\n/);
+  let updated = rawText;
   let changed = false;
 
-  const cloakedLines = lines.map((line) => {
-    let updated = line;
-
-    for (const rule of matchingRules) {
-      const result = applyPatternsToLine(updated, rule.patterns, state.config);
-      if (result.changed) {
-        updated = result.line;
-        changed = true;
-      }
+  for (const rule of matchingRules) {
+    const result = applyPatterns(updated, rule.patterns, state.config);
+    if (result.changed) {
+      updated = result.text;
+      changed = true;
     }
+  }
 
-    return updated;
-  });
-
-  return changed ? cloakedLines.join(newline) : rawText;
+  return changed ? updated : rawText;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -343,8 +397,9 @@ export default function (pi: ExtensionAPI) {
   pi.on('session_start', async (_event, ctx) => {
     reloadConfig();
 
-    if (state.error && ctx.hasUI) {
-      ctx.ui.notify(state.error, 'warning');
+    if (state.error) {
+      if (ctx.hasUI) ctx.ui.notify(state.error, 'warning');
+      else if (state.error !== missingConfigMessage(state.configPath)) console.error(state.error);
     }
   });
 
@@ -362,11 +417,28 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on('tool_result', async (event, ctx) => {
-    if (event.toolName !== 'read') return undefined;
+    if (!CLOAKED_TOOLS.has(event.toolName)) return undefined;
+
+    if (state.failClosed) {
+      const text = `[pi-cloak: ${event.toolName} output withheld because the cloak config could not be loaded. ${state.error ?? ''}]`;
+      return { content: [{ type: 'text' as const, text }] };
+    }
+
     if (!state.config.enabled) return undefined;
 
-    const rawPath = typeof event.input?.path === 'string' ? event.input.path : '';
-    if (!rawPath) return undefined;
+    const input = (event.input ?? {}) as Record<string, unknown>;
+    const strings = (...values: unknown[]) => values.filter((v): v is string => typeof v === 'string' && v !== '');
+    let rawPaths: string[];
+    if (event.toolName === 'read') {
+      rawPaths = strings(input.path);
+      if (rawPaths.length === 0) return undefined;
+    } else if (event.toolName === 'grep') {
+      rawPaths = strings(input.path, input.glob);
+    } else {
+      // shortcut: bash output is matched to rules by the file names its command mentions (`cat .env`); a secret
+      // printed without naming its file (`env`, `rg KEY`) needs a `global` rule.
+      rawPaths = typeof input.command === 'string' ? input.command.split(/[\s;|&<>()'"`=]+/).filter(Boolean) : [];
+    }
 
     let changed = false;
     const content = event.content.map((part) => {
@@ -374,7 +446,7 @@ export default function (pi: ExtensionAPI) {
         return part;
       }
 
-      const cloakedText = cloakText(part.text, rawPath, ctx.cwd, state);
+      const cloakedText = cloakText(part.text, rawPaths, ctx.cwd, state);
       if (cloakedText === part.text) {
         return part;
       }
