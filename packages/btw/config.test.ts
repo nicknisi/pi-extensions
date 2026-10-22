@@ -76,4 +76,28 @@ describe('loadBtwConfig', () => {
     expect(result.config).toEqual(DEFAULT_BTW_CONFIG);
     expect(result.warnings[0]).toContain('provider/model-id');
   });
+
+  it('loads a thinking level override alongside the model', () => {
+    const agentDir = tempDir();
+    writeConfig(agentDir, { model: 'anthropic/claude-sonnet-4-5', thinking: 'low' });
+    expect(loadBtwConfig(agentDir)).toEqual({
+      config: { model: 'anthropic/claude-sonnet-4-5', thinking: 'low' },
+      warnings: [],
+    });
+  });
+
+  it('accepts thinking "off" without a model', () => {
+    const agentDir = tempDir();
+    writeConfig(agentDir, { thinking: 'off' });
+    expect(loadBtwConfig(agentDir)).toEqual({ config: { thinking: 'off' }, warnings: [] });
+  });
+
+  it('warns and ignores an invalid thinking level, keeping a valid model', () => {
+    const agentDir = tempDir();
+    writeConfig(agentDir, { model: 'anthropic/claude-sonnet-4-5', thinking: 'turbo' });
+
+    const result = loadBtwConfig(agentDir);
+    expect(result.config).toEqual({ model: 'anthropic/claude-sonnet-4-5' });
+    expect(result.warnings[0]).toContain('thinking must be one of');
+  });
 });

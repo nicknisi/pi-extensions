@@ -193,10 +193,16 @@ describe('council selection and execution', () => {
     expect(h.appendEntry).not.toHaveBeenCalled();
     expect(h.notify.mock.calls.filter(([, level]) => level === 'error')).toEqual([]);
     expect(spawn.mock.calls.map(([args]) => args.model)).toEqual([fable, astra, fable]);
-    for (const [args] of spawn.mock.calls) {
+    const [chairmanArgs] = spawn.mock.calls.at(-1)!;
+    for (const [args] of spawn.mock.calls.slice(0, -1)) {
       expect(args.prompt).toContain('Should we keep it?');
       expect(args.prompt).toContain('The existing design uses SQLite.');
     }
+    // The chairman gets the bare question plus member answers, not the conversation context.
+    expect(chairmanArgs.agent).toBe('chairman');
+    expect(chairmanArgs.prompt).toContain('Question: Should we keep it?\n');
+    expect(chairmanArgs.prompt).not.toContain('The existing design uses SQLite.');
+    expect(chairmanArgs.prompt).not.toContain('Conversation context');
     expect(h.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         customType: 'llm-council-result',

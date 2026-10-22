@@ -72,7 +72,7 @@ Members run with read-only built-in tools (`read`, `grep`, `find`, `ls`), no ext
 
 Run `/council <question>` to start immediately with the current lineup. Bare `/council` opens one question field with the members and synthesizer shown underneath. Enter runs the council without another confirmation. Progress appears while the members work, followed by the synthesized answer in chat. Escape cancels the question prompt or aborts a running council.
 
-The command sends the current branch's conversation context to every member and the synthesizer. Compaction summaries are included, rather than discarded history or other branches. Pi's text serializer shortens tool outputs and omits image data. No extra summarization call is made. Very long context can still exceed a selected model's context window.
+The command sends the current branch's conversation context to every member. The synthesizer gets only the bare question plus the member answers. Compaction summaries are included, rather than discarded history or other branches. Pi's text serializer shortens tool outputs and omits image data. No extra summarization call is made. Very long context can still exceed a selected model's context window.
 
 Runs reuse the selected or configured lineup without changing it or switching the main chat model. Missing or ambiguous models must be resolved before any member starts. Use `/council settings` to edit the lineup without running models.
 
