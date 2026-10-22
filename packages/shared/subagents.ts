@@ -596,8 +596,7 @@ export function sweepRunArtifacts(
           // A ghost run's host died before runChild could clean up — remove
           // its worktree now so a hard exit (SIGKILL/crash) can't leak one.
           // .patch siblings are reaped by the age-based GC below when their
-          // artifact ages out; an aborted run captures no patch, so there is
-          // usually nothing to reap here.
+          // artifact ages out (a hard-killed host never got to capture one).
           if (record.worktree?.path) removeWorktree(record.worktree.repoRoot ?? null, record.worktree.path);
           record.status = 'aborted';
           record.endedAt = now;
@@ -868,6 +867,17 @@ export function createSubagentRuntime(options: {
       cwd = added.path;
     }
 
+    // Any setup failure from here on must not leak the worktree or leave the
+    // record 'running' under this pid (the sweep only reaps dead hosts).
+    const cleanupFailedSetup = (error: string): void => {
+      if (record.worktree) {
+        removeWorktree(record.worktree.repoRoot ?? null, record.worktree.path);
+        record.worktree = undefined;
+      }
+      markFailed(record, fail(runId, 'crashed', error, startedAt));
+      persist(record);
+    };
+
     // Supervisor channel: a closure tool, not a protocol.
     const customTools = [];
     let supervisorToolName: string | undefined;
@@ -901,53 +911,61 @@ export function createSubagentRuntime(options: {
       if (supervisorToolName && !tools.includes(supervisorToolName)) tools.push(supervisorToolName);
     }
 
-    const runtime = parent ? await parentModelRuntime(parent.modelRegistry) : await modelRuntime();
+    let session: Awaited<ReturnType<typeof createAgentSession>>['session'];
+    try {
+      const runtime = parent ? await parentModelRuntime(parent.modelRegistry) : await modelRuntime();
 
-    let model: ReturnType<typeof resolveCliModel>['model'];
-    let thinkingLevel = opts.thinkingLevel;
-    if (opts.model !== undefined) {
-      const resolved = resolveCliModel({ cliModel: opts.model, modelRuntime: runtime });
-      if (resolved.error || !resolved.model) {
-        return markFailed(record, fail(runId, 'crashed', resolved.error ?? `Unknown model: ${opts.model}`, startedAt));
+      let model: ReturnType<typeof resolveCliModel>['model'];
+      let thinkingLevel = opts.thinkingLevel;
+      if (opts.model !== undefined) {
+        const resolved = resolveCliModel({ cliModel: opts.model, modelRuntime: runtime });
+        if (resolved.error || !resolved.model) {
+          const error = resolved.error ?? `Unknown model: ${opts.model}`;
+          cleanupFailedSetup(error);
+          return fail(runId, 'crashed', error, startedAt);
+        }
+        model = resolved.model;
+        thinkingLevel ??= resolved.thinkingLevel;
+      } else if (parent?.model) {
+        model = parent.model;
       }
-      model = resolved.model;
-      thinkingLevel ??= resolved.thinkingLevel;
-    } else if (parent?.model) {
-      model = parent.model;
+
+      const loader = new DefaultResourceLoader({
+        cwd,
+        agentDir: getAgentDir(),
+        settingsManager: SettingsManager.inMemory(),
+        noExtensions: true,
+        noSkills: true,
+        noPromptTemplates: true,
+        noThemes: true,
+        noContextFiles: !opts.includeContextFiles,
+        additionalExtensionPaths: opts.extensionPaths ?? [],
+        extensionFactories: [...childExtensions()].map(([name, factory]) => ({ name, factory, hidden: true })),
+        additionalSkillPaths: opts.skillPaths ?? [],
+        ...(opts.systemPrompt !== undefined && opts.replaceSystemPrompt ? { systemPrompt: opts.systemPrompt } : {}),
+        appendSystemPrompt: [
+          ...(opts.systemPrompt !== undefined && !opts.replaceSystemPrompt ? [opts.systemPrompt] : []),
+          ...(opts.outputSchema ? [schemaInstructions(opts.outputSchema)] : []),
+        ],
+      });
+      await loader.reload();
+
+      ({ session } = await createAgentSession({
+        cwd,
+        agentDir: getAgentDir(),
+        modelRuntime: runtime,
+        ...(model !== undefined ? { model } : {}),
+        ...(thinkingLevel !== undefined ? { thinkingLevel: thinkingLevel as never } : {}),
+        ...(tools !== undefined ? { tools } : {}),
+        customTools,
+        resourceLoader: loader,
+        sessionManager: SessionManager.inMemory(cwd),
+        settingsManager: SettingsManager.inMemory(),
+      }));
+    } catch (err) {
+      cleanupFailedSetup(err instanceof Error ? err.message : String(err));
+      throw err;
     }
-
-    const loader = new DefaultResourceLoader({
-      cwd,
-      agentDir: getAgentDir(),
-      settingsManager: SettingsManager.inMemory(),
-      noExtensions: true,
-      noSkills: true,
-      noPromptTemplates: true,
-      noThemes: true,
-      noContextFiles: !opts.includeContextFiles,
-      additionalExtensionPaths: opts.extensionPaths ?? [],
-      extensionFactories: [...childExtensions()].map(([name, factory]) => ({ name, factory, hidden: true })),
-      additionalSkillPaths: opts.skillPaths ?? [],
-      ...(opts.systemPrompt !== undefined && opts.replaceSystemPrompt ? { systemPrompt: opts.systemPrompt } : {}),
-      appendSystemPrompt: [
-        ...(opts.systemPrompt !== undefined && !opts.replaceSystemPrompt ? [opts.systemPrompt] : []),
-        ...(opts.outputSchema ? [schemaInstructions(opts.outputSchema)] : []),
-      ],
-    });
-    await loader.reload();
-
-    const { session } = await createAgentSession({
-      cwd,
-      agentDir: getAgentDir(),
-      modelRuntime: runtime,
-      ...(model !== undefined ? { model } : {}),
-      ...(thinkingLevel !== undefined ? { thinkingLevel: thinkingLevel as never } : {}),
-      ...(tools !== undefined ? { tools } : {}),
-      customTools,
-      resourceLoader: loader,
-      sessionManager: SessionManager.inMemory(cwd),
-      settingsManager: SettingsManager.inMemory(),
-    });
 
     let abortReason: string | undefined;
     const abortOnce = (reason: string) => {
@@ -1089,21 +1107,19 @@ export function createSubagentRuntime(options: {
     unsubscribe();
     session.dispose();
     // Worktree handoff/cleanup policy:
-    // - A run that did NOT abort (completed/failed/empty/schema_invalid)
-    //   captures its full patch (incl. untracked files) beside the artifact;
-    //   the worktree itself is kept on disk for the 7-day inspection window
+    // - Every run with a worktree captures its full patch (incl. untracked
+    //   files) beside the artifact — including timeouts, stalls and
+    //   turn/tool-call budget aborts, so a builder that runs out of time
+    //   doesn't lose its work.
+    // - The worktree itself is kept on disk for the 7-day inspection window
     //   and removed by sweepRunArtifacts alongside the aged-out artifact.
-    // - An aborted run (signal/cancel/host-shutdown) never captures a patch:
-    //   the child did not complete, so its partial tree is not a reliable
-    //   handoff. Its worktree is removed immediately so an interrupt or
-    //   parent exit can never leak a detached worktree. The worktree path is
-    //   dropped from the record so /fleet never advertises a path that no
-    //   longer exists.
+    // - A run the caller cancelled (opts.signal: cancel/host-shutdown) has its
+    //   worktree removed immediately so an interrupt or parent exit can never
+    //   leak a detached worktree; its patch (if any) stays at
+    //   <artifactsDir>/<namespace>/<runId>.patch. The worktree is dropped from
+    //   the record so /fleet never advertises a path that no longer exists.
     if (record.worktree) {
-      if (abortReason !== undefined) {
-        removeWorktree(record.worktree.repoRoot ?? null, record.worktree.path);
-        record.worktree = undefined;
-      } else if (artifactsDir) {
+      if (artifactsDir) {
         try {
           const dir = path.join(artifactsDir, namespace);
           fs.mkdirSync(dir, { recursive: true });
@@ -1113,6 +1129,10 @@ export function createSubagentRuntime(options: {
         } catch {
           // handoff capture is best-effort; the worktree path on the record is the fallback
         }
+      }
+      if (opts.signal?.aborted) {
+        removeWorktree(record.worktree.repoRoot ?? null, record.worktree.path);
+        record.worktree = undefined;
       }
     }
 

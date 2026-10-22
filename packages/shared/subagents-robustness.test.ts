@@ -1,3 +1,7 @@
+import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Type } from 'typebox';
 
@@ -13,6 +17,7 @@ const harness = vi.hoisted(() => ({
   turns: [] as Turn[],
   prompts: [] as string[],
   loaderOptions: [] as any[],
+  reloadError: undefined as Error | undefined,
 }));
 
 vi.mock('@earendil-works/pi-coding-agent', () => ({
@@ -60,7 +65,9 @@ vi.mock('@earendil-works/pi-coding-agent', () => ({
     constructor(options: any) {
       harness.loaderOptions.push(options);
     }
-    async reload() {}
+    async reload() {
+      if (harness.reloadError) throw harness.reloadError;
+    }
   },
   defineTool: vi.fn((tool) => tool),
   getAgentDir: vi.fn(() => '/tmp/pi-agent-test'),
@@ -74,6 +81,7 @@ vi.mock('@earendil-works/pi-coding-agent', () => ({
   SettingsManager: { inMemory: vi.fn(() => ({})) },
 }));
 
+import { resolveCliModel } from '@earendil-works/pi-coding-agent';
 import { childExtensions, createSubagentRuntime } from './subagents.js';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -186,5 +194,97 @@ describe('subagent runtime robustness', () => {
     } finally {
       childExtensions().delete('test-child-ext');
     }
+  });
+
+  describe('worktree runs', () => {
+    const savedDir = process.env.PI_SUBAGENTS_DIR;
+    let root: string;
+    let repo: string;
+
+    beforeEach(() => {
+      root = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-subagents-robustness-'));
+      repo = path.join(root, 'repo');
+      fs.mkdirSync(repo);
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' });
+      git('init', '-q');
+      git('-c', 'user.email=test@test', '-c', 'user.name=test', 'commit', '-q', '--allow-empty', '-m', 'init');
+      process.env.PI_SUBAGENTS_DIR = root;
+      harness.reloadError = undefined;
+    });
+
+    afterEach(() => {
+      if (savedDir === undefined) delete process.env.PI_SUBAGENTS_DIR;
+      else process.env.PI_SUBAGENTS_DIR = savedDir;
+      fs.rmSync(root, { recursive: true, force: true });
+    });
+
+    const worktreeDir = () => path.join(root, 'worktrees');
+    const leftoverWorktrees = () => (fs.existsSync(worktreeDir()) ? fs.readdirSync(worktreeDir()) : []);
+    // A child that edits its worktree, then hangs until aborted.
+    const editThenHang = () =>
+      harness.turns.push(async (_emit, _reply, aborted) => {
+        fs.writeFileSync(path.join(harness.loaderOptions[0].cwd, 'work.txt'), 'progress');
+        await aborted;
+      });
+
+    it('keeps the patch and worktree of a run that hits its timeout', async () => {
+      editThenHang();
+      const runtime = createSubagentRuntime({ namespace: 'wt-timeout', artifactsDir: path.join(root, 'runs') });
+      const result = await runtime.spawn({ prompt: 'build', cwd: repo, worktree: true, timeoutMs: 50 });
+      expect(result).toMatchObject({ ok: false, kind: 'aborted' });
+      expect(result.ok ? '' : result.error).toMatch(/^Timed out after/);
+      const run = runtime.listRuns()[0]!;
+      expect(run.worktree?.changedFiles).toBe(1);
+      expect(fs.readFileSync(run.worktree!.patchPath!, 'utf8')).toContain('work.txt');
+      expect(fs.existsSync(run.worktree!.path)).toBe(true); // left for the normal sweep
+    });
+
+    it('captures the patch but removes the worktree when the caller cancels', async () => {
+      const controller = new AbortController();
+      harness.turns.push(async (_emit, _reply, aborted) => {
+        fs.writeFileSync(path.join(harness.loaderOptions[0].cwd, 'work.txt'), 'progress');
+        controller.abort();
+        await aborted;
+      });
+      const runtime = createSubagentRuntime({ namespace: 'wt-cancel', artifactsDir: path.join(root, 'runs') });
+      const result = await runtime.spawn({
+        prompt: 'build',
+        cwd: repo,
+        worktree: true,
+        timeoutMs: 0,
+        signal: controller.signal,
+      });
+      expect(result).toMatchObject({ ok: false, kind: 'aborted', error: 'Aborted by caller' });
+      expect(runtime.listRuns()[0]!.worktree).toBeUndefined();
+      expect(leftoverWorktrees()).toEqual([]);
+      expect(fs.readFileSync(path.join(root, 'runs', 'wt-cancel', `${result.runId}.patch`), 'utf8')).toContain(
+        'work.txt',
+      );
+    });
+
+    it('removes the worktree and marks the run failed for an unknown model', async () => {
+      vi.mocked(resolveCliModel).mockReturnValueOnce({ error: 'Unknown model: nope' } as never);
+      const runtime = createSubagentRuntime({ namespace: 'wt-model', artifactsDir: path.join(root, 'runs') });
+      const result = await runtime.spawn({ prompt: 'build', cwd: repo, worktree: true, model: 'nope', timeoutMs: 0 });
+      expect(result).toMatchObject({ ok: false, kind: 'crashed', error: 'Unknown model: nope' });
+      expect(leftoverWorktrees()).toEqual([]);
+      const run = runtime.listRuns()[0]!;
+      expect(run).toMatchObject({ status: 'failed', worktree: undefined });
+      const artifact = JSON.parse(fs.readFileSync(path.join(root, 'runs', 'wt-model', `${run.runId}.json`), 'utf8'));
+      expect(artifact.status).toBe('failed');
+    });
+
+    it('removes the worktree and marks the run failed when session setup throws', async () => {
+      harness.reloadError = new Error('loader exploded');
+      const runtime = createSubagentRuntime({ namespace: 'wt-throw', artifactsDir: path.join(root, 'runs') });
+      await expect(runtime.spawn({ prompt: 'build', cwd: repo, worktree: true, timeoutMs: 0 })).rejects.toThrow(
+        'loader exploded',
+      );
+      expect(leftoverWorktrees()).toEqual([]);
+      const run = runtime.listRuns()[0]!;
+      expect(run).toMatchObject({ status: 'failed', error: 'loader exploded', worktree: undefined });
+      const artifact = JSON.parse(fs.readFileSync(path.join(root, 'runs', 'wt-throw', `${run.runId}.json`), 'utf8'));
+      expect(artifact.status).toBe('failed');
+    });
   });
 });

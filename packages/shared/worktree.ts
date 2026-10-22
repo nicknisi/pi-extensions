@@ -87,8 +87,10 @@ export function addWorktree(repoRoot: string, runId: string): { path: string } |
  * Snapshot the worktree's full delta against HEAD. Stages everything first
  * (`git add -A`) so UNTRACKED files are captured in the cached diff — the fix
  * for `git diff HEAD` missing newly created files. The patch is written
- * UNTRUNCATED to patchPath; when nothing changed, no file is written and the
- * returned patchPath is null.
+ * UNTRUNCATED to patchPath (git writes it directly via --output, so large
+ * diffs never pass through a stdout buffer; --binary keeps binary edits
+ * applyable); when nothing changed, no file is written and the returned
+ * patchPath is null.
  */
 export function captureHandoff(
   worktreePath: string,
@@ -100,12 +102,20 @@ export function captureHandoff(
   const changedFiles = status.split('\n').filter((line) => line.trim() !== '').length;
   if (changedFiles === 0) return { status, patchPath: null, changedFiles };
 
-  const diff = git(['-C', worktreePath, 'diff', '--cached', 'HEAD']);
-  if (!diff.ok || diff.stdout === '') return { status, patchPath: null, changedFiles };
   try {
     fs.mkdirSync(path.dirname(patchPath), { recursive: true });
-    fs.writeFileSync(patchPath, diff.stdout);
-    return { status, patchPath, changedFiles };
+    const diff = git([
+      '-C',
+      worktreePath,
+      'diff',
+      '--cached',
+      '--binary',
+      `--output=${path.resolve(patchPath)}`,
+      'HEAD',
+    ]);
+    if (diff.ok && fs.statSync(patchPath).size > 0) return { status, patchPath, changedFiles };
+    fs.rmSync(patchPath, { force: true });
+    return { status, patchPath: null, changedFiles };
   } catch {
     return { status, patchPath: null, changedFiles };
   }
