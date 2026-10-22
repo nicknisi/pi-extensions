@@ -174,7 +174,7 @@ Consumers in this monorepo add the workspace dependency:
 }
 ```
 
-and import individual functions as shown above. Known consumers: `header`, `llm-council`, `statusline`, `subagents`, `workflows`.
+and import individual functions as shown above. Known consumers: `answer`, `header`, `heads-up`, `llm-council`, `statusline`, `subagents`, `workflows`.
 
 ### Tool exposure (`tools.ts`)
 
@@ -185,6 +185,19 @@ pi.on('session_start', () => declareUnlessSearchable(pi, ['my_tool']));
 ```
 
 For tools registered with `exposure: 'deferred'`: when pi's built-in `tool_search` is not active, adds them to the active tool set so the model can still reach them. With `tool_search` active it does nothing and the tools stay out of the system prompt. It only declares tools pi still has registered: an explicit `--tools` allowlist or `--exclude-tools` removes unnamed extension tools from the registry, so the fallback never re-enables them.
+
+### Classifiers (`classifier.ts`)
+
+```ts
+import { classifyBool, DEFAULT_CLASSIFIERS, findClassifier } from '@nicknisi/pi-shared';
+
+const model = await findClassifier(ctx.modelRegistry, DEFAULT_CLASSIFIERS);
+const p = model
+  ? await classifyBool(ctx.modelRegistry, model, { message }, { instructions, criteria: { true: '…', false: '…' } })
+  : undefined;
+```
+
+Optional classifier calls that degrade instead of failing. `findClassifier` returns the first `provider/model-id` in the list that is an available classifier with credentials, or `undefined`. That covers no match, no credentials, a failed lookup, and a pi without classifier support. `classifyBool` returns the probability for one yes/no question, or `undefined` on an error result or a throw. `DEFAULT_CLASSIFIERS` lists TypeSafe's Jev on every provider pi lists it under. Used by `heads-up` (check gate) and `answer` (footer hint).
 
 ## Configuration
 

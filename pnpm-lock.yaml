@@ -47,7 +47,11 @@ importers:
         specifier: workspace:*
         version: link:../shared
 
-  packages/answer: {}
+  packages/answer:
+    dependencies:
+      '@nicknisi/pi-shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/artifacts:
     dependencies:
@@ -127,7 +131,11 @@ importers:
         specifier: workspace:*
         version: link:../shared
 
-  packages/heads-up: {}
+  packages/heads-up:
+    dependencies:
+      '@nicknisi/pi-shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/llm-council:
     dependencies:

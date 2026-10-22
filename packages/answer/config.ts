@@ -1,10 +1,13 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
+import { DEFAULT_CLASSIFIERS } from '@nicknisi/pi-shared';
 
 export interface AnswerConfig {
   /** Ordered provider/model-id candidates; the first available authenticated model wins. */
   extractionModels: string[];
+  /** Classifiers (provider/model-id) that decide when to show the answer hint; the first available wins. Empty turns the hint off. */
+  hintModels: string[];
 }
 
 export interface LoadedAnswerConfig {
@@ -19,6 +22,7 @@ export interface ModelPreference {
 
 export const DEFAULT_ANSWER_CONFIG: AnswerConfig = {
   extractionModels: ['anthropic/claude-fable-5', 'anthropic/claude-opus-5'],
+  hintModels: [...DEFAULT_CLASSIFIERS],
 };
 
 export function answerConfigPath(agentDir = getAgentDir()): string {
@@ -46,25 +50,25 @@ export function loadAnswerConfig(agentDir = getAgentDir()): LoadedAnswerConfig {
     };
   }
 
-  const extractionModels =
-    parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>).extractionModels
-      : undefined;
-  if (
-    !Array.isArray(extractionModels) ||
-    extractionModels.length === 0 ||
-    extractionModels.some((model) => typeof model !== 'string' || !parseModelPreference(model))
-  ) {
-    return {
-      config: { ...DEFAULT_ANSWER_CONFIG },
-      warnings: [
+  const o = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  const config: AnswerConfig = { ...DEFAULT_ANSWER_CONFIG };
+  const warnings: string[] = [];
+  const specs = (value: unknown): value is string[] =>
+    Array.isArray(value) && value.every((model) => typeof model === 'string' && !!parseModelPreference(model));
+  const dedupe = (models: string[]) => [...new Set(models.map((model) => model.trim()))];
+
+  if (o.extractionModels !== undefined) {
+    if (specs(o.extractionModels) && o.extractionModels.length > 0)
+      config.extractionModels = dedupe(o.extractionModels);
+    else
+      warnings.push(
         `Invalid answer config at ${path}: extractionModels must be a non-empty array of provider/model-id strings`,
-      ],
-    };
+      );
+  }
+  if (o.hintModels !== undefined) {
+    if (specs(o.hintModels)) config.hintModels = dedupe(o.hintModels);
+    else warnings.push(`Invalid answer config at ${path}: hintModels must be an array of provider/model-id strings`);
   }
 
-  return {
-    config: { extractionModels: [...new Set(extractionModels.map((model) => model.trim()))] },
-    warnings: [],
-  };
+  return { config, warnings };
 }

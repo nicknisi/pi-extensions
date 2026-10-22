@@ -43,6 +43,18 @@ The most recent sections are kept within `maxDigestChars` (default 120,000, abou
 
 The digest goes to the configured `model` (default: the session model) as one tool-less request with no prompt caching. Topics offered recently and topics you marked known are listed in the prompt so the side agent skips them.
 
+### The classifier gate
+
+Before an automatic check sends the digest to the side model, a classifier answers one yes/no question about the same digest: is there something with real consequences the person will plausibly miss? It also gets the recently offered and known topics so it can skip them. TypeSafe's Jev answers in about a second for a fraction of a cent, while the side request is a full uncached call to the session model.
+
+- **Shadow mode (default):** the classifier scores every automatic check, and the score is logged on the `proposed` event, or on a `none` event when the check found nothing. Nothing is skipped. Use the log to pick a threshold before you turn on enforcement.
+- **Enforced (`gateEnforce: true`):** a check that scores below `gateThreshold` skips the side request and logs a `gated` event.
+- **No classifier:** with no credentials for any of the `gateModels`, an older pi without classifier support, or an empty `gateModels`, there is no gate and checks run as before. A classifier call that fails also lets the check run.
+
+`/heads-up check` skips the gate. `/heads-up` shows which classifier is in use and its mode.
+
+The digest goes to the classifier's provider as well as the side model's.
+
 ### Reply format
 
 ```
@@ -123,18 +135,24 @@ Submitting a prompt while a note is showing clears the note and logs it as `igno
   "cooldownSeconds": 300,
   "model": "anthropic/claude-haiku-4-5",
   "shortcut": "alt+h",
-  "maxDigestChars": 120000
+  "maxDigestChars": 120000,
+  "gateModels": ["typesafe/jev-latest", "openrouter/typesafe/jev-1.14"],
+  "gateThreshold": 0.5,
+  "gateEnforce": false
 }
 ```
 
-| Field             | Default       | Meaning                                                     |
-| ----------------- | ------------- | ----------------------------------------------------------- |
-| `minTools`        | `8`           | A run with at least this many tool calls counts as long     |
-| `minSeconds`      | `120`         | A run lasting at least this long counts as long             |
-| `cooldownSeconds` | `300`         | Minimum gap between two checks                              |
-| `model`           | session model | Side-agent model as `provider/model-id`                     |
-| `shortcut`        | `alt+h`       | Key that opens the panel (pi key syntax)                    |
-| `maxDigestChars`  | `120000`      | Transcript digest budget; the most recent sections are kept |
+| Field             | Default               | Meaning                                                                                                   |
+| ----------------- | --------------------- | --------------------------------------------------------------------------------------------------------- |
+| `minTools`        | `8`                   | A run with at least this many tool calls counts as long                                                   |
+| `minSeconds`      | `120`                 | A run lasting at least this long counts as long                                                           |
+| `cooldownSeconds` | `300`                 | Minimum gap between two checks                                                                            |
+| `model`           | session model         | Side-agent model as `provider/model-id`                                                                   |
+| `shortcut`        | `alt+h`               | Key that opens the panel (pi key syntax)                                                                  |
+| `maxDigestChars`  | `120000`              | Transcript digest budget; the most recent sections are kept                                               |
+| `gateModels`      | Jev on every provider | Classifiers for the gate as `provider/model-id`; the first with credentials wins. `[]` turns the gate off |
+| `gateThreshold`   | `0.5`                 | With `gateEnforce`, checks scoring below this skip the side request (0–1)                                 |
+| `gateEnforce`     | `false`               | `false` scores and logs only (shadow); `true` skips low-scoring checks                                    |
 
 Invalid values fall back to the defaults. An unknown `model` falls back to the session model with a warning.
 
@@ -147,9 +165,9 @@ Invalid values fall back to the defaults. An unknown `model` falls back to the s
 | `known`    | Topics marked understood (at most 50)            |
 | `offered`  | Last 5 suggestions, so the next check skips them |
 | `disabled` | Set by `/heads-up off`                           |
-| `events`   | `{ ts, kind, learn }`, last 500                  |
+| `events`   | `{ ts, kind, learn, score? }`, last 500          |
 
-Event kinds: `proposed`, `explained`, `page`, `chat`, `known`, `dismissed`, `ignored_submit`. Use them to tune: a high dismiss or ignore rate means the bar is too low. `/heads-up` shows the tally.
+Event kinds: `proposed`, `explained`, `page`, `chat`, `known`, `dismissed`, `ignored_submit`, plus `none` and `gated` from the classifier gate. `score` is the gate's probability for the check, present only when a classifier answered. Use them to tune: a high dismiss or ignore rate means the bar is too low, and engaged notes that scored low mean the gate threshold is too high. `/heads-up` shows the tally.
 
 The note itself lives in memory and does not survive a restart.
 
@@ -163,7 +181,7 @@ The note itself lives in memory and does not survive a restart.
 
 ## Caveats
 
-- Each check is one full-digest request without caching, up to about 30k input tokens by default. With a large session model, set `model` to something cheaper or lower `maxDigestChars`.
+- Each check is one full-digest request without caching, up to about 30k input tokens by default. With a large session model, set `model` to something cheaper, lower `maxDigestChars`, or enforce the [classifier gate](#the-classifier-gate).
 - The thresholds are guesses, carried over from the Claude Code mod. The built-in mod's firing rule is compiled in and unreadable.
 - No idle-time checks. A check only follows agent activity.
 - A background check that fails warns once, then stays quiet until a check succeeds.
