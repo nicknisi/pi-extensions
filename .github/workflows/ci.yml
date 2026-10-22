@@ -43,6 +43,9 @@ jobs:
       - name: Build
         run: pnpm run build
 
+      - name: Test
+        run: pnpm test
+
       # Skipped on the release PR: `chore: version packages` bumps every
       # package.json and deletes the changesets it consumed, so it always
       # looks like "packages changed, no changesets" and would never pass.
@@ -64,9 +67,9 @@ jobs:
       - name: Install Dependencies
         run: pnpm install
 
-      # Single pinned pi version (the repo's devDep) — no version matrix.
+      # Single pinned pi version, read from the repo's devDep so it cannot drift — no version matrix.
       - name: Install pi
-        run: npm i -g '@earendil-works/pi-coding-agent@^0.84.0'
+        run: npm i -g "@earendil-works/pi-coding-agent@$(node -p "require('./package.json').devDependencies['@earendil-works/pi-coding-agent']")"
 
       # The smoke script spawns real pi runs against anthropic/claude-haiku-4-5,
       # so it needs a provider key; without the secret configured, skip loudly.
