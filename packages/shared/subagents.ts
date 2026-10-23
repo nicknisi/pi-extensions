@@ -547,8 +547,8 @@ export function readRunArtifacts(rootDir: string): RunArtifact[] {
  * One GC + reaping pass over persisted run artifacts:
  * - records older than ARTIFACT_RETENTION_MS are deleted, together with their
  *   sibling `<runId>.patch` and any recorded worktree;
- * - records still 'queued'/'running' whose hostPid is not this process are
- *   ghosts of a dead host (in-process children cannot outlive it) — marked
+ * - records still 'queued'/'running' whose hostPid is another process that
+ *   no longer exists are ghosts of a dead host (in-process children cannot outlive it) — marked
  *   'aborted' with an explanatory error so /fleet shows the truth.
  *
  * Returns counts for observability. Never throws. Injectable `now` for tests.
@@ -587,10 +587,12 @@ export function sweepRunArtifacts(
       }
       if (!record || typeof record.runId !== 'string') continue;
 
+      // Another pi process's live runs are not ghosts: only a dead host's are.
       const isGhost =
         (record.status === 'running' || record.status === 'queued') &&
         typeof record.hostPid === 'number' &&
-        record.hostPid !== process.pid;
+        record.hostPid !== process.pid &&
+        !processAlive(record.hostPid);
       if (isGhost) {
         try {
           // A ghost run's host died before runChild could clean up — remove
@@ -624,6 +626,16 @@ export function sweepRunArtifacts(
     }
   }
   return { deleted, reaped };
+}
+
+/** Whether a process with this pid exists (EPERM means it does, owned by someone else). */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
 }
 
 let sweptThisProcess = false;
