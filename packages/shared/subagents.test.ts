@@ -101,12 +101,6 @@ describe('sweepRunArtifacts', () => {
       status: 'running',
       hostPid: process.pid,
     });
-    // Another live pi process (a second window) still owns its runs.
-    const othersLive = writeArtifact(root, 'codemode', {
-      runId: 'other-live-run',
-      status: 'running',
-      hostPid: process.ppid,
-    });
 
     const result = sweepRunArtifacts(root);
     expect(result.reaped).toBe(1);
@@ -114,7 +108,24 @@ describe('sweepRunArtifacts', () => {
     expect(reaped.status).toBe('aborted');
     expect(reaped.error).toMatch(/host pi process exited/i);
     expect(JSON.parse(fs.readFileSync(ours, 'utf8')).status).toBe('running');
-    expect(JSON.parse(fs.readFileSync(othersLive, 'utf8')).status).toBe('running');
+  });
+
+  it("leaves another live pi process's running records and worktrees alone", () => {
+    const root = tmpRoot();
+    const repo = gitRepo();
+    const added = addWorktree(repo, 'live-wt');
+    if (!('path' in added)) throw new Error('setup failed');
+    const live = writeArtifact(root, 'workflows', {
+      runId: 'live-run',
+      status: 'running',
+      hostPid: process.ppid, // another process, and alive
+      worktree: { path: added.path, repoRoot: repo },
+    });
+
+    expect(sweepRunArtifacts(root).reaped).toBe(0);
+    expect(JSON.parse(fs.readFileSync(live, 'utf8')).status).toBe('running');
+    expect(fs.existsSync(added.path)).toBe(true);
+    removeWorktree(repo, added.path);
   });
 
   it("removes a ghost run's worktree when reaping (no leak on hard exit)", () => {

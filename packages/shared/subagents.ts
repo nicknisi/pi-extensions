@@ -539,9 +539,11 @@ export function readRunArtifacts(rootDir: string): RunArtifact[] {
  * One GC + reaping pass over persisted run artifacts:
  * - records older than ARTIFACT_RETENTION_MS are deleted, together with their
  *   sibling `<runId>.patch` and any recorded worktree;
- * - records still 'queued'/'running' whose hostPid is not this process are
- *   ghosts of a dead host (in-process children cannot outlive it) — marked
- *   'aborted' with an explanatory error so /fleet shows the truth.
+ * - records still 'queued'/'running' whose hostPid is another process that no
+ *   longer exists are ghosts of a dead host (in-process children cannot
+ *   outlive it). A durable one (RunRecord.resume) is marked interrupted and
+ *   keeps its worktree; any other is marked 'aborted' with its worktree
+ *   removed, so /fleet shows the truth. Another live pi's runs are left alone.
  *
  * Returns counts for observability. Never throws. Injectable `now` for tests.
  */
