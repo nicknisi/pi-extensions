@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-ast-grep",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "AST syntax search and preview-first rewrites using the ast-grep CLI",
   "keywords": [
     "pi",
