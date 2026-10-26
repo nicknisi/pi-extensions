@@ -1,0 +1,45 @@
+{
+  "name": "@nicknisi/pi-lsp",
+  "version": "0.1.0",
+  "description": "Read-only TypeScript and JavaScript language intelligence for Pi",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-package"
+  ],
+  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/lsp#readme",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicknisi/pi-extensions.git",
+    "directory": "packages/lsp"
+  },
+  "files": [
+    "dist",
+    "index.ts",
+    "client.ts",
+    "project.ts",
+    "README.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "typebox": "^1.1.0",
+    "vscode-jsonrpc": "^8.2.1"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
