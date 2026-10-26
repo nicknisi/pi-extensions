@@ -81,8 +81,10 @@ function collectPrompts(children: unknown[], width: number, offset: number, out:
 
 export default function (pi: ExtensionAPI) {
   pi.on('before_agent_start', async (event, _ctx) => {
-    if (typeof event.prompt === 'string' && event.prompt.trim()) {
-      lastPrompt = collapse(event.prompt);
+    // Runs started by a custom message carry no prompt.
+    const prompt = 'prompt' in event ? event.prompt : undefined;
+    if (typeof prompt === 'string' && prompt.trim()) {
+      lastPrompt = collapse(prompt);
       requestRender?.();
     }
   });
