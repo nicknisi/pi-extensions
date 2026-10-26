@@ -57,6 +57,9 @@ function makeFake(handler: Handler): FakeRuntime {
     spawnDetached(opts: SpawnOptions) {
       return { runId: 'detached', done: this.spawn(opts) };
     },
+    resumeDetached: () => {
+      throw new Error('not used by workflows');
+    },
     listRuns: () => [],
     activeCount: () => active,
   };

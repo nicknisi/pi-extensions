@@ -59,6 +59,7 @@ import {
   type SubagentRuntime,
   type SpawnUsage,
   declareUnlessSearchable,
+  HOST_EXIT,
 } from '@nicknisi/pi-shared';
 import { Type } from 'typebox';
 import { scopeFleetRuns, type FleetScope } from './fleet.js';
@@ -95,6 +96,8 @@ const DEFAULT_TOOLS = ['read', 'grep', 'find', 'ls'];
 const TREE_MUTATING_TOOLS = new Set(['edit', 'write', 'bash']);
 const MAX_TASK_OUTPUT_CHARS = 4000;
 const MAX_FLEET_LIST = 20;
+/** How long session_shutdown waits for aborted runs to settle before letting pi exit. */
+const SHUTDOWN_SETTLE_MS = 5000;
 
 // ── Render vocabulary (mirrors llm-council's defaults) ───────────────────
 
@@ -238,7 +241,10 @@ function relativeTime(timestamp: number): string {
 }
 
 function formatRunLine(run: RunArtifact): string {
-  const bits = [run.status, formatSeconds(run.startedAt, run.endedAt) + (run.endedAt ? '' : '…')];
+  const bits = [
+    run.interrupted ? 'interrupted' : run.status,
+    formatSeconds(run.startedAt, run.endedAt) + (run.endedAt ? '' : '…'),
+  ];
   const tokens = formatTokens(run.usage);
   return `- ${run.runId.slice(0, 8)} [${run.namespace}]${run.agent ? ` ${run.agent}` : ''} — ${bits.join(', ')}${tokens} · ${short(run.promptPreview ?? '', 60)}`;
 }
@@ -415,6 +421,40 @@ function refreshBackgroundWidget(): void {
     // The completion callback can fire while the session is ending; a lost
     // widget update is harmless and must not become an unhandled rejection.
   }
+}
+
+/** Track a detached run in the background widget and post a transcript notice when it settles. */
+function watchBackground(
+  pi: ExtensionAPI,
+  runId: string,
+  label: string,
+  done: Promise<SpawnResult>,
+  resumed = false,
+): void {
+  backgroundRuns.set(runId, label);
+  refreshBackgroundWidget();
+  // Deliberately no AbortSignal here: pi may abort tool signals after execute returns, which
+  // would kill the background child. Swallow late failures — sendMessage throws once the
+  // session is ending, and an unhandled rejection is worse than a lost notification.
+  void done
+    .then((result) => {
+      backgroundRuns.delete(runId);
+      refreshBackgroundWidget();
+      const status = result.ok ? 'completed' : `failed: ${result.error}`;
+      // A resumed run's original caller is gone, so its answer comes with the notice.
+      const answer = resumed && result.text ? `\n\n${result.text.slice(0, MAX_TASK_OUTPUT_CHARS)}` : '';
+      pi.sendMessage({
+        customType: 'subagents:background',
+        content: `${resumed ? 'Resumed' : 'Background'} subagent ${runId.slice(0, 8)} (${label}) ${status}${answer}`,
+        display: true,
+        details: { runId, ok: result.ok },
+      });
+    })
+    .catch((err) => {
+      backgroundRuns.delete(runId);
+      refreshBackgroundWidget();
+      console.error(`[subagents] background run ${runId.slice(0, 8)} completion notice failed:`, err);
+    });
 }
 
 // ── /fleet overlay ───────────────────────────────────────────────────────
@@ -1149,11 +1189,20 @@ class PatchesOverlay implements Component, Focusable {
 
 /** Live runId → AbortController, so the fleet tool can cancel in-flight runs. */
 const cancellables = new Map<string, AbortController>();
+/** In-flight runs, so session_shutdown can wait for them to record themselves interrupted. */
+const inFlight = new Set<Promise<SpawnResult>>();
 
 function spawnCancellable(
   runtime: SubagentRuntime,
   opts: SpawnOptions,
   toolSignal: AbortSignal | undefined,
+): Promise<SpawnResult> {
+  return startCancellable((signal) => runtime.spawnDetached({ ...opts, signal }), toolSignal);
+}
+
+function startCancellable(
+  start: (signal: AbortSignal) => { runId: string; done: Promise<SpawnResult> },
+  toolSignal?: AbortSignal,
 ): Promise<SpawnResult> {
   // Always spawn detached so we can register the controller under the runId
   // BEFORE the run starts; callers just await done.
@@ -1163,10 +1212,12 @@ function spawnCancellable(
     if (toolSignal.aborted) controller.abort();
     else toolSignal.addEventListener('abort', onToolAbort, { once: true });
   }
-  const { runId, done } = runtime.spawnDetached({ ...opts, signal: controller.signal });
+  const { runId, done } = start(controller.signal);
   cancellables.set(runId, controller);
+  inFlight.add(done);
   void done.finally(() => {
     cancellables.delete(runId);
+    inFlight.delete(done);
     toolSignal?.removeEventListener('abort', onToolAbort);
   });
   // Attach the runId so callers can report it without racing the registry.
@@ -1415,19 +1466,36 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
     statusTimer = setInterval(() => {
       if (statusUi) refreshStatusline(statusUi, statusTheme ?? widgetTheme, runtime, statusParentSession);
     }, STATUS_INTERVAL);
+
+    // Durable runs: continue this session's subagents that pi exiting, crashing,
+    // or reloading cut off, from their transcripts, as background runs.
+    const sessionFile = statusParentSession;
+    if (!sessionFile) return;
+    const interrupted = readRunArtifacts(artifactsRoot()).filter(
+      (run) => run.namespace === runtime.namespace && run.interrupted && run.ownerSession === sessionFile,
+    );
+    if (interrupted.length === 0) return;
+    widgetUi = ctx.ui;
+    for (const run of interrupted) {
+      const done = startCancellable((signal) => runtime.resumeDetached(run, { signal }));
+      watchBackground(pi, run.runId, run.agent ?? short(run.promptPreview, 40), done, true);
+    }
+    ctx.ui.notify(
+      `Resuming ${interrupted.length} subagent run${interrupted.length === 1 ? '' : 's'} interrupted when pi last exited`,
+      'info',
+    );
   });
 
-  // Deterministic cascading cancellation: Esc/quit/reload/session-replacement
-  // must not orphan in-process children. Foreground tasks are already aborted
-  // via the tool signal pi passes to execute(), but background runs deliberately
-  // carry no tool signal (pi aborts tool signals after execute returns, which
-  // would kill them prematurely) — they only die here. Aborting a controller
-  // triggers session.abort() in runChild, which tears down the child and, for
-  // worktree runs, removes the worktree immediately (no patch captured). A
-  // hard exit (SIGKILL) that skips this handler is caught on the next host
-  // startup by sweepRunArtifactsOnce, which reaps ghost runs AND their
-  // worktrees.
-  pi.on('session_shutdown', () => {
+  // Deterministic cascading cancellation: quit/reload/session-replacement
+  // must not orphan in-process children. Background runs deliberately carry no
+  // tool signal (pi aborts tool signals after execute returns, which would kill
+  // them prematurely), so they only stop here. Aborting with HOST_EXIT (not a
+  // plain cancel) marks durable runs interrupted: each keeps its worktree and
+  // resumes when this session reopens (see session_start). We wait briefly so
+  // every run records that before pi moves on. A hard exit (SIGKILL/crash)
+  // that skips this handler is caught on the next host startup by
+  // sweepRunArtifactsOnce, which marks the same runs interrupted.
+  pi.on('session_shutdown', async () => {
     if (statusTimer) {
       clearInterval(statusTimer);
       statusTimer = undefined;
@@ -1437,11 +1505,17 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
     statusParentSession = undefined;
     for (const controller of cancellables.values()) {
       try {
-        controller.abort();
+        controller.abort(HOST_EXIT);
       } catch {
         // best-effort; one failing abort must not skip the rest
       }
     }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.allSettled(inFlight),
+      new Promise((resolve) => (timer = setTimeout(resolve, SHUTDOWN_SETTLE_MS))),
+    ]);
+    clearTimeout(timer);
   });
 
   pi.registerTool({
@@ -1630,28 +1704,8 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
         task.runId = runId;
         task.startedAt = Date.now();
         lines.push(`⏳ ${task.label} — background run ${runId.slice(0, 8)} (check the fleet tool)`);
-        backgroundRuns.set(runId, task.label);
-        refreshBackgroundWidget();
+        watchBackground(pi, runId, task.label, done);
         emit();
-        // Deliberately no AbortSignal here: pi may abort tool signals after execute returns, which
-        // would kill the background child. Swallow late failures — sendMessage throws once the
-        // session is ending, and an unhandled rejection is worse than a lost notification.
-        void done
-          .then((result) => {
-            backgroundRuns.delete(runId);
-            refreshBackgroundWidget();
-            pi.sendMessage({
-              customType: 'subagents:background',
-              content: `Background subagent ${runId.slice(0, 8)} (${task.label}) ${result.ok ? 'completed' : `failed: ${result.error}`}`,
-              display: true,
-              details: { runId, ok: result.ok },
-            });
-          })
-          .catch((err) => {
-            backgroundRuns.delete(runId);
-            refreshBackgroundWidget();
-            console.error(`[subagents] background run ${runId.slice(0, 8)} completion notice failed:`, err);
-          });
       }
 
       if (foreground.length > 0) {
