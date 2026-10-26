@@ -41,10 +41,12 @@ import {
   type SpawnResult,
   type SubagentRuntime,
   declareUnlessSearchable,
+  HOST_EXIT,
 } from '@nicknisi/pi-shared';
 import { Type } from 'typebox';
 import type { EngineSpawnFn, EngineSpawnOptions, EngineSpawnResult } from './engine.js';
 import {
+  findInterruptedRuns,
   formatRunLine,
   formatRunResult,
   formatRunStatus,
@@ -68,6 +70,8 @@ const artifactsRoot = () => subagentsDir('runs') ?? path.join(getAgentDir(), 'su
 // Workflow run dirs (script, run.json, journal) for status and relaunch.
 const workflowRunsRoot = () => subagentsDir('workflow-runs') ?? path.join(getAgentDir(), 'workflow-runs');
 const NAMESPACE = 'workflows';
+/** How long session_shutdown waits for stopped runs to record themselves interrupted. */
+const SHUTDOWN_SETTLE_MS = 5000;
 
 /**
  * Concurrent workflow agents: 16 by default, fewer on machines with fewer
@@ -550,9 +554,42 @@ export default function workflows(pi: ExtensionAPI): void {
     },
   });
 
-  // Background runs belong to the session: stop them when it ends.
-  pi.on('session_shutdown', () => {
-    for (const run of runs.values()) if (run.status === 'running') run.controller.abort();
+  // Background runs belong to the session: stop them when it ends. HOST_EXIT
+  // (not a plain stop) marks them interrupted, so the session relaunches them
+  // when it reopens; wait briefly so each records that before pi moves on.
+  pi.on('session_shutdown', async () => {
+    const active = [...runs.values()].filter((run) => run.status === 'running');
+    for (const run of active) run.controller.abort(HOST_EXIT);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.allSettled(active.map((run) => run.done)),
+      new Promise((resolve) => (timer = setTimeout(resolve, SHUTDOWN_SETTLE_MS))),
+    ]);
+    clearTimeout(timer);
+  });
+
+  // Relaunch this session's workflows that pi quitting, reloading, or crashing
+  // cut off. Finished agents replay from the journal; the rest run again.
+  // Print mode is skipped: it exits when the turn ends, cutting them off again.
+  pi.on('session_start', (_event, ctx) => {
+    const sessionFile = ctx.sessionManager.getSessionFile();
+    if (!ctx.hasUI || !sessionFile) return;
+    const ids = findInterruptedRuns(workflowRunsRoot(), sessionFile);
+    for (const id of ids) {
+      const stored = readStoredRun(workflowRunsRoot(), id);
+      if (!stored) continue;
+      launch(
+        ctx,
+        { script: stored.script, args: stored.args, label: stored.label, relaunch: id },
+        { onSettled: (run) => deliver(run, false, true) },
+      );
+    }
+    if (ids.length > 0) {
+      ctx.ui.notify(
+        `Relaunching ${ids.length} workflow${ids.length === 1 ? '' : 's'} interrupted when pi last exited (finished agents replay). Watch with /workflows.`,
+        'info',
+      );
+    }
   });
 
   const footer = () => refreshFooter(runs, parentCtx?.hasUI ? (id, t) => parentCtx?.ui.setStatus(id, t) : undefined);
@@ -571,6 +608,7 @@ export default function workflows(pi: ExtensionAPI): void {
       label: req.label,
       cwd: ctx.cwd,
       relaunch: req.relaunch,
+      ownerSession,
       stallMs: workflowStallMs(),
       timeoutMs: opts.timeoutMs,
       signal: opts.signal,
@@ -582,6 +620,8 @@ export default function workflows(pi: ExtensionAPI): void {
     footer();
     void run.done.then(() => {
       footer();
+      // An interrupted run reports when it finishes after its session reopens.
+      if (run.interrupted) return;
       try {
         opts.onSettled?.(run);
       } catch (err) {
@@ -593,11 +633,11 @@ export default function workflows(pi: ExtensionAPI): void {
   }
 
   /** Deliver a background run's result into the conversation. */
-  function deliver(run: WorkflowRun, triggerTurn: boolean): void {
+  function deliver(run: WorkflowRun, triggerTurn: boolean, resumed = false): void {
     pi.sendMessage(
       {
         customType: 'workflows:result',
-        content: `Workflow ${formatRunResult(run)}`,
+        content: `${resumed ? 'Resumed workflow' : 'Workflow'} ${formatRunResult(run)}`,
         display: true,
         details: { id: run.id, status: run.status },
       },

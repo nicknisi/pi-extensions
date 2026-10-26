@@ -1,9 +1,18 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { HOST_EXIT } from '@nicknisi/pi-shared';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createReplay, type EngineSpawnFn, type EngineSpawnResult } from './engine.js';
-import { formatRunResult, readJournal, readStoredRun, startRun, sweepWorkflowRuns, type WorkflowRuns } from './runs.js';
+import {
+  findInterruptedRuns,
+  formatRunResult,
+  readJournal,
+  readStoredRun,
+  startRun,
+  sweepWorkflowRuns,
+  type WorkflowRuns,
+} from './runs.js';
 
 const roots: string[] = [];
 function tmpRoot(): string {
@@ -268,5 +277,72 @@ describe('relaunch and stop edge cases', () => {
     await run.done;
     expect(run.summary).toBe('finally');
     expect(run.agents[0]!.attempts).toBe(8);
+  });
+});
+
+describe('interrupted runs', () => {
+  const OWNER = '/sessions/parent.jsonl';
+  // One agent finishes, then the next hangs until the run is stopped.
+  const TWO_STEP = `const a = await agent('first');\nconst b = await agent('hang second');\nreturn [a, b];`;
+  const start = (root: string, runs: WorkflowRuns, prompts: string[], relaunch?: string) =>
+    startRun(runs, {
+      root,
+      script: TWO_STEP,
+      args: undefined,
+      label: 'two-step',
+      cwd: '/tmp',
+      ownerSession: OWNER,
+      ...(relaunch ? { relaunch } : {}),
+      spawn: (runSignal) => async (opts) =>
+        recordingSpawn(prompts)({ ...opts, signal: AbortSignal.any([runSignal, opts.signal!]) }),
+    });
+  const waitFor = async (pred: () => boolean) => {
+    for (let i = 0; i < 100 && !pred(); i++) await new Promise((r) => setTimeout(r, 5));
+  };
+
+  it('a host-exit stop marks the run interrupted; the session finds it and a relaunch replays', async () => {
+    const root = tmpRoot();
+    const runs: WorkflowRuns = new Map();
+    const first: string[] = [];
+    const run = start(root, runs, first);
+    await waitFor(() => run.agents.length === 2);
+    run.controller.abort(HOST_EXIT);
+    await run.done;
+    expect(run).toMatchObject({ status: 'stopped', interrupted: true });
+    expect(readStoredRun(root, run.id)).toMatchObject({ interrupted: true, ownerSession: OWNER, hostPid: process.pid });
+    expect(findInterruptedRuns(root, OWNER)).toEqual([run.id]);
+    expect(findInterruptedRuns(root, '/sessions/other.jsonl')).toEqual([]);
+
+    // Relaunch: the finished agent replays, the cut-off one runs again, and the mark clears.
+    const second: string[] = [];
+    const again = start(root, new Map(), second, run.id);
+    await waitFor(() => second.length === 1);
+    expect(second).toEqual(['hang second']);
+    expect(findInterruptedRuns(root, OWNER)).toEqual([]);
+    again.controller.abort();
+    await again.done;
+  });
+
+  it('a plain stop is not interrupted', async () => {
+    const root = tmpRoot();
+    const run = start(root, new Map(), []);
+    await waitFor(() => run.agents.length === 2);
+    run.controller.abort();
+    await run.done;
+    expect(run.interrupted).toBeUndefined();
+    expect(findInterruptedRuns(root, OWNER)).toEqual([]);
+  });
+
+  it('finds a run left running by a dead host, but not one a live host still owns', () => {
+    const root = tmpRoot();
+    const write = (id: string, hostPid: number) => {
+      fs.mkdirSync(path.join(root, id), { recursive: true });
+      const stored = { id, label: 'x', status: 'running', startedAt: 1, ownerSession: OWNER, hostPid };
+      fs.writeFileSync(path.join(root, id, 'run.json'), JSON.stringify(stored));
+    };
+    write('wf-0000dead', 999999999);
+    write('wf-0000a11e', process.ppid);
+    write('wf-00000001', process.pid);
+    expect(findInterruptedRuns(root, OWNER)).toEqual(['wf-0000dead']);
   });
 });
