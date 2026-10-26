@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-compact-tools",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Two-line tool displays with native click and Ctrl+O expansion",
   "keywords": [
     "pi",

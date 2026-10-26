@@ -1,5 +1,13 @@
 # @nicknisi/pi-codesearch
 
+## 0.3.4
+
+### Patch Changes
+
+- Updated dependencies [a9f4d1a]
+- Updated dependencies [15ddcd3]
+  - @nicknisi/pi-shared@0.9.0
+
 ## 0.3.3
 
 ### Patch Changes

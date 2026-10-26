@@ -1,5 +1,19 @@
 # @nicknisi/pi-workflows
 
+## 0.6.0
+
+### Minor Changes
+
+- 15ddcd3: Workflows cut off by pi quitting, reloading, switching sessions, or crashing relaunch on their own when you reopen the session that started them. Finished agents replay from the journal; only the agent that was cut off, and those after it, run again. The result arrives as a `Resumed workflow …` message. `run.json` now records the owning session and pi's process id, and a stop caused by the session ending is marked `interrupted` rather than plain `stopped`. `workflow stop` still stops for good.
+
+  shared: export `pidAlive(pid)`.
+
+### Patch Changes
+
+- Updated dependencies [a9f4d1a]
+- Updated dependencies [15ddcd3]
+  - @nicknisi/pi-shared@0.9.0
+
 ## 0.5.2
 
 ### Patch Changes
