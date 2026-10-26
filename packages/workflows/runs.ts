@@ -10,6 +10,7 @@
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { HOST_EXIT, pidAlive } from '@nicknisi/pi-shared';
 import {
   createReplay,
   createRunGate,
@@ -39,6 +40,8 @@ export interface WorkflowRun {
   startedAt: number;
   endedAt?: number;
   dir: string;
+  /** Stopped because its pi session ended (HOST_EXIT); it relaunches when that session reopens. */
+  interrupted?: boolean;
   /** Formatted result (completed) or error (failed/stopped). */
   summary?: string;
   /** Settles when the run ends; never rejects. */
@@ -56,6 +59,10 @@ interface StoredRun {
   startedAt: number;
   endedAt?: number | undefined;
   agents?: number;
+  /** Owning pi session file and host pid: how a reopened session finds its interrupted runs. */
+  ownerSession?: string | undefined;
+  hostPid?: number;
+  interrupted?: boolean | undefined;
 }
 
 export interface RunUi {
@@ -79,6 +86,8 @@ export interface StartRunOptions {
   timeoutMs?: number | undefined;
   /** Abort source besides stop (e.g. a foreground tool call's signal). */
   signal?: AbortSignal | undefined;
+  /** Owning pi session file; recorded so the session can relaunch the run if pi exits mid-run. */
+  ownerSession?: string | undefined;
   ui?: RunUi | undefined;
   /** Called on every state change (agent start/settle, phase, end). */
   onChange?: () => void;
@@ -132,6 +141,38 @@ export function readJournal(dir: string): JournalEntry[] {
     }
   }
   return [...bySeq.values()];
+}
+
+/**
+ * Ids of runs `ownerSession` owns that pi cut off: stopped with HOST_EXIT, or
+ * still `running` under a host pid that is gone (a crash). Relaunching them
+ * replays their finished agents from the journal.
+ */
+export function findInterruptedRuns(root: string, ownerSession: string): string[] {
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(root);
+  } catch {
+    return [];
+  }
+  const ids: string[] = [];
+  for (const name of names) {
+    if (!isWorkflowRunId(name)) continue;
+    let stored: StoredRun;
+    try {
+      stored = JSON.parse(fs.readFileSync(path.join(root, name, 'run.json'), 'utf8')) as StoredRun;
+    } catch {
+      continue;
+    }
+    if (stored.ownerSession !== ownerSession) continue;
+    const crashed =
+      stored.status === 'running' &&
+      typeof stored.hostPid === 'number' &&
+      stored.hostPid !== process.pid &&
+      !pidAlive(stored.hostPid);
+    if (stored.interrupted || crashed) ids.push(name);
+  }
+  return ids;
 }
 
 /** Delete run dirs older than maxAgeMs. Best-effort. */
@@ -278,6 +319,9 @@ export function startRun(runs: WorkflowRuns, opts: StartRunOptions): WorkflowRun
       startedAt: run.startedAt,
       endedAt: run.endedAt,
       agents: run.agents.length,
+      ownerSession: opts.ownerSession,
+      hostPid: process.pid,
+      interrupted: run.interrupted,
     };
     try {
       writeJson(path.join(dir, 'run.json'), stored);
@@ -365,6 +409,10 @@ export function startRun(runs: WorkflowRuns, opts: StartRunOptions): WorkflowRun
     .catch((err: unknown) => {
       run.status = controller.signal.aborted ? 'stopped' : 'failed';
       run.summary = err instanceof Error ? err.message : String(err);
+      if (controller.signal.reason === HOST_EXIT) {
+        run.interrupted = true;
+        run.summary = 'Interrupted when the pi session ended; it relaunches when the session reopens.';
+      }
     })
     .finally(() => {
       closed = true;

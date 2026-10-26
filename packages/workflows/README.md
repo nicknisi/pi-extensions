@@ -77,11 +77,21 @@ Ultracode only changes how the model structures work; it doesn't change your thi
 
 ## Background runs and relaunch
 
-`run` starts the workflow in the background and returns its id (`wf-xxxxxxxx`) immediately, so the session stays responsive. When the run ends, its result (or error) is delivered as a `workflows:result` message; for model-started runs that message starts a new turn so the model can act on it. Pass `background: false` when a caller needs the value inside the same tool call (for example a codemode script). Without a UI (print mode, which exits when the turn ends) runs default to the foreground. There is no wall-clock cap unless you pass `timeoutMs`. Background runs stop when the session ends.
+`run` starts the workflow in the background and returns its id (`wf-xxxxxxxx`) immediately, so the session stays responsive. When the run ends, its result (or error) is delivered as a `workflows:result` message; for model-started runs that message starts a new turn so the model can act on it. Pass `background: false` when a caller needs the value inside the same tool call (for example a codemode script). Without a UI (print mode, which exits when the turn ends) runs default to the foreground. There is no wall-clock cap unless you pass `timeoutMs`. Background runs stop when the session ends, and relaunch when it reopens (see below).
 
 Every run writes its script, `run.json` (label, args, status), and `journal.jsonl` to `~/.pi/agent/workflow-runs/<id>/` (or `$PI_SUBAGENTS_DIR/workflow-runs/`); run dirs older than 7 days are swept. The journal records each settled agent in start order with a hash of everything that determines its work (prompt, model, tools, system prompt, schema, …).
 
 `run` with `relaunch: '<id>'` (or `/wf relaunch <id>`) re-runs a stopped or failed workflow with the same script and args. Agents replay in start order: each completed agent whose inputs match returns its saved result without running; the first agent that differs, failed, or never finished — and every agent after it — runs again. Pass `script` along with `relaunch` to relaunch an edited version. Keep scripts deterministic (no `Date.now()` or `Math.random()` in prompts; pass timestamps through `args`) so a relaunch starts the same agents in the same order.
+
+### Interrupted runs relaunch themselves
+
+A run cut off by pi quitting, reloading, switching sessions, or crashing relaunches on its own the next time you open the session that started it, in an interactive or RPC session. pi notifies you (`Relaunching 1 workflow interrupted when pi last exited`), and the run keeps its id and shows in `/workflows`.
+
+- **Quit, reload, session switch:** `session_shutdown` stops each running workflow with the `HOST_EXIT` reason. That marks it `interrupted` in `run.json` instead of plain `stopped`, and the handler waits up to 5 s for every run to record it. No result message is posted for the cut-off run.
+- **Crash:** `run.json` records the owning session and pi's process id. A run still `running` under a process that no longer exists counts as interrupted.
+- **Relaunch:** the same journal replay as `relaunch`. Finished agents return their saved results; the agent that was cut off runs again from its prompt, and so does everything after it. When it ends, its result arrives as a `Resumed workflow …` message that doesn't start a turn.
+
+Stop is still stop: `workflow stop` and `/wf stop` (or a foreground run's tool call aborted with Esc) end the run for good. Runs only relaunch in the session that started them, never in print mode (`pi -p`), and with no opt-out. The relaunch has no wall-clock cap, even if the original passed `timeoutMs`. If the session is open in two pi processes at once, both can relaunch the same run.
 
 ## Watch a run
 

@@ -626,7 +626,7 @@ export function sweepRunArtifacts(
 }
 
 /** Whether a process exists. shortcut: a pid reused after a reboot reads as alive, so that ghost waits for age GC; a boot id would fix it. */
-function pidAlive(pid: number): boolean {
+export function pidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
