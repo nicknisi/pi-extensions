@@ -3,7 +3,7 @@
  *
  * Built-in `/name` sets a display name manually, but you have to remember to
  * do it. This extension removes that burden by deriving a concise name
- * automatically after the first exchange, and adds a couple of conveniences
+ * automatically as soon as the first prompt is sent, and adds a couple of conveniences
  * for searching and resuming by name.
  *
  * Commands:
@@ -19,9 +19,9 @@
  *   layer, so it reaches Ghostty, tmux panes, etc.
  *
  * Auto-naming:
- *   After the first real exchange in an unnamed session, a name is derived
- *   automatically. Heuristic by default (free, instant); LLM-generated titles
- *   are opt-in. Already-named sessions (set via /sn, /name, or --name) are
+ *   When the first prompt of an unnamed session is sent, a name is derived
+ *   from it in parallel with the agent run. Heuristic by default (free,
+ *   instant); LLM-generated titles are opt-in. Already-named sessions (set via /sn, /name, or --name) are
  *   never overwritten.
  *
  *   Configure via ~/.pi/agent/configs/session-name.json:
@@ -53,7 +53,7 @@ import { basename, join } from 'node:path';
 // ── Config ────────────────────────────────────────────────────────────────
 
 interface SessionNameConfig {
-  /** Auto-naming mode after the first exchange. */
+  /** Auto-naming mode, applied when the first prompt is sent. */
   autoName: 'off' | 'heuristic' | 'llm';
   /** Max characters for derived names (heuristic and LLM). */
   heuristicMaxLength: number;
@@ -119,17 +119,6 @@ function contentToText(content: unknown): string {
 function firstUserText(branch: SessionEntry[]): string | undefined {
   for (const entry of branch) {
     if (entry.type === 'message' && entry.message.role === 'user') {
-      const text = contentToText(entry.message.content);
-      if (text.trim()) return text;
-    }
-  }
-  return undefined;
-}
-
-/** First assistant message text in the branch (oldest first). */
-function firstAssistantText(branch: SessionEntry[]): string | undefined {
-  for (const entry of branch) {
-    if (entry.type === 'message' && entry.message.role === 'assistant') {
       const text = contentToText(entry.message.content);
       if (text.trim()) return text;
     }
@@ -213,6 +202,8 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
   // A deferred title set from session_start, cancelled on shutdown so it
   // never lands on a torn-down session.
   let pendingTitleTimer: ReturnType<typeof setTimeout> | null = null;
+  // Set on shutdown so a title resolving afterwards never names a replaced session.
+  let shutDown = false;
 
   pi.on('session_start', (_event, ctx) => {
     autoNamed = false;
@@ -238,6 +229,7 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
   });
 
   pi.on('session_shutdown', () => {
+    shutDown = true;
     titleAbort?.abort();
     titleAbort = null;
     if (pendingTitleTimer) {
@@ -246,51 +238,49 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
     }
   });
 
-  // ── Auto-naming after the first exchange ──────────────────────────────
-  pi.on('agent_settled', async (event, ctx) => {
-    // A cancelled run's reply is incomplete; wait for a finished one.
-    if (autoNamed || config.autoName === 'off' || event.aborted) return;
+  // ── Auto-naming as soon as the first prompt is sent ───────────────────
+  pi.on('before_agent_start', (event, ctx) => {
+    if (autoNamed || config.autoName === 'off') return;
+    // Older pi (e.g. 1.1) has no messageType: this event only fires for user prompts there.
+    if ('messageType' in event && event.messageType !== 'user') return;
     // Respect an existing name (set via /name, /sn, --name, or a prior turn).
     if (pi.getSessionName()) {
       autoNamed = true;
       return;
     }
 
-    const branch = ctx.sessionManager.getBranch();
-    const userText = firstUserText(branch);
-    if (!userText) return;
+    // A resumed unnamed session is named from its first prompt, not this one.
+    const userText = firstUserText(ctx.sessionManager.getBranch()) ?? event.prompt;
+    if (!userText.trim()) return;
 
-    // Claim the slot now so a re-entrant settled event doesn't fire twice.
     autoNamed = true;
+    // Not awaited: the agent run must not wait on the title call.
+    autoName(ctx, userText).catch(() => {
+      // Naming is best-effort; a failure must not surface as an unhandled rejection.
+    });
+  });
 
+  async function autoName(ctx: ExtensionContext, userText: string): Promise<void> {
     let name: string | null = null;
-    try {
-      if (config.autoName === 'llm') {
-        const assistantText = firstAssistantText(branch);
-        name = await generateLlmTitle(ctx, userText, assistantText ?? '');
-        if (!name) name = deriveHeuristicName(userText, config.heuristicMaxLength);
-      } else {
-        name = deriveHeuristicName(userText, config.heuristicMaxLength);
+    if (config.autoName === 'llm') {
+      try {
+        name = await generateLlmTitle(ctx, userText);
+      } catch {
+        name = null;
       }
-    } catch {
-      name = null;
     }
+    name ??= deriveHeuristicName(userText, config.heuristicMaxLength);
 
-    if (!name) return;
-    // The name may have been set while the LLM call was in flight.
-    if (pi.getSessionName()) return;
+    // The name may have been set (or the session replaced) while the LLM call was in flight.
+    if (!name || shutDown || pi.getSessionName()) return;
 
     pi.setSessionName(name);
     if (config.notifyOnAutoName && ctx.hasUI) {
       ctx.ui.notify(`Session named: ${name}`, 'info');
     }
-  });
+  }
 
-  async function generateLlmTitle(
-    ctx: ExtensionContext,
-    userText: string,
-    assistantText: string,
-  ): Promise<string | null> {
+  async function generateLlmTitle(ctx: ExtensionContext, userText: string): Promise<string | null> {
     const model = resolveTitleModel(ctx);
     if (!model) return null;
     const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
@@ -299,8 +289,8 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
     const controller = new AbortController();
     titleAbort = controller;
 
-    const systemPrompt = `You generate concise session titles for a coding agent. Given the user's first prompt and the start of the assistant's first reply, reply with ONLY a short title of at most ${config.llmMaxWords} words. No quotes, no trailing punctuation, no explanation.`;
-    const body = `User's first prompt:\n${truncate(userText, 1000)}\n\nAssistant's first reply (start):\n${truncate(assistantText, 800)}`;
+    const systemPrompt = `You generate concise session titles for a coding agent. Given the user's first prompt, reply with ONLY a short title of at most ${config.llmMaxWords} words. No quotes, no trailing punctuation, no explanation.`;
+    const body = `User's first prompt:\n${truncate(userText, 1000)}`;
     const userMessage: Message = {
       role: 'user',
       content: [{ type: 'text', text: body }],

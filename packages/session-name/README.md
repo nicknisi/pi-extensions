@@ -1,6 +1,6 @@
 # @nicknisi/pi-session-name
 
-Name pi sessions so they're easy to search and resume. Pi's built-in `/name` works but requires you to remember to use it; this extension derives a concise name automatically after the first exchange (heuristic by default, LLM-generated opt-in), mirrors the name into the terminal/window title, and adds `/sn` for manual naming and `/sessions` for a name-focused search-and-resume picker. Sessions already named via `/sn`, `/name`, or `--name` are never overwritten.
+Name pi sessions so they're easy to search and resume. Pi's built-in `/name` works but requires you to remember to use it; this extension derives a concise name automatically as soon as the first prompt is sent (heuristic by default, LLM-generated opt-in), mirrors the name into the terminal/window title, and adds `/sn` for manual naming and `/sessions` for a name-focused search-and-resume picker. Sessions already named via `/sn`, `/name`, or `--name` are never overwritten.
 
 ## What it adds
 
@@ -8,7 +8,7 @@ Name pi sessions so they're easy to search and resume. Pi's built-in `/name` wor
   - `/sn [name]` — Set the session name. With no argument, shows the current name via `ctx.ui.notify`. `/sn clear` (also `-c`, `--clear`) clears it. Argument completion suggests `clear`.
   - `/sessions [query] [--all]` — Interactive picker of sessions for the current project (`SessionManager.list(ctx.cwd)`), or across every project with `--all` / `-a` (`SessionManager.listAll()`). Selecting an entry resumes that session via `ctx.switchSession`. Requires interactive mode (`ctx.hasUI`).
 - **Terminal title** — Sets the window/tab title via `ctx.ui.setTitle` to reflect the session name (e.g. `fix login bug — dotfiles`). Reaches whatever pi's terminal layer drives (Ghostty, tmux panes, etc.).
-- **Auto-naming** — On the first `agent_settled` event in an unnamed session, derives a name from the first user message (heuristic mode) or a one-off LLM call (llm mode), then calls `pi.setSessionName`. Fires at most once per session instance.
+- **Auto-naming** — When the first prompt of an unnamed session starts a run (`before_agent_start`), derives a name from that prompt (heuristic mode) or a one-off LLM call (llm mode), then calls `pi.setSessionName`. Runs alongside the agent rather than delaying it. Fires at most once per session instance.
 
 ## Events hooked
 
@@ -17,7 +17,7 @@ Name pi sessions so they're easy to search and resume. Pi's built-in `/name` wor
 | `session_start`        | Resets the auto-name guard; defers a title set (via `setTimeout(0)`) so it runs after pi's built-in `updateTerminalTitle()` on startup. |
 | `session_info_changed` | Re-sets the title. `setSessionName` emits to built-in handlers first, so this runs after pi's built-in title update and wins.           |
 | `session_shutdown`     | Aborts any in-flight LLM title call and clears the pending title timer so a resolved name never lands on a torn-down/replaced session.  |
-| `agent_settled`        | Triggers auto-naming after the first exchange.                                                                                          |
+| `before_agent_start`   | Triggers auto-naming when the first prompt is sent, without blocking the run.                                                           |
 
 No custom tools, keybindings, widgets, or message/entry types.
 
@@ -48,7 +48,7 @@ Config file: `~/.pi/agent/configs/session-name.json` (JSON, all keys optional; m
 
 | Key                  | Type                            | Default               | Description                                                                                                                                                                                                                                                                        |
 | -------------------- | ------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `autoName`           | `"off" \| "heuristic" \| "llm"` | `"heuristic"`         | Naming mode after the first exchange. `heuristic` uses the first non-empty line of the first user message (free, instant). `llm` makes a one-off title-generation call and falls back to the heuristic if it fails. `off` disables auto-naming.                                    |
+| `autoName`           | `"off" \| "heuristic" \| "llm"` | `"heuristic"`         | Naming mode, applied when the first prompt is sent. `heuristic` uses the first non-empty line of the first user message (free, instant). `llm` makes a one-off title-generation call and falls back to the heuristic if it fails. `off` disables auto-naming.                      |
 | `heuristicMaxLength` | `number`                        | `60`                  | Max characters for derived names (applies to both heuristic and LLM titles; longer names are truncated with `…`).                                                                                                                                                                  |
 | `llmMaxWords`        | `number`                        | `6`                   | Max words requested in the LLM title-generation prompt.                                                                                                                                                                                                                            |
 | `llmModel`           | `string \| null`                | `null`                | Model for LLM titles as `"provider/model-id"`, e.g. `"anthropic/claude-haiku-4-5"`. `null` uses the session model. If the configured model isn't found in the registry, falls back to the session model and warns once.                                                            |
@@ -74,11 +74,11 @@ No environment variables are read.
 
 ## How auto-naming works
 
-1. On `agent_settled`, skip if already named (via `/sn`, `/name`, `--name`, or a prior auto-name), if `autoName` is `"off"`, or if the run was cancelled (`aborted`, pi ≥1.1; the next finished run names the session).
-2. Grab the branch via `ctx.sessionManager.getBranch()` and extract the first user message text (string content or `text` content blocks).
+1. On `before_agent_start`, skip if already named (via `/sn`, `/name`, `--name`, or a prior auto-name), if `autoName` is `"off"`, or if the run was started by a custom message rather than a user prompt. Slash commands never start a run, so they never trigger naming.
+2. Use the first user message already in the branch (`ctx.sessionManager.getBranch()`, so a resumed unnamed session is named from its first prompt), else the prompt being sent. Naming then runs in the background; the agent run does not wait for it.
 3. Heuristic mode: first non-empty line, whitespace-collapsed, truncated to `heuristicMaxLength`.
-4. LLM mode: one `ctx.modelRegistry.complete()` call (applies `models.json` overrides, extension-registered providers, and request-time auth) with a system prompt asking for a ≤ `llmMaxWords`-word title, fed the first user prompt (truncated to 1000 chars) and the start of the first assistant reply (800 chars). The response is cleaned (first line, quotes and trailing punctuation stripped) and truncated to `heuristicMaxLength`. A `ctx.modelRegistry.getApiKeyAndHeaders(model)` pre-check falls back to the heuristic when no API key is available.
-5. A name manually set while the LLM call is in flight wins — the result is discarded.
+4. LLM mode: one `ctx.modelRegistry.complete()` call (applies `models.json` overrides, extension-registered providers, and request-time auth) with a system prompt asking for a ≤ `llmMaxWords`-word title, fed the first user prompt (truncated to 1000 chars). The response is cleaned (first line, quotes and trailing punctuation stripped) and truncated to `heuristicMaxLength`. A `ctx.modelRegistry.getApiKeyAndHeaders(model)` pre-check falls back to the heuristic when no API key is available.
+5. A name manually set while the LLM call is in flight wins — the result is discarded. So does a session replaced or shut down meanwhile.
 6. Manually naming or clearing a session sets the per-session guard so auto-naming never fires afterward in that session instance.
 
 ## Dependencies
