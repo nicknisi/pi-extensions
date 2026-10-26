@@ -20,7 +20,7 @@ import type { Api, Model, Provider } from '@earendil-works/pi-ai';
 import { ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { subagentsDir } from './subagents-dir.js';
-import { createSubagentRuntime, parentModelRuntime, writeSessionMirror } from './subagents.js';
+import { createSubagentRuntime, HOST_EXIT, parentModelRuntime, readRunArtifacts } from './subagents.js';
 import { runWorkflow } from './workflow.js';
 import { addWorktree, removeWorktree } from './worktree.js';
 
@@ -296,7 +296,7 @@ describe('PI_SUBAGENTS_DIR', () => {
     expect(fs.existsSync(path.join(repo, 'child.txt'))).toBe(false);
   });
 
-  it('without the override, keeps the usual places under the agent dir', { timeout: 15_000 }, () => {
+  it('without the override, keeps the usual places under the agent dir', { timeout: 15_000 }, async () => {
     delete process.env.PI_SUBAGENTS_DIR;
     expect(subagentsDir('runs')).toBeUndefined();
 
@@ -305,15 +305,111 @@ describe('PI_SUBAGENTS_DIR', () => {
     worktrees.push(added.path);
     expect(added.path).toBe(path.join(agentDir, 'subagent-worktrees', 'default-run'));
 
-    const file = writeSessionMirror(
-      [
-        { role: 'user', content: 'hi', timestamp: 1 },
-        { role: 'assistant', content: [{ type: 'text', text: 'yo' }], stopReason: 'stop', timestamp: 2 },
-      ],
-      repo,
-      undefined,
-    );
-    expect(file?.startsWith(path.join(agentDir, 'sessions') + path.sep)).toBe(true);
+    const { registry, model } = await parentRegistry();
+    const runtime = createSubagentRuntime({
+      namespace: 'files-test',
+      parent: () => ({ modelRegistry: registry, model }),
+    });
+    const result = await runtime.spawn({ prompt: 'hi', cwd: repo, tools: [], parentSession: 'parent.jsonl' });
+    expect(result.ok, result.ok ? '' : result.error).toBe(true);
+    expect(runtime.listRuns()[0]!.sessionFile?.startsWith(path.join(agentDir, 'sessions') + path.sep)).toBe(true);
     expect(filesUnder(root)).toEqual([]);
+  });
+});
+
+describe('durable runs', () => {
+  let repo: string;
+  const worktrees: string[] = [];
+
+  beforeEach(() => {
+    repo = gitRepo();
+  });
+
+  afterEach(() => {
+    for (const wt of worktrees.splice(0)) removeWorktree(repo, wt);
+    fs.rmSync(repo, { recursive: true, force: true });
+  });
+
+  it('resumes a run interrupted by host exit from its transcript, in its worktree', { timeout: 30_000 }, async () => {
+    const { registry, model } = await parentRegistry();
+    const runsDir = path.join(agentDir, 'runs');
+    const newRuntime = () =>
+      createSubagentRuntime({
+        namespace: 'durable-test',
+        artifactsDir: runsDir,
+        parent: () => ({ modelRegistry: registry, model }),
+      });
+
+    // pi exits right after the child's first reply (a write tool call).
+    const controller = new AbortController();
+    const first = await newRuntime().spawn({
+      prompt: 'write child.txt',
+      cwd: repo,
+      tools: ['write'],
+      worktree: true,
+      parentSession: path.join(repo, 'parent.jsonl'),
+      timeoutMs: 10_000,
+      signal: controller.signal,
+      onUsage: () => controller.abort(HOST_EXIT),
+    });
+    expect(first).toMatchObject({ ok: false, kind: 'aborted' });
+
+    // A new pi process only has the persisted artifact.
+    const artifact = readRunArtifacts(runsDir).find((r) => r.runId === first.runId)!;
+    expect(artifact).toMatchObject({ status: 'aborted', interrupted: true });
+    expect(artifact.resume?.model).toBe(`${PROVIDER}/${model.id}`);
+    const sessionFile = artifact.sessionFile!;
+    const worktree = artifact.worktree!.path;
+    worktrees.push(worktree);
+    expect(fs.existsSync(sessionFile)).toBe(true);
+    expect(fs.existsSync(worktree)).toBe(true);
+
+    const runtime = newRuntime();
+    const resumed = await runtime.resumeDetached(artifact).done;
+    expect(resumed, resumed.ok ? '' : resumed.error).toMatchObject({
+      ok: true,
+      runId: first.runId,
+      text: 'stub reply',
+    });
+    const run = runtime.listRuns()[0]!;
+    expect(run).toMatchObject({ status: 'completed', sessionFile, worktree: { path: worktree } });
+    expect(run.interrupted).toBeUndefined();
+
+    // One transcript: the original prompt and reply, then the continue prompt and the answer.
+    const entries = fs
+      .readFileSync(sessionFile, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(entries.filter((e) => e.type === 'session')).toHaveLength(1);
+    const users = entries.filter((e) => e.message?.role === 'user').map((e) => JSON.stringify(e.message.content));
+    expect(users).toHaveLength(2);
+    expect(users[0]).toContain('write child.txt');
+    expect(users[1]).toContain('interrupted');
+    expect(JSON.stringify(entries.at(-1).message.content)).toContain('stub reply');
+  });
+
+  it('a plain cancel is not resumable and removes the worktree', { timeout: 30_000 }, async () => {
+    const { registry, model } = await parentRegistry();
+    const runtime = createSubagentRuntime({
+      namespace: 'durable-test',
+      artifactsDir: path.join(agentDir, 'runs'),
+      parent: () => ({ modelRegistry: registry, model }),
+    });
+    const controller = new AbortController();
+    const result = await runtime.spawn({
+      prompt: 'write child.txt',
+      cwd: repo,
+      tools: ['write'],
+      worktree: true,
+      parentSession: path.join(repo, 'parent.jsonl'),
+      timeoutMs: 10_000,
+      signal: controller.signal,
+      onUsage: () => controller.abort(),
+    });
+    expect(result).toMatchObject({ ok: false, kind: 'aborted', error: 'Aborted by caller' });
+    const run = runtime.listRuns()[0]!;
+    expect(run.interrupted).toBeUndefined();
+    expect(run.worktree).toBeUndefined();
   });
 });

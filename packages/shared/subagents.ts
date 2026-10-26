@@ -173,6 +173,26 @@ export interface SpawnOptions {
   parentSession?: string;
 }
 
+/**
+ * The serializable spawn options a durable run persists (RunRecord.resume) so
+ * resumeDetached() can rebuild the child after its host exits.
+ */
+export type ResumeSpec = Omit<
+  SpawnOptions,
+  'outputSchema' | 'onSupervisorRequest' | 'signal' | 'onUsage' | 'onResponseStart'
+>;
+
+/**
+ * Abort reason meaning "the host pi session is ending", not "cancel": a durable
+ * run aborted with it is marked interrupted and keeps its worktree, so it can
+ * be resumed when the session reopens. Pass it to `AbortController.abort()`.
+ */
+export const HOST_EXIT = 'pi-host-exit';
+
+const INTERRUPTED_ERROR = 'Interrupted when the pi session ended; it resumes when the session reopens.';
+const RESUME_PROMPT =
+  'You were interrupted before finishing (the pi session running you ended). Your earlier work is above. Continue the task from where you left off, then give your final answer.';
+
 export interface SpawnUsage {
   inputTokens: number;
   outputTokens: number;
@@ -232,11 +252,15 @@ export interface RunRecord {
   transcript?: TranscriptEntry[] | undefined;
   worktree?: WorktreeInfo | undefined;
   /**
-   * Path to a standard pi session JSONL mirror of this run, when dual-written
-   * via `SessionManager` (see SpawnOptions.parentSession). Additive to the
-   * bespoke run store — the fleet/registry still read the .json artifact.
+   * Path to the run's standard pi session JSONL, written as the child runs
+   * when SpawnOptions.parentSession is set. Additive to the bespoke run store
+   * — the fleet/registry still read the .json artifact.
    */
   sessionFile?: string | undefined;
+  /** Durable runs only (parentSession set, no schema/supervisor): what resumeDetached() needs. */
+  resume?: ResumeSpec | undefined;
+  /** The host exited mid-run; resumeDetached() continues it from sessionFile. */
+  interrupted?: boolean | undefined;
 }
 
 export interface SubagentRuntime {
@@ -244,6 +268,15 @@ export interface SubagentRuntime {
   spawn(options: SpawnOptions): Promise<SpawnResult>;
   /** Launch without awaiting; track via listRuns()/artifacts or the returned promise. */
   spawnDetached(options: SpawnOptions): { runId: string; done: Promise<SpawnResult> };
+  /**
+   * Continue an interrupted durable run under the same runId: reopen its
+   * session transcript (and worktree) and ask the child to finish. A run
+   * interrupted before its first reply restarts from its prompt.
+   */
+  resumeDetached(
+    run: RunRecord,
+    extra?: Pick<SpawnOptions, 'signal' | 'onUsage' | 'onResponseStart'>,
+  ): { runId: string; done: Promise<SpawnResult> };
   /** Snapshot of recent runs, newest first. */
   listRuns(): RunRecord[];
   /** Currently executing (not queued) spawns. */
@@ -345,47 +378,6 @@ function markFailed(record: RunRecord, result: SpawnFailure): SpawnFailure {
 function childSessionError(session: AgentSession): string | undefined {
   return session.agent.state.errorMessage;
 }
-
-/**
- * Additive dual-write: mirror a finished child run's messages into a standard
- * pi session JSONL via the real SessionManager, linked back to the owning
- * session through `parentSession`. Returns the new session file path, or
- * undefined when no mirror was written (no messages, or a best-effort
- * failure). Never throws — the bespoke .json artifact remains the source of
- * truth for the fleet/registry.
- *
- * `parentSession` is the owning pi session's file path
- * (ctx.sessionManager.getSessionFile() from the dispatch tool). When
- * undefined (in-memory/print host) the mirror is still written, just without
- * parent linkage. SessionManager.appendMessage refuses compactionSummary and
- * branchSummary messages, so those are filtered — a single-prompt child run
- * should never produce them, but the guard keeps a compacted child from
- * breaking the mirror.
- */
-function writeSessionMirror(
-  messages: readonly any[],
-  cwd: string,
-  parentSession: string | undefined,
-): string | undefined {
-  const safe = messages.filter((m) => {
-    const role = m?.role;
-    return (
-      role === 'user' || role === 'assistant' || role === 'toolResult' || role === 'bashExecution' || role === 'custom'
-    );
-  });
-  // No assistant turn means the child crashed before replying: don't mirror it.
-  if (!safe.some((m) => m.role === 'assistant')) return undefined;
-  try {
-    const mgr = SessionManager.create(cwd, subagentsDir('sessions'), parentSession ? { parentSession } : undefined);
-    for (const msg of safe) mgr.appendMessage(msg);
-    // SessionManager creates the JSONL lazily; only report a file that exists.
-    const file = mgr.getSessionFile();
-    return file && fs.existsSync(file) ? file : undefined;
-  } catch {
-    return undefined;
-  }
-}
-export { writeSessionMirror };
 
 /** Extract the text of the last assistant message that produced any. */
 function lastAssistantText(messages: readonly any[]): string {
@@ -590,19 +582,26 @@ export function sweepRunArtifacts(
       const isGhost =
         (record.status === 'running' || record.status === 'queued') &&
         typeof record.hostPid === 'number' &&
-        record.hostPid !== process.pid;
+        record.hostPid !== process.pid &&
+        !pidAlive(record.hostPid);
       if (isGhost) {
         try {
-          // A ghost run's host died before runChild could clean up — remove
-          // its worktree now so a hard exit (SIGKILL/crash) can't leak one.
-          // .patch siblings are reaped by the age-based GC below when their
-          // artifact ages out (a hard-killed host never got to capture one).
-          if (record.worktree?.path) removeWorktree(record.worktree.repoRoot ?? null, record.worktree.path);
           record.status = 'aborted';
           record.endedAt = now;
           record.error =
             'Host pi process exited while this run was active (in-process children cannot outlive their host).';
-          if (record.worktree?.path) record.worktree = undefined;
+          if (record.resume) {
+            // Durable run: keep its worktree; it resumes when its session reopens.
+            record.interrupted = true;
+            record.error += ' It resumes when its session reopens.';
+          } else if (record.worktree?.path) {
+            // A ghost run's host died before runChild could clean up — remove
+            // its worktree now so a hard exit (SIGKILL/crash) can't leak one.
+            // .patch siblings are reaped by the age-based GC below when their
+            // artifact ages out (a hard-killed host never got to capture one).
+            removeWorktree(record.worktree.repoRoot ?? null, record.worktree.path);
+            record.worktree = undefined;
+          }
           fs.writeFileSync(filePath, JSON.stringify(record, null, 2));
           reaped++;
         } catch {
@@ -624,6 +623,16 @@ export function sweepRunArtifacts(
     }
   }
   return { deleted, reaped };
+}
+
+/** Whether a process exists. shortcut: a pid reused after a reboot reads as alive, so that ghost waits for age GC; a boot id would fix it. */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
 }
 
 let sweptThisProcess = false;
@@ -775,19 +784,50 @@ export function createSubagentRuntime(options: {
     return { runId, done: spawnChild(runId, opts) };
   }
 
-  async function spawnChild(runId: string, opts: SpawnOptions): Promise<SpawnResult> {
+  function resumeDetached(
+    run: RunRecord,
+    extra: Pick<SpawnOptions, 'signal' | 'onUsage' | 'onResponseStart'> = {},
+  ): { runId: string; done: Promise<SpawnResult> } {
+    const done = run.resume
+      ? spawnChild(run.runId, { ...run.resume, ...extra }, run)
+      : Promise.resolve(fail(run.runId, 'crashed', 'Not a durable run: nothing to resume from.', Date.now()));
+    return { runId: run.runId, done };
+  }
+
+  async function spawnChild(runId: string, opts: SpawnOptions, resumed?: RunRecord): Promise<SpawnResult> {
     const startedAt = Date.now();
-    const record: RunRecord = {
-      runId,
-      namespace,
-      status: 'queued',
-      promptPreview: opts.prompt.replace(/\s+/g, ' ').trim().slice(0, 80),
-      startedAt,
-    };
-    if (opts.agent) record.agent = opts.agent;
-    if (opts.model) record.model = opts.model;
-    const ownerSession = opts.ownerSession ?? opts.parentSession;
-    if (ownerSession) record.ownerSession = ownerSession;
+    let record: RunRecord;
+    if (resumed) {
+      // Same runId, fresh lifecycle; clearing `interrupted` on disk now stops a second resume.
+      record = {
+        ...resumed,
+        status: 'queued',
+        startedAt,
+        endedAt: undefined,
+        error: undefined,
+        interrupted: undefined,
+      };
+      delete (record as RunArtifact).output;
+    } else {
+      record = {
+        runId,
+        namespace,
+        status: 'queued',
+        promptPreview: opts.prompt.replace(/\s+/g, ' ').trim().slice(0, 80),
+        startedAt,
+      };
+      if (opts.agent) record.agent = opts.agent;
+      if (opts.model) record.model = opts.model;
+      const ownerSession = opts.ownerSession ?? opts.parentSession;
+      if (ownerSession) record.ownerSession = ownerSession;
+      // A schema or supervisor closure can't be persisted, so those runs aren't resumable.
+      if (opts.parentSession !== undefined && !opts.outputSchema && !opts.onSupervisorRequest) {
+        const { signal: _signal, onUsage: _onUsage, onResponseStart: _onResponseStart, ...resume } = opts;
+        record.resume = { ...resume, cwd: opts.cwd ?? process.cwd() };
+      }
+    }
+    // Set while still queued too, so a run queued when the host dies is reaped (and resumable).
+    record.hostPid = process.pid;
     recordRun(record);
 
     // Ecosystem recursion guard — honored, not namespaced. See header.
@@ -821,10 +861,9 @@ export function createSubagentRuntime(options: {
     await acquire();
     await globalSlots.acquire(globalLimit);
     record.status = 'running';
-    record.hostPid = process.pid;
     persist(record);
     try {
-      return await runChild(runId, opts, startedAt, record);
+      return await runChild(runId, opts, startedAt, record, resumed !== undefined);
     } finally {
       release();
       globalSlots.release();
@@ -836,6 +875,7 @@ export function createSubagentRuntime(options: {
     opts: SpawnOptions,
     startedAt: number,
     record: RunRecord,
+    resumed: boolean,
   ): Promise<SpawnResult> {
     let cwd = opts.cwd ?? process.cwd();
     const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -851,7 +891,11 @@ export function createSubagentRuntime(options: {
     // Worktree isolation: the child writes into a detached worktree, never
     // the caller's tree. Handoff (full patch incl. untracked files) is
     // captured at settle; merge-back is the caller's decision.
-    if (opts.worktree) {
+    let createdWorktree = false;
+    if (opts.worktree && record.worktree) {
+      // Resumed run: continue in the worktree it already wrote to.
+      cwd = record.worktree.path;
+    } else if (opts.worktree) {
       const repoRoot = findRepoRoot(cwd);
       if (!repoRoot) {
         return markFailed(
@@ -864,19 +908,26 @@ export function createSubagentRuntime(options: {
         return markFailed(record, fail(runId, 'crashed', `worktree setup failed: ${added.error}`, startedAt));
       }
       record.worktree = { path: added.path, repoRoot };
+      createdWorktree = true;
       cwd = added.path;
     }
 
     // Any setup failure from here on must not leak the worktree or leave the
-    // record 'running' under this pid (the sweep only reaps dead hosts).
+    // record 'running' under this pid (the sweep only reaps dead hosts). A
+    // resumed run's worktree holds earlier work, so it is never removed here.
     const cleanupFailedSetup = (error: string): void => {
-      if (record.worktree) {
+      if (record.worktree && createdWorktree) {
         removeWorktree(record.worktree.repoRoot ?? null, record.worktree.path);
         record.worktree = undefined;
       }
       markFailed(record, fail(runId, 'crashed', error, startedAt));
       persist(record);
     };
+    if (resumed && !fs.existsSync(cwd)) {
+      const error = `Cannot resume: ${cwd} no longer exists`;
+      cleanupFailedSetup(error);
+      return fail(runId, 'crashed', error, startedAt);
+    }
 
     // Supervisor channel: a closure tool, not a protocol.
     const customTools = [];
@@ -911,8 +962,19 @@ export function createSubagentRuntime(options: {
       if (supervisorToolName && !tools.includes(supervisorToolName)) tools.push(supervisorToolName);
     }
 
+    // With an owning session, the child's own session is a standard pi JSONL
+    // written as it runs (pi flushes it at the first reply), so its transcript
+    // survives a host crash and resumeDetached() can reopen it.
+    const resumeFile =
+      resumed && record.sessionFile && fs.existsSync(record.sessionFile) ? record.sessionFile : undefined;
+    let sessionManager: SessionManager;
     let session: Awaited<ReturnType<typeof createAgentSession>>['session'];
     try {
+      sessionManager = resumeFile
+        ? SessionManager.open(resumeFile)
+        : opts.parentSession !== undefined
+          ? SessionManager.create(cwd, subagentsDir('sessions'), { parentSession: opts.parentSession })
+          : SessionManager.inMemory(cwd);
       const runtime = parent ? await parentModelRuntime(parent.modelRegistry) : await modelRuntime();
 
       let model: ReturnType<typeof resolveCliModel>['model'];
@@ -928,6 +990,8 @@ export function createSubagentRuntime(options: {
         thinkingLevel ??= resolved.thinkingLevel;
       } else if (parent?.model) {
         model = parent.model;
+        // Pin it: a resumed run continues on this model, not whatever the parent uses by then.
+        if (record.resume) record.resume.model = `${model.provider}/${model.id}`;
       }
 
       const loader = new DefaultResourceLoader({
@@ -959,7 +1023,7 @@ export function createSubagentRuntime(options: {
         ...(tools !== undefined ? { tools } : {}),
         customTools,
         resourceLoader: loader,
-        sessionManager: SessionManager.inMemory(cwd),
+        sessionManager,
         settingsManager: SettingsManager.inMemory(),
       }));
     } catch (err) {
@@ -973,7 +1037,12 @@ export function createSubagentRuntime(options: {
       abortReason = reason;
       void session.abort();
     };
-    const onSignalAbort = () => abortOnce('Aborted by caller');
+    // Host exit (not a cancel) interrupts a durable run: it keeps its worktree and resumes later.
+    let interrupted = false;
+    const onSignalAbort = () => {
+      interrupted = record.resume !== undefined && opts.signal?.reason === HOST_EXIT && abortReason === undefined;
+      abortOnce(interrupted ? INTERRUPTED_ERROR : 'Aborted by caller');
+    };
     if (opts.signal) {
       if (opts.signal.aborted) onSignalAbort();
       else opts.signal.addEventListener('abort', onSignalAbort, { once: true });
@@ -1055,6 +1124,7 @@ export function createSubagentRuntime(options: {
           addMessageUsage(liveUsage, event.message);
           if (event.message.role === 'assistant') {
             record.usage = { ...liveUsage };
+            if (opts.parentSession !== undefined) record.sessionFile ??= sessionManager.getSessionFile();
             persist(record);
             try {
               opts.onUsage?.({ ...liveUsage });
@@ -1076,7 +1146,7 @@ export function createSubagentRuntime(options: {
     try {
       // session.abort() is a no-op on an idle session, so a child aborted
       // before it started (stopped while queued) must not prompt at all.
-      if (abortReason === undefined) await session.prompt(opts.prompt);
+      if (abortReason === undefined) await session.prompt(resumeFile ? RESUME_PROMPT : opts.prompt);
       // A non-empty answer that fails the schema gets corrected in-session
       // (the context is already cached) instead of failing the run outright.
       for (let attempt = 1; opts.outputSchema && attempt < SCHEMA_ATTEMPTS && abortReason === undefined; attempt++) {
@@ -1130,7 +1200,7 @@ export function createSubagentRuntime(options: {
           // handoff capture is best-effort; the worktree path on the record is the fallback
         }
       }
-      if (opts.signal?.aborted) {
+      if (opts.signal?.aborted && !interrupted) {
         removeWorktree(record.worktree.repoRoot ?? null, record.worktree.path);
         record.worktree = undefined;
       }
@@ -1141,14 +1211,9 @@ export function createSubagentRuntime(options: {
     record.usage = usage;
     if (transcript.length > 0) record.transcript = [...transcript];
 
-    // Additive dual-write: mirror the run into a standard pi session JSONL via
-    // the real SessionManager, with parentSession linked to the owning session.
-    // This is independent of the bespoke .json artifact above (which the
-    // fleet/registry still read); failures here must never fail the run.
-    // Opt-in via SpawnOptions.parentSession so other shared-runtime consumers
-    // (codemode/workflow) that don't pass an owning session are unaffected.
-    record.sessionFile =
-      opts.parentSession !== undefined ? writeSessionMirror(messages, cwd, opts.parentSession) : undefined;
+    // Only advertise a session file pi actually flushed (it waits for the first reply).
+    const sessionFile = opts.parentSession !== undefined ? sessionManager.getSessionFile() : undefined;
+    record.sessionFile = sessionFile && fs.existsSync(sessionFile) ? sessionFile : undefined;
 
     const finish = (result: SpawnResult): SpawnResult => {
       if (result.ok) {
@@ -1156,6 +1221,7 @@ export function createSubagentRuntime(options: {
       } else {
         record.status = result.kind === 'aborted' ? 'aborted' : 'failed';
         record.error = result.error;
+        if (interrupted) record.interrupted = true;
       }
       persist(record, result.text);
       return result;
@@ -1220,6 +1286,7 @@ export function createSubagentRuntime(options: {
     namespace,
     spawn,
     spawnDetached,
+    resumeDetached,
     listRuns: () => runs.map((r) => ({ ...r })),
     activeCount: () => active,
   };
