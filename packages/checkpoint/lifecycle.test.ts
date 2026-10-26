@@ -4,6 +4,7 @@ import {
   type EventBus,
   type ExtensionAPI,
   type ExtensionContext,
+  type ExtensionToolContext,
   type SessionEntry,
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
@@ -158,7 +159,7 @@ function makeHarness(options: HarnessOptions | string[] = {}): Harness {
         widgetContent = content;
       },
     },
-  } as unknown as ExtensionContext;
+  } as unknown as ExtensionToolContext;
 
   const tool = tools.get(TOOL_NAME);
   if (!tool) throw new Error('self_compact tool was not registered');

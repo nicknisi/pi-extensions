@@ -32,9 +32,9 @@
     "build": "tsgo -p tsconfig.build.json"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "0.87.0",
-    "@earendil-works/pi-coding-agent": "0.87.0",
-    "@earendil-works/pi-tui": "0.87.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-tui": "1.4.0",
     "@types/node": "^24.0.0",
     "typebox": "^1.1.0",
     "vitest": "^3.2.4"
