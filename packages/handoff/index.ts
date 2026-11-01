@@ -39,6 +39,46 @@ Files involved:
 ## Task
 [Clear description of what to do next based on user's goal]`;
 
+/** Share of the model's context window the serialized conversation may use; the rest covers the prompt and output. */
+const CONVERSATION_SHARE = 0.7;
+const RECENT_REQUESTS = 5;
+const REQUEST_MAX_CHARS = 2000;
+
+/** Serialize newest-first until the char budget is spent, so long sessions can't overflow the model. */
+export function fitConversation(messages: Message[], maxChars: number): string {
+  const kept: string[] = [];
+  let used = 0;
+  for (const [i, message] of [...messages.entries()].reverse()) {
+    const text = serializeConversation([message]);
+    if (!text) continue;
+    if (used + text.length > maxChars) {
+      return [`[${i + 1} earlier messages omitted to fit the context window]`, ...kept.reverse()].join('\n\n');
+    }
+    kept.push(text);
+    used += text.length + 2;
+  }
+  return kept.reverse().join('\n\n');
+}
+
+function textOf(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((part): part is { type: 'text'; text: string } => part?.type === 'text' && typeof part.text === 'string')
+    .map((part) => part.text)
+    .join('\n');
+}
+
+/** The user's last few messages, verbatim, so constraints survive the model's summary. */
+export function recentRequests(messages: readonly { role: string; content?: unknown }[]): string[] {
+  return messages
+    .filter((m) => m.role === 'user')
+    .map((m) => textOf(m.content).trim())
+    .filter((text) => text !== '')
+    .slice(-RECENT_REQUESTS)
+    .map((text) => (text.length > REQUEST_MAX_CHARS ? `${text.slice(0, REQUEST_MAX_CHARS)}… [truncated]` : text));
+}
+
 export default function (pi: ExtensionAPI) {
   pi.registerCommand('handoff', {
     description: 'Transfer context to a new focused session',
@@ -72,7 +112,10 @@ export default function (pi: ExtensionAPI) {
 
       // Convert to LLM format and serialize
       const llmMessages = convertToLlm(messages);
-      const conversationText = serializeConversation(llmMessages);
+      const conversationText = fitConversation(
+        llmMessages,
+        Math.floor((ctx.model.contextWindow || 128_000) * CONVERSATION_SHARE) * 4,
+      );
       const currentSessionFile = ctx.sessionManager.getSessionFile();
 
       // Build the chain of parent sessions
@@ -164,13 +207,19 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // Build session history section
+      const requests = recentRequests(messages);
+      const requestsSection =
+        requests.length > 0
+          ? `\n\n## My Recent Requests (verbatim)\n${requests.map((r) => `> ${r.replace(/\n/g, '\n> ')}`).join('\n\n')}`
+          : '';
+      const verifySection =
+        '\n\nThis handoff was written from the earlier conversation and may be out of date. Check git status and the relevant files before acting on it.';
       const historySection =
         sessionChain.length > 0
-          ? `\n\n## Session History\nPrevious sessions (most recent first):\n${sessionChain.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n\nUse \`pi --session <path>\` to review any session if needed.`
+          ? `\n\n## Session History\nPrevious session logs (JSONL, most recent first). Search them with rg or grep when you need exact details:\n${sessionChain.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
           : '';
 
-      const promptWithHistory = result.text + historySection;
+      const promptWithHistory = result.text + requestsSection + verifySection + historySection;
 
       // Let user edit the generated prompt
       const editedPrompt = await ctx.ui.editor('Edit handoff prompt', promptWithHistory);
