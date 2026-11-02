@@ -1,5 +1,11 @@
 # @nicknisi/pi-session-name
 
+## 0.2.0
+
+### Minor Changes
+
+- 575a5e6: Auto-name sessions as soon as the first prompt is sent instead of after the first exchange. Naming runs alongside the agent without delaying it, and LLM titles are now generated from the first prompt alone.
+
 ## 0.1.12
 
 ### Patch Changes
