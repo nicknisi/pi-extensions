@@ -19,10 +19,13 @@ Transfer context from the current session to a new, focused session. Instead of 
 Flow:
 
 1. Collects all messages on the current session branch via `ctx.sessionManager.getBranch()`.
-2. Serializes them with `convertToLlm` + `serializeConversation`.
+2. Serializes them with `convertToLlm` + `serializeConversation`, newest first, keeping at most ~70% of the model's context window (chars ÷ 4 as the token estimate). Older messages past that budget are dropped with an `[N earlier messages omitted …]` marker, so very long or already-compacted sessions don't overflow the request.
 3. Walks the `parentSession` chain (reading the first line of each parent session file with `head -1`) to build a session-history list.
 4. Streams a request to the current model with a fixed system prompt ("context transfer assistant") and a user message containing the conversation history and your goal.
-5. Appends a `## Session History` section listing session files, most recent first.
+5. Appends, without another model call:
+   - `## My Recent Requests (verbatim)`: your last 5 messages, quoted exactly (each capped at 2,000 chars), so constraints the summary paraphrased away survive.
+   - A note that the handoff may be out of date and the new session should check git status and the relevant files before acting.
+   - `## Session History`: the session JSONL files, most recent first, with a hint to search them with `rg`/`grep` for exact details.
 6. Opens the result in the editor overlay; on confirm, calls `ctx.newSession({ parentSession, withSession })` and sets the edited prompt as the new session's editor draft from the `withSession` callback (the old `ctx` is stale after the switch). You submit it yourself.
 
 Aborting the loader or closing the editor without confirming cancels with a notification; no new session is created.
