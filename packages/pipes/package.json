@@ -1,0 +1,53 @@
+{
+  "name": "@nicknisi/pi-pipes",
+  "version": "0.0.0",
+  "description": "Call third-party APIs as yourself from pi through WorkOS Pipes Relay: pipes tool, in-session sign-in, approval for writes",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-package",
+    "pipes",
+    "workos"
+  ],
+  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/pipes#readme",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicknisi/pi-extensions.git",
+    "directory": "packages/pipes"
+  },
+  "files": [
+    "dist",
+    "index.ts",
+    "core.ts",
+    "skills"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./core": {
+      "types": "./dist/core.d.ts",
+      "default": "./dist/core.js"
+    }
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  }
+}
