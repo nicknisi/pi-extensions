@@ -62,11 +62,15 @@ export function loadConfig(path: string = configPath(), env: Env = process.env):
   if (!userId) {
     throw new Error(`No WorkOS user configured. Set "userId" in ${path} or WORKOS_PIPES_USER.`);
   }
+  const baseUrl = (env.WORKOS_PIPES_BASE_URL || file.baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '');
+  if (!baseUrl.startsWith('https://')) {
+    throw new Error(`baseUrl must be an https URL, got ${baseUrl}. The WorkOS API key is sent to it.`);
+  }
   return {
     userId,
     organizationId: env.WORKOS_PIPES_ORGANIZATION || file.organizationId,
     apiKeyCommand: file.apiKeyCommand || DEFAULT_API_KEY_COMMAND,
-    baseUrl: (env.WORKOS_PIPES_BASE_URL || file.baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, ''),
+    baseUrl,
     openCommand: file.openCommand,
     maxInlineChars: file.maxInlineChars ?? DEFAULT_MAX_INLINE_CHARS,
     connectTimeoutMs: file.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
@@ -110,10 +114,43 @@ export function assertProvider(provider: string): void {
   }
 }
 
+/**
+ * The Relay URL for `path` on `provider`. The path comes from the model, and the
+ * WorkOS API key authorizes the whole WorkOS API on the same origin, so the
+ * result must stay under `/relay/<provider>/`: dot segments (raw or
+ * percent-encoded) and encoded slashes are rejected, and the resolved URL is
+ * checked against the prefix.
+ */
 export function relayUrl(baseUrl: string, provider: string, path: string): string {
   assertProvider(provider);
   if (!path.startsWith('/')) throw new Error(`Path must start with "/": ${path}`);
-  return `${baseUrl}/relay/${provider}${path}`;
+  const pathname = path.split(/[?#]/, 1)[0] ?? '';
+  for (const raw of pathname.split('/')) {
+    let segment: string;
+    try {
+      segment = decodeURIComponent(raw);
+    } catch {
+      throw new Error(`Malformed percent-encoding in path: ${path}`);
+    }
+    if (segment === '.' || segment === '..' || segment.includes('/') || segment.includes('\\')) {
+      throw new Error(`Path must not contain dot segments or encoded slashes: ${path}`);
+    }
+  }
+  const prefix = new URL(`${baseUrl}/relay/${provider}`).pathname;
+  const url = new URL(`${baseUrl}/relay/${provider}${path}`);
+  if (url.origin !== new URL(baseUrl).origin || (url.pathname !== prefix && !url.pathname.startsWith(`${prefix}/`))) {
+    throw new Error(`Path escapes the relay prefix: ${path}`);
+  }
+  return url.toString();
+}
+
+/** Whether `url` is on the same origin as the WorkOS API, the only place sign-in links legitimately come from. */
+export function isWorkOSUrl(url: string, baseUrl: string): boolean {
+  try {
+    return new URL(url).origin === new URL(baseUrl).origin;
+  } catch {
+    return false;
+  }
 }
 
 export type HttpMethod = 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';

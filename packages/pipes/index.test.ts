@@ -83,14 +83,32 @@ describe('pipes tool', () => {
   });
 
   it('signs the user in on a relay 402, waits for the connection, and retries', async () => {
+    const signIn = 'https://api.example.test/data-integrations/x/authorize-redirect';
     const { run, deps } = setup([
-      { status: 402, body: { code: 'relay_authorization_required', authorization_url: 'https://auth.example/x' } },
+      { status: 402, body: { code: 'relay_authorization_required', authorization_url: signIn } },
       { status: 200, body: { state: 'connected', scopes: [] } },
       { status: 200, body: { ok: true } },
     ]);
     const result = await run({ provider: 'google-sheets', path: '/v4/spreadsheets/abc' });
-    expect(deps.openUrl).toHaveBeenCalledWith('https://auth.example/x', config);
+    expect(deps.openUrl).toHaveBeenCalledWith(signIn, config);
     expect(result.content[0]!.text).toContain('"ok": true');
+  });
+
+  it('refuses to open a sign-in link outside the WorkOS API', async () => {
+    const { run, deps } = setup([
+      { status: 402, body: { code: 'relay_authorization_required', authorization_url: 'https://evil.example/login' } },
+    ]);
+    const result = await run({ provider: 'google-sheets', path: '/v4/spreadsheets/abc' });
+    expect(deps.openUrl).not.toHaveBeenCalled();
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('Refusing');
+  });
+
+  it('keeps model-supplied paths inside the relay prefix', async () => {
+    const { run, fetchImpl } = setup([]);
+    const result = await run({ provider: 'google-sheets', path: '/../../user_management/users' });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(result.isError).toBe(true);
   });
 
   it('explains a provider that Relay does not serve', async () => {

@@ -10,6 +10,7 @@ import {
   PipesClient,
   authorizationRequired,
   configPath,
+  isWorkOSUrl,
   isWrite,
   loadConfig,
   resolveApiKey,
@@ -165,6 +166,10 @@ export function createPipesExtension(deps: PipesDeps = defaultDeps) {
     ctx: ExtensionContext,
     signal?: AbortSignal,
   ): Promise<boolean> {
+    // Relay passes provider responses through, so a provider's own 402 could carry a look-alike link.
+    if (!isWorkOSUrl(url, config.baseUrl)) {
+      throw new Error(`Refusing to open a sign-in link outside ${config.baseUrl}: ${url}`);
+    }
     deps.openUrl(url, config);
     ctx.ui.notify(`Approve ${provider} in your browser. If it didn't open: ${url}`, 'info');
     ctx.ui.setStatus('pipes', `waiting for ${provider} sign-in…`);

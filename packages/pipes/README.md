@@ -74,6 +74,7 @@ Environment overrides: `WORKOS_PIPES_API_KEY` (the key itself, skips `apiKeyComm
 
 - **Path routing, not `X-Relay-URL`.** Relay's docs recommend sending the full upstream URL in `X-Relay-URL`, but that rejects `sheets.googleapis.com` (`relay_provider_not_found`) while `/relay/google-sheets/v4/...` works. The tool always uses path routing, so paths are relative to the provider's default host.
 - **One provider, one host.** Google Drive endpoints belong to `google-drive`; a `google-sheets` connection can't reach them even with Drive scopes.
+- **Paths stay under `/relay/<provider>/`.** The API key authorizes the whole WorkOS API on the same origin, so paths with dot segments (`..`, `%2e%2e`), encoded slashes or backslashes are rejected before any request is sent. Sign-in links are opened only when they point at `baseUrl`'s origin, and `baseUrl` must be https.
 - **Relay limits:** request bodies up to 5 MB, 30-second upstream timeout, redirects not followed.
 - **The API key is environment-wide.** Any WorkOS API key can do everything in its environment, not just Relay. Use a sandbox environment dedicated to your own connections.
 - macOS keychain is the default key store; on Linux set `apiKeyCommand` or `WORKOS_PIPES_API_KEY`.

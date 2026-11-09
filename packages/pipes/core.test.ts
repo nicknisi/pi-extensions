@@ -44,6 +44,23 @@ describe('relayUrl', () => {
     expect(() => relayUrl('https://x', 'github', 'user')).toThrow(/start with/);
     expect(() => relayUrl('https://x', '../github', '/user')).toThrow(/Invalid provider/);
   });
+
+  it.each([
+    '/../../user_management/users',
+    '/%2e%2e/%2E%2E/user_management/users',
+    '/v4/./../../organizations',
+    '/..%2f..%2fuser_management',
+    '/..\\..\\user_management',
+    '/%zz',
+  ])('refuses paths that could leave the relay prefix: %s', (path) => {
+    expect(() => relayUrl('https://api.workos.com', 'google-sheets', path)).toThrow();
+  });
+
+  it('keeps dots inside ordinary segments and query strings', () => {
+    expect(relayUrl('https://api.workos.com', 'github', '/repos/a/b.c/contents/x..y?ref=v1.2')).toBe(
+      'https://api.workos.com/relay/github/repos/a/b.c/contents/x..y?ref=v1.2',
+    );
+  });
 });
 
 describe('isWrite', () => {
@@ -75,6 +92,11 @@ describe('loadConfig', () => {
 
   it('explains how to configure a user when none is set', () => {
     expect(() => loadConfig('/nonexistent/pipes.json', {})).toThrow(/WORKOS_PIPES_USER/);
+  });
+
+  it('refuses a non-https base URL, since the API key is sent to it', () => {
+    const env = { WORKOS_PIPES_USER: 'user_1', WORKOS_PIPES_BASE_URL: 'http://api.workos.com' };
+    expect(() => loadConfig('/nonexistent/pipes.json', env)).toThrow(/https/);
   });
 });
 
