@@ -233,6 +233,11 @@ const CHROME_CSS = `
   color: var(--muted); font-size: .72rem; font-family: ${FONT_MONO};
 }
 .artifact-mermaid { text-align: center; margin: 1.5rem 0; }
+.artifact-mermaid .pele {
+  --pele-bg: var(--bg); --pele-fg: var(--fg); --pele-muted: var(--muted); --pele-line: var(--muted);
+  --pele-surface: var(--code-bg); --pele-surface-alt: color-mix(in srgb, var(--code-bg) 55%, var(--bg));
+  --pele-border: var(--border); --pele-accent: var(--accent);
+}
 `;
 
 /** Base stylesheet: tokens + prose + chrome. Always inlined. */

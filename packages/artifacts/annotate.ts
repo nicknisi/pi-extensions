@@ -11,7 +11,7 @@
  * Offline shares (baked files, image/PDF renders) put both halves in one
  * document with a local channel and the panel read-only.
  *
- * Same convention as `sseSnippet`/`mermaidSnippet` in templates.ts: functions
+ * Same convention as `sseSnippet` in templates.ts: functions
  * that build `<script>` strings by concatenation, embedded values passed
  * through JSON.stringify with `<` escaped. Vanilla JS, zero deps, tolerant of
  * arbitrary agent-authored DOM.

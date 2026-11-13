@@ -1,16 +1,15 @@
-/** HTML shell + markdown→HTML rendering with server-side diff/code highlighting and client-side mermaid. */
+/** HTML shell + markdown→HTML rendering with server-side diff, code and mermaid (Pele) rendering. */
 
 import { Marked } from 'marked';
 import { parse as diffParse, html as diffHtml } from 'diff2html';
 import hljs from 'highlight.js';
+import { render as renderDiagram } from 'pele';
 
-import { CONFIG, MERMAID_CDN, MERMAID_SRI } from './config.js';
 import { EVENT_HUB_JS } from './events.js';
 import { BASE_CSS, D2H_CSS, HLJS_CSS } from './styles.js';
-import { readerBody, READER_ATTRIBUTES, READER_SCRIPT, READER_STYLES } from './reader.js';
+import { READER_FONT, readerBody, READER_ATTRIBUTES, READER_SCRIPT, READER_STYLES } from './reader.js';
 
 export interface RenderFlags {
-  hasMermaid: boolean;
   hasDiff: boolean;
   hasCode: boolean;
 }
@@ -29,6 +28,7 @@ function escapeAttr(s: string): string {
 export function renderMarkdown(content: string, flags: RenderFlags): string {
   // Fresh instance per render: the code renderer closes over `flags`, and mutating
   // the global marked singleton would stack an override per call.
+  let diagrams = 0;
   const marked = new Marked({
     gfm: true,
     breaks: false,
@@ -37,8 +37,9 @@ export function renderMarkdown(content: string, flags: RenderFlags): string {
         const language = (lang ?? '').trim().toLowerCase();
 
         if (language === 'mermaid') {
-          flags.hasMermaid = true;
-          return `<div class="artifact-mermaid"><pre class="mermaid">${escapeHtml(text)}</pre></div>`;
+          const rendered = renderMermaid(text, `artifact-diagram-${++diagrams}-`);
+          if (rendered) return `<div class="artifact-mermaid">${rendered}</div>`;
+          // Unsupported or malformed diagram — fall through to plain code block
         }
 
         if (language === 'diff') {
@@ -106,6 +107,19 @@ export function renderCommentMarkdown(md: string): string {
   return html;
 }
 
+/**
+ * Render a mermaid diagram to SVG with Pele (server-side, no script). Colors come from
+ * `--pele-*` CSS variables mapped onto the scheme tokens, so the reader's theme toggle
+ * restyles it without re-rendering. Returns null when Pele can't render it.
+ */
+function renderMermaid(source: string, idPrefix: string): string | null {
+  try {
+    return renderDiagram(source, { idPrefix, fontFamily: READER_FONT }).svg;
+  } catch {
+    return null;
+  }
+}
+
 /** Render a unified-diff string to diff2html HTML (server-side). Returns null if parse yields nothing. */
 function renderDiff(diffText: string): string | null {
   try {
@@ -137,57 +151,6 @@ ${EVENT_HUB_JS}
 </script>`;
 }
 
-/** Mermaid init: render after the library loads. Uses the "base" theme fed with
- * the document's own tokens (read from CSS variables at runtime), so diagrams
- * follow the scheme and the configured accent instead of mermaid's built-ins —
- * "neutral" in particular draws grayscale text that's unreadably pale. */
-function mermaidSnippet(): string {
-  return `
-<script src="${MERMAID_CDN}" integrity="${MERMAID_SRI}" crossorigin="anonymous"></script>
-<script>
-(function () {
-  var mode = ${JSON.stringify(CONFIG.theme)};
-  function init() {
-    try {
-      var activeMode = document.documentElement.getAttribute("data-reader-theme") || mode;
-      var dark = activeMode === "dark" || (activeMode === "auto" && window.matchMedia("(prefers-color-scheme: dark)").matches);
-      var css = getComputedStyle(document.documentElement);
-      var t = function (name) { return css.getPropertyValue(name).trim(); };
-      mermaid.initialize({
-        startOnLoad: false,
-        theme: "base",
-        themeVariables: {
-          darkMode: dark,
-          background: t("--bg"),
-          mainBkg: t("--code-bg"),
-          primaryColor: t("--code-bg"),
-          primaryTextColor: t("--fg"),
-          primaryBorderColor: t("--border"),
-          secondaryColor: t("--code-bg"),
-          tertiaryColor: t("--bg"),
-          lineColor: t("--muted"),
-          textColor: t("--fg"),
-          noteBkgColor: t("--code-bg"),
-          noteTextColor: t("--fg"),
-          noteBorderColor: t("--border"),
-          edgeLabelBackground: t("--code-bg"),
-          clusterBkg: t("--bg"),
-          clusterBorder: t("--border"),
-          actorLineColor: t("--muted"),
-          signalTextColor: t("--fg"),
-          labelTextColor: t("--fg"),
-          fontFamily: getComputedStyle(document.body).fontFamily
-        }
-      });
-      mermaid.run({ querySelector: "pre.mermaid" });
-    } catch (e) { console.warn("mermaid init failed", e); }
-  }
-  if (typeof mermaid !== "undefined") init();
-  else window.addEventListener("load", init);
-})();
-</script>`;
-}
-
 /** Build the full HTML document shell around a body fragment. */
 export function buildShell(opts: {
   title: string;
@@ -206,7 +169,6 @@ export function buildShell(opts: {
   if (flags.hasCode) styles.push(`<style data-hljs>${HLJS_CSS}</style>`);
 
   const scripts: string[] = kind === 'markdown' ? [READER_SCRIPT] : [];
-  if (flags.hasMermaid) scripts.push(mermaidSnippet());
   scripts.push(sseSnippet(slug));
 
   const generatedIso = new Date(generated).toISOString();
@@ -243,7 +205,7 @@ ${scripts.join('\n')}
 
 /** Render a markdown artifact to a full HTML document. */
 export function renderMarkdownDocument(title: string, slug: string, content: string): string {
-  const flags: RenderFlags = { hasMermaid: false, hasDiff: false, hasCode: false };
+  const flags: RenderFlags = { hasDiff: false, hasCode: false };
   const bodyHtml = renderMarkdown(content, flags);
   return buildShell({ title, slug, kind: 'markdown', bodyHtml, flags });
 }
@@ -283,7 +245,7 @@ export function renderHtmlDocument(title: string, slug: string, content: string)
     return out;
   }
 
-  const flags: RenderFlags = { hasMermaid: false, hasDiff: false, hasCode: false };
+  const flags: RenderFlags = { hasDiff: false, hasCode: false };
   return buildShell({ title, slug, kind: 'html', bodyHtml: content, flags });
 }
 

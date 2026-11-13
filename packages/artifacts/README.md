@@ -94,7 +94,7 @@ Fenced code blocks are handled per language:
 
 - ` ```diff ` fences → rendered **server-side** via [`diff2html`](https://github.com/rtfpessoa/diff2html) (Node API, line-by-line, no file list). Malformed diffs fall back to plain code blocks. Offline-safe.
 - Known-language fences (` ```ts `, ` ```py `, …) → syntax-highlighted **server-side** via [`highlight.js`](https://highlightjs.org/); highlighted spans are baked into the HTML. Unknown languages fall back to plain escaped code (no unreliable auto-detect on short snippets).
-- ` ```mermaid ` fences → rendered **client-side** via the mermaid CDN script, pinned to an exact version with a subresource integrity hash (`MERMAID_CDN` / `MERMAID_SRI` in `config.ts`; bump both together). A changed file fails to load instead of running next to the review API. This is the reader's only external script. Mermaid artifacts need network on first view. Mermaid uses its `base` theme fed from the document's CSS variables when rendered. Already-rendered diagrams and authored SVG/images retain their colors when the reader theme is toggled.
+- ` ```mermaid ` fences → rendered **server-side** to SVG via [`pele`](https://pele.run) (every diagram type built into Mermaid 12.1, with its own layout). No script runs and nothing loads, so diagrams work offline. Colors come from `--pele-*` CSS variables mapped onto the document's tokens, so diagrams follow the reader's Light / Dark toggle without re-rendering. Each diagram gets its own ID prefix. A diagram Pele can't render falls back to a plain code block. Authored SVG/images retain their colors when the reader theme is toggled.
 
 ### `kind: "html"` (escape hatch)
 
@@ -171,7 +171,7 @@ Screenshots are PNGs of each commented region as the reviewer saw it, with any q
 
 `(source line N)` appears for markdown artifacts when the quote is found verbatim in the source mirror (`.md`); it is omitted for raw HTML artifacts and quotes that span markdown formatting. If delivery fails, nothing is lost: when the server is up but has no live session to deliver to, it answers 503 with the composed message in the response and the page offers a Copy button; when the server itself is gone (e.g. `/new` stopped it), the draft comments stay in the sidecar and can be submitted after the next `open`.
 
-**Threat model**: the server is loopback-only (`127.0.0.1`), without authentication, and refuses requests whose `Host` is not its own. Mutation endpoints require JSON and reject a different browser Origin. Native local clients without an Origin header remain supported. Requests have a 1 MB body cap (about 8 MB for screenshot uploads), and annotation records are validated and stripped of unknown fields. A screenshot is stored only for an already-saved comment whose ID is filename-safe, and only when the bytes are a PNG of at most 6 MB. Browser requests cannot forge replies or erase sent records. Comment Markdown escapes raw HTML and blocks unsafe link schemes. Artifact HTML is agent-authored executable content, and may carry content from elsewhere (raw HTML in Markdown, CDN scripts), so it is kept away from the API: it runs on an origin of its own in a sandboxed frame (scripts, forms, popups, and downloads allowed; navigating the review page is not), so it can neither call the API nor read another artifact or its comments. The API answers only on the review page's origin, and writes from any other origin are refused. The bridge's messages are proposals: an artifact can offer an anchor, a decision selection, or a screenshot, which show up in the panel, but comment text is only what you type and sending is only your click. Image and PDF share renders load the artifact on its own origin too, with a read-only review baked in.
+**Threat model**: the server is loopback-only (`127.0.0.1`), without authentication, and refuses requests whose `Host` is not its own. Mutation endpoints require JSON and reject a different browser Origin. Native local clients without an Origin header remain supported. Requests have a 1 MB body cap (about 8 MB for screenshot uploads), and annotation records are validated and stripped of unknown fields. A screenshot is stored only for an already-saved comment whose ID is filename-safe, and only when the bytes are a PNG of at most 6 MB. Browser requests cannot forge replies or erase sent records. Comment Markdown escapes raw HTML and blocks unsafe link schemes. Artifact HTML is agent-authored executable content, and may carry content from elsewhere (raw HTML in Markdown, scripts it loads), so it is kept away from the API: it runs on an origin of its own in a sandboxed frame (scripts, forms, popups, and downloads allowed; navigating the review page is not), so it can neither call the API nor read another artifact or its comments. The API answers only on the review page's origin, and writes from any other origin are refused. The bridge's messages are proposals: an artifact can offer an anchor, a decision selection, or a screenshot, which show up in the panel, but comment text is only what you type and sending is only your click. Image and PDF share renders load the artifact on its own origin too, with a read-only review baked in.
 
 ### Questions, decisions, and evidence
 
@@ -271,10 +271,11 @@ Runtime npm deps (declared in `package.json`):
 - `marked` — markdown → HTML (GFM).
 - `diff2html` — server-side rendering of ` ```diff ` fences; its bundled CSS is read from the installed package at load time.
 - `highlight.js` — server-side syntax highlighting baked into the HTML.
+- `pele` — server-side rendering of ` ```mermaid ` fences to themeable SVG (zero dependencies).
 - `modern-screenshot` — in-page PNG capture for comment screenshots; served to the page by the artifact server and loaded only when a comment is added.
 - `typebox` — tool parameter schema.
 
-Peer deps: `@earendil-works/pi-coding-agent` (provides `ExtensionAPI` — only `pi.registerTool`, `pi.registerCommand`, and `pi.on` are used), `@earendil-works/pi-tui`, `typebox`. No `@nicknisi/pi-shared` or other workspace deps. One CDN script (mermaid, version-pinned with an integrity hash) for mermaid fences only. A Chrome-family browser binary is needed for `image`/`pdf` shares (and nothing else).
+Peer deps: `@earendil-works/pi-coding-agent` (provides `ExtensionAPI` — only `pi.registerTool`, `pi.registerCommand`, and `pi.on` are used), `@earendil-works/pi-tui`, `typebox`. No `@nicknisi/pi-shared` or other workspace deps. No CDN scripts. A Chrome-family browser binary is needed for `image`/`pdf` shares (and nothing else).
 
 ## Checks
 
@@ -287,7 +288,7 @@ Beyond `vitest`, two scripts boot the real server from `dist/` (run `pnpm build`
 
 - **Uses only the public extension API** (`registerTool` / `registerCommand` / `on("session_shutdown")` / `ctx.ui.setStatus` / `ctx.ui.select`) — no pi internals. Should be stable across pi versions modulo API changes in those calls.
 - **Config is loaded once at extension load** (pi extensions load at session start) — edit `artifacts.json`, then restart pi.
-- **Mermaid artifacts need network** on first view (CDN script). Everything else is rendered at write time and viewable offline.
+- **Diagrams are Pele's layout, not Mermaid's.** Node positions, spacing and edge paths differ from Mermaid's; ZenUML and other external Mermaid plugins aren't supported. Everything is rendered at write time and viewable offline.
 - **Server lifetime = process lifetime.** The server stops on `session_shutdown`; the next session in the same project reuses its port when free. Artifacts persist on disk and can be re-served by a later session.
 - **Server is per-process and cwd-keyed.** Two pi sessions in different projects each run their own server on different ports; artifact URLs from one session don't resolve in the other.
 - **Footer status uses a nerd-font glyph** (`\u{F0C5}`) — terminals without a nerd font show tofu for the icon; the link itself is unaffected.

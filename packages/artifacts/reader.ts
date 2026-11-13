@@ -25,9 +25,12 @@ const DARK = `${schemeTokens('dark')}
   --bg:#14151e;--fg:#f5f3fa;--muted:#b5b5c8;--border:#383b4d;--code-bg:#252735;
   --accent:${READER_CONFIG.accent};--reader-second:#b9adff;--reader-paper:#1c1e2a;--reader-on-accent:#281725;`;
 
+/** The reader's font; diagrams are measured for it when they render. */
+export const READER_FONT = '"Nunito Sans",ui-rounded,system-ui,sans-serif';
+
 export const READER_STYLES = `<style data-reader>
 ${embeddedFont()}
-:root[data-artifact-reader]{${LIGHT}color-scheme:light;--reader-font:"Nunito Sans",ui-rounded,system-ui,sans-serif;--reader-max-width:${READER_CONFIG.maxWidth}px;}
+:root[data-artifact-reader]{${LIGHT}color-scheme:light;--reader-font:${READER_FONT};--reader-max-width:${READER_CONFIG.maxWidth}px;}
 @media(prefers-color-scheme:dark){:root[data-artifact-reader][data-reader-theme="auto"]{${DARK}color-scheme:dark;}}
 :root[data-artifact-reader][data-reader-theme="dark"]{${DARK}color-scheme:dark;}
 ${READER_CSS}
