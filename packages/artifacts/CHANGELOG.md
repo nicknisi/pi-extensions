@@ -1,5 +1,11 @@
 # @nicknisi/pi-artifacts
 
+## 1.7.0
+
+### Minor Changes
+
+- 77daa28: Mermaid diagrams render with Pele at write time instead of the Mermaid CDN script: they work offline, follow the reader's Light / Dark toggle without re-rendering, and a diagram Pele can't render shows as code.
+
 ## 1.6.0
 
 ### Minor Changes
