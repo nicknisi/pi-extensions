@@ -14,6 +14,7 @@ Three pieces compose the workflow platform: `@nicknisi/pi-shared`'s **subagent r
 - **Saved workflows as commands** — every saved workflow also runs as `/<name> [args]` (unless the name is taken by another command).
 - **`/wf` command** (human-facing) — `/wf list | /wf run <name> [argsJson] | /wf relaunch <id> | /wf save <id> [name] | /wf status [id] | /wf stop <id> | /wf pause [id] | /wf resume [id]`.
 - **Human gates inside scripts** — `checkpoint(label?)` pauses the run on a confirm dialog (reject/dismiss stops the run); `ask(question, options?)` asks mid-run (select with options, yes/no without, `undefined` when dismissed).
+- **Progress bars** - each active run has a compact bar above the prompt, with completed/total agents, active and failed counts, paused/running state, and the latest phase. Bars also appear in `/workflows` and disappear from above the prompt when runs finish.
 - **Footer status** — while a run is active the footer shows `wf <name> [running|paused] <last phase> · <done>/<agents>` (or `wf <n> runs` for several).
 - **`autoplan` skill** — teaches the model the "autoplan this" trigger: run the saved `autoplan` workflow with args derived from the conversation, then respect the run's decision outcome. Disable with `"skills": ["-skills/autoplan"]` on the package entry.
 
@@ -94,6 +95,14 @@ A run cut off by pi quitting, reloading, switching sessions, or crashing relaunc
 Stop is still stop: `workflow stop` and `/wf stop` (or a foreground run's tool call aborted with Esc) end the run for good. Runs only relaunch in the session that started them, never in print mode (`pi -p`), and with no opt-out. The relaunch has no wall-clock cap, even if the original passed `timeoutMs`. If the session is open in two pi processes at once, both can relaunch the same run.
 
 ## Watch a run
+
+Active workflows show a progress bar above the prompt automatically, one line per run:
+
+```text
+wf [━━━━━━━━╌╌╌╌] 2/3 done · 1 active · research [running] · Audit · /workflows
+```
+
+Green segments are completed agents (including journal replays), red segments are failed agents, and unfilled segments are active or waiting agents. Counts and bars cover **agents discovered so far**, not a predicted percentage of the whole script: the total can grow as later phases spawn agents. Pausing keeps the bar visible; completion, failure, or stopping removes it. No extra configuration is needed.
 
 `/workflows` opens a live view of this session's runs; with a single run it opens that run directly (`/workflows <id>` picks one). Each run shows its phases with agent counts; drill into a phase to see its agents (status, tokens, attempts) and into an agent to read its prompt, error, and result.
 

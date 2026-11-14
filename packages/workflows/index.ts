@@ -63,7 +63,7 @@ import {
   ULTRACODE_SECTION,
   ultracodeDefault,
 } from './ultracode.js';
-import { WorkflowsView, type ViewResult } from './view.js';
+import { refreshProgressWidget, WorkflowsView, type ViewResult } from './view.js';
 
 // Resolved at use: PI_SUBAGENTS_DIR (see @nicknisi/pi-shared) relocates every runtime write.
 const artifactsRoot = () => subagentsDir('runs') ?? path.join(getAgentDir(), 'subagent-runs');
@@ -110,7 +110,7 @@ function refreshFooter(
   if (active.length > 1) return setStatus('workflows', `wf ${active.length} runs · /workflows`);
   const run = active[0]!;
   const done = run.agents.filter((a) => a.status === 'done' || a.status === 'cached').length;
-  const phase = run.phases.at(-1);
+  const phase = run.currentPhase;
   setStatus(
     'workflows',
     `wf ${run.label} [${run.gate.paused ? 'paused' : 'running'}]${phase ? ` ${phase}` : ''} · ${done}/${run.agents.length}`,
@@ -592,7 +592,12 @@ export default function workflows(pi: ExtensionAPI): void {
     }
   });
 
-  const footer = () => refreshFooter(runs, parentCtx?.hasUI ? (id, t) => parentCtx?.ui.setStatus(id, t) : undefined);
+  const footer = () => {
+    const ctx = parentCtx;
+    if (!ctx?.hasUI) return;
+    refreshFooter(runs, (id, t) => ctx.ui.setStatus(id, t));
+    refreshProgressWidget(runs, ctx.ui);
+  };
 
   /** Start a run; `onSettled` fires once with the finished run. */
   function launch(

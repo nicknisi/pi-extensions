@@ -35,6 +35,7 @@ export interface WorkflowRun {
   controller: AbortController;
   /** phase() titles in first-seen order. */
   phases: string[];
+  currentPhase?: string;
   agents: AgentState[];
   logs: string[];
   startedAt: number;
@@ -393,6 +394,7 @@ export function startRun(runs: WorkflowRuns, opts: StartRunOptions): WorkflowRun
       onLog: (line) => {
         if (line.startsWith('── ')) {
           const title = line.slice(3);
+          run.currentPhase = title;
           if (!run.phases.includes(title)) run.phases.push(title);
         }
         if (run.logs.length < MAX_LOG_LINES) run.logs.push(truncate(line, MAX_LOG_CHARS));

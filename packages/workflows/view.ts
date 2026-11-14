@@ -3,7 +3,7 @@
  * Keys mirror Claude Code's /workflows view where pi allows.
  */
 
-import type { Theme } from '@earendil-works/pi-coding-agent';
+import type { ExtensionContext, Theme } from '@earendil-works/pi-coding-agent';
 import {
   Key,
   matchesKey,
@@ -16,7 +16,7 @@ import {
 } from '@earendil-works/pi-tui';
 import { sanitizeTerminalLabel } from '@nicknisi/pi-shared';
 import type { AgentState } from './engine.js';
-import { agentCounts, formatRunLine, runUsage, type WorkflowRun } from './runs.js';
+import { agentCounts, formatRunLine, runUsage, type WorkflowRun, type WorkflowRuns } from './runs.js';
 
 const NO_PHASE = '(no phase)';
 const FILTERS = ['all', 'running', 'done', 'failed'] as const;
@@ -44,6 +44,40 @@ function matchesFilter(a: AgentState, filter: Filter): boolean {
 
 function clean(text: string): string {
   return sanitizeTerminalLabel(text.replace(/\s+/g, ' ').trim());
+}
+
+function progressLine(run: WorkflowRun, theme: Theme): string {
+  const c = agentCounts(run);
+  const filled = c.total ? Math.round((c.done / c.total) * 12) : 0;
+  const settled = c.total ? Math.round(((c.done + c.failed) / c.total) * 12) : 0;
+  const bar =
+    theme.fg('success', '━'.repeat(filled)) +
+    theme.fg('error', '━'.repeat(settled - filled)) +
+    theme.fg('dim', '╌'.repeat(12 - settled));
+  const state = run.status === 'running' && run.gate.paused ? 'paused' : run.status;
+  const phase = run.currentPhase;
+  return [
+    `wf [${bar}] ${c.done}/${c.total} done`,
+    ...(c.failed ? [theme.fg('error', `${c.failed} failed`)] : []),
+    ...(c.running ? [`${c.running} active`] : []),
+    `${clean(run.meta?.name ?? run.label)} [${state}]`,
+    ...(phase ? [clean(phase)] : []),
+    '/workflows',
+  ].join(' · ');
+}
+
+/** The total is agents discovered so far, not a prediction of future script work. */
+export function refreshProgressWidget(runs: WorkflowRuns, ui: Pick<ExtensionContext['ui'], 'setWidget'>): void {
+  const active = [...runs.values()].filter((run) => run.status === 'running');
+  ui.setWidget(
+    'workflows',
+    active.length
+      ? (_tui, theme) => ({
+          render: (width) => active.map((run) => truncateToWidth(progressLine(run, theme), width)),
+          invalidate() {},
+        })
+      : undefined,
+  );
 }
 
 export class WorkflowsView implements Component, Focusable {
@@ -322,6 +356,7 @@ export class WorkflowsView implements Component, Focusable {
       push(
         ` ${this.icon(run.status)} ${t.bold(clean(run.meta?.name ?? run.label))}${t.fg('dim', ` ${run.id} — ${run.status}${paused} · ${c.done}/${c.total} done · ${runUsage(run).totalTokens} tok`)}`,
       );
+      push(` ${progressLine(run, t)}`);
       if (this.level === 'phases') {
         list(phaseGroups(run).map((p) => this.phaseRow(run, p)));
         push();
