@@ -1,5 +1,11 @@
 # @nicknisi/pi-workflows
 
+## 0.7.0
+
+### Minor Changes
+
+- 15eea14: Show live workflow progress bars above the prompt and in /workflows, with agent counts, failures, pause state, and the latest phase.
+
 ## 0.6.0
 
 ### Minor Changes
