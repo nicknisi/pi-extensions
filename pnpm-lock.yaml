@@ -154,6 +154,8 @@ importers:
 
   packages/pin-last-prompt: {}
 
+  packages/pipes: {}
+
   packages/recap: {}
 
   packages/relay:
