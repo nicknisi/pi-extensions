@@ -137,10 +137,23 @@ describe('Markdown reader', () => {
   });
 });
 
-it('loads mermaid from a pinned version that must match its integrity hash', () => {
-  const html = renderMarkdownDocument('Diagram', 'diagram', '```mermaid\ngraph TD; A-->B\n```');
-  const tag = html.match(/<script src="https:\/\/cdn\.jsdelivr\.net[^>]*>/)?.[0] ?? '';
-  expect(tag).toMatch(/mermaid@\d+\.\d+\.\d+\//);
-  expect(tag).toMatch(/integrity="sha384-[A-Za-z0-9+/]{64}"/);
-  expect(tag).toContain('crossorigin="anonymous"');
+it('renders mermaid to themed SVG at write time, with no script, and keeps a bad diagram as code', () => {
+  const html = renderMarkdownDocument(
+    'Diagram',
+    'diagram',
+    '```mermaid\nflowchart TD\n  accTitle: One\n  A-->B\n```\n\n```mermaid\nsequenceDiagram\n  accTitle: Two\n  A->>B: hi\n```\n\n```mermaid\nflowchart TD\n  A -->\n```',
+  );
+  expect(html).not.toMatch(/<script[^>]+src=/);
+  expect(html).not.toContain('mermaid.run');
+  const svgs = html.match(/<div class="artifact-mermaid"><svg [^>]*class="pele/g) ?? [];
+  expect(svgs).toHaveLength(2);
+  // Each diagram gets its own ids, so two on a page don't collide.
+  const ids = [...html.matchAll(/<svg[\s\S]*?<\/svg>/g)].flatMap((svg) =>
+    [...svg[0].matchAll(/\sid="([^"]+)"/g)].map((id) => id[1]),
+  );
+  expect(ids).toContain('artifact-diagram-1--title');
+  expect(ids).toContain('artifact-diagram-2--title');
+  expect(new Set(ids).size).toBe(ids.length);
+  expect(html).toContain('.artifact-mermaid .pele');
+  expect(html).toContain('<code class="language-mermaid">flowchart TD\n  A --&gt;</code>');
 });
