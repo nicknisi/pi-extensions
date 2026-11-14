@@ -110,7 +110,7 @@ function refreshFooter(
   if (active.length > 1) return setStatus('workflows', `wf ${active.length} runs · /workflows`);
   const run = active[0]!;
   const done = run.agents.filter((a) => a.status === 'done' || a.status === 'cached').length;
-  const phase = run.phases.at(-1);
+  const phase = run.currentPhase;
   setStatus(
     'workflows',
     `wf ${run.label} [${run.gate.paused ? 'paused' : 'running'}]${phase ? ` ${phase}` : ''} · ${done}/${run.agents.length}`,

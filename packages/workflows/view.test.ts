@@ -30,12 +30,14 @@ const spawn: EngineSpawnFn = async (opts) => {
   return { ok: true, text: `result of ${opts.prompt}`, usage };
 };
 
-function demoRun(runs: WorkflowRuns): WorkflowRun {
+function demoRun(runs: WorkflowRuns, script?: string): WorkflowRun {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-wf-view-'));
   roots.push(root);
   return startRun(runs, {
     root,
-    script: `export const meta = { name: 'demo', description: 'd' };
+    script:
+      script ??
+      `export const meta = { name: 'demo', description: 'd' };
 phase('Find'); await agent('find things', { label: 'finder' });
 phase('Audit'); return await parallel([() => agent('audit a', { label: 'a' }), () => agent('hang b', { label: 'b' })]);`,
     args: undefined,
@@ -85,6 +87,31 @@ describe('workflow progress widget', () => {
     }
   });
 
+  it('shows the latest phase when a workflow revisits an earlier phase', async () => {
+    const runs: WorkflowRuns = new Map();
+    const run = demoRun(runs, `phase('Audit'); phase('Build'); phase('Audit'); await agent('hang review');`);
+    const { ui, lines } = widgetUi();
+    const view = new WorkflowsView(
+      () => [...runs.values()],
+      run.id,
+      tui,
+      theme,
+      () => {},
+      () => {},
+    );
+    try {
+      await tick();
+      refreshProgressWidget(runs, ui);
+      expect(phaseGroups(run)).toEqual(['Audit', 'Build']);
+      expect(lines()[0]).toContain('[running] · Audit · /workflows');
+      expect(screen(view)).toContain('[running] · Audit · /workflows');
+    } finally {
+      view.dispose();
+      run.controller.abort();
+      await run.done;
+    }
+  });
+
   it('handles empty runs, growing totals, multiple runs, and narrow terminal widths', async () => {
     const runs: WorkflowRuns = new Map();
     const run = demoRun(runs);
@@ -96,6 +123,7 @@ describe('workflow progress widget', () => {
         ...run,
         meta: { name: '\x1b[2Jlong\n界 workflow', description: 'd' },
         phases: ['Audit\nphase'],
+        currentPhase: 'Audit\nphase',
         agents: [...run.agents, { ...run.agents[2]!, seq: 3, status: 'waiting' as const }],
       };
       const active = new Map<string, WorkflowRun>([

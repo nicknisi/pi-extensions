@@ -55,7 +55,7 @@ function progressLine(run: WorkflowRun, theme: Theme): string {
     theme.fg('error', '━'.repeat(settled - filled)) +
     theme.fg('dim', '╌'.repeat(12 - settled));
   const state = run.status === 'running' && run.gate.paused ? 'paused' : run.status;
-  const phase = run.phases.at(-1);
+  const phase = run.currentPhase;
   return [
     `wf [${bar}] ${c.done}/${c.total} done`,
     ...(c.failed ? [theme.fg('error', `${c.failed} failed`)] : []),
