@@ -18,10 +18,12 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import {
   type Component,
+  Container,
   Key,
   Markdown,
   matchesKey,
   type TUI,
+  Text,
   visibleWidth,
   wrapTextWithAnsi,
 } from '@earendil-works/pi-tui';
@@ -54,6 +56,7 @@ import {
 } from './prompt.js';
 
 const WIDGET_KEY = 'heads-up';
+const INSIGHT_KEY = 'heads-up-insight';
 const TICK_MS = 10_000;
 
 export type View = 'collapsed' | 'expanded' | 'working';
@@ -66,7 +69,7 @@ type Shown = { note: Note; view: View; rewrite: string | null; at: number };
 /** Each tag gets its own color and glyph: amber flag for this session's work, accent star for background knowledge. */
 const TAG_STYLE: Record<Tag, { color: 'warning' | 'accent'; glyph: string }> = {
   'Heads up': { color: 'warning', glyph: '⚑' },
-  'You should know': { color: 'accent', glyph: '✦' },
+  Insights: { color: 'accent', glyph: '✦' },
 };
 
 const tagTitle = (theme: Theme, tag: Tag): string => {
@@ -244,6 +247,14 @@ export default function headsUp(pi: ExtensionAPI) {
   const minMs = config.minSeconds * 1000;
   const cooldownMs = config.cooldownSeconds * 1000;
 
+  pi.registerEntryRenderer<string>(INSIGHT_KEY, (entry, _options, theme) => {
+    if (typeof entry.data !== 'string') return;
+    const content = new Container();
+    content.addChild(new Text(theme.fg('accent', theme.bold('✦ Insights')), 0, 1));
+    content.addChild(new Markdown(entry.data, 0, 0, getMarkdownTheme()));
+    return content;
+  });
+
   // The note on screen, its panel view, and the latest rewrite. In memory: a
   // note never outlives the pi process.
   let shown: Shown | null = null;
@@ -338,8 +349,11 @@ export default function headsUp(pi: ExtensionAPI) {
     return classifyBool(ctx.modelRegistry, model, state, gateQuestion, signal);
   };
 
-  /** Returns the error message when the check failed, so a manual check can report it. */
-  const runCheck = async (ctx: ExtensionContext, manual = false): Promise<string | undefined> => {
+  /** Returns the delivered note or failure, so manual checks can report the actual outcome. */
+  const runCheck = async (
+    ctx: ExtensionContext,
+    manual = false,
+  ): Promise<{ note?: Note; error?: string } | undefined> => {
     checking = true;
     lastCheckAt = Date.now();
     inflight = new AbortController();
@@ -368,17 +382,24 @@ export default function headsUp(pi: ExtensionAPI) {
       if (shown || readStore().disabled) return;
       updateStore((s) => {
         s.offered = pushFront(s.offered, note.learn, MAX_OFFERED);
-        s.events = [...s.events, makeEvent('proposed', note.learn, extra)].slice(-MAX_EVENTS);
+        s.events = [...s.events, makeEvent(note.tag === 'Insights' ? 'insight' : 'proposed', note.learn, extra)].slice(
+          -MAX_EVENTS,
+        );
       });
-      shown = { note, view: 'collapsed', rewrite: null, at: Date.now() };
-      renderBand(ctx);
+      if (note.tag === 'Insights') {
+        pi.appendEntry(INSIGHT_KEY, `**${note.title}**\n\n${note.body}`);
+      } else {
+        shown = { note, view: 'collapsed', rewrite: null, at: Date.now() };
+        renderBand(ctx);
+      }
+      return { note };
     } catch (error) {
       if (signal.aborted) return;
       const message = error instanceof Error ? error.message : String(error);
       // Background failures warn once until a check succeeds; a manual check always reports.
       if (!manual && !warnedError) ctx.ui.notify(`heads-up: check failed: ${message}`, 'warning');
       warnedError = true;
-      return message;
+      return { error: message };
     } finally {
       checking = false;
       if (inflight?.signal === signal) inflight = undefined;
@@ -521,9 +542,9 @@ export default function headsUp(pi: ExtensionAPI) {
         if (checking) return ctx.ui.notify('heads-up: a check is already running', 'info');
         if (shown) return ctx.ui.notify(`heads-up: a note is already showing (${config.shortcut})`, 'info');
         ctx.ui.notify('heads-up: checking…', 'info');
-        const error = await runCheck(ctx, true);
-        if (error) ctx.ui.notify(`heads-up: check failed: ${error}`, 'warning');
-        else if (!shown) ctx.ui.notify('heads-up: nothing worth flagging', 'info');
+        const result = await runCheck(ctx, true);
+        if (result?.error) ctx.ui.notify(`heads-up: check failed: ${result.error}`, 'warning');
+        else if (!result?.note) ctx.ui.notify('heads-up: nothing worth flagging', 'info');
         return;
       }
       const store = readStore();

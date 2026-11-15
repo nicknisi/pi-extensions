@@ -100,6 +100,7 @@ export function loadConfig(agentDir = getAgentDir()): { config: HeadsUpConfig; w
 
 export type Kind =
   | 'proposed'
+  | 'insight'
   | 'explained'
   | 'page'
   | 'chat'

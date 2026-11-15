@@ -11,7 +11,7 @@ A decision the agent made in passing, inside a long answer or the middle of a lo
 
 ## Tags
 - Heads up: about this session's work. A decision the agent made, something it did not highlight, a result that may be wrong. Missing it costs them soon.
-- You should know: how a system, concept or design works, when understanding it matters for their work.
+- Insights: non-urgent background knowledge about how a system, concept or design works, when understanding it matters for their work. These appear inline in the transcript without requiring action. Use Heads up instead when they need to act on a risk or decision.
 If neither reads naturally, say learn: none.
 
 ## The reader
@@ -25,7 +25,7 @@ learn: none
 or
 
 learn: <one or two sentences, about 20 words, ending with a period>
-tag: <Heads up or You should know>
+tag: <Heads up or Insights>
 explain:
 **<title stating the takeaway, plain words, no question>**
 <explainer: plain sentences for a simple idea, 3-6 bullets for a complex one, at most 120 words>
