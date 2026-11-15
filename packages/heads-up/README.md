@@ -154,7 +154,7 @@ Submitting a prompt while a note is showing clears the note and logs it as `igno
 | `gateThreshold`   | `0.5`                 | With `gateEnforce`, checks scoring below this skip the side request (0–1)                                 |
 | `gateEnforce`     | `false`               | `false` scores and logs only (shadow); `true` skips low-scoring checks                                    |
 
-Invalid values fall back to the defaults. An unknown `model` falls back to the session model with a warning.
+Invalid values fall back to the defaults. An unknown or unavailable `model` (including an unconfigured provider or a failed credential lookup) falls back to the current session model, with one warning per extension load. This applies to checks and panel rewrites.
 
 ## State
 
