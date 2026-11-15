@@ -281,19 +281,29 @@ export default function headsUp(pi: ExtensionAPI) {
     if (note && kind) logEvent(kind, note.learn);
   };
 
-  const resolveModel = (ctx: ExtensionContext) => {
+  const resolveModel = async (ctx: ExtensionContext, signal: AbortSignal) => {
     const spec = config.model ? parseModelSpec(config.model) : undefined;
-    const configured = spec ? ctx.modelRegistry.find(spec.provider, spec.id) : undefined;
+    let configured: ExtensionContext['model'];
+    if (spec) {
+      try {
+        const available = await ctx.modelRegistry.getAvailableOfType('chat', spec.provider, { signal });
+        configured = available.find((model) => model.id === spec.id);
+      } catch {
+        // Failed credential lookups must not prevent using the session model.
+      }
+    }
+    if (signal.aborted) return;
     if (config.model && !configured && !warnedModel) {
       warnedModel = true;
-      ctx.ui.notify(`heads-up: model ${config.model} not found; using the session model`, 'warning');
+      ctx.ui.notify(`heads-up: model ${config.model} unavailable; using the session model`, 'warning');
     }
     return configured ?? ctx.model;
   };
 
   /** One tool-less side request over a digest of the session: its text and its cost in USD. */
   const ask = async (ctx: ExtensionContext, systemPrompt: string, text: string, signal: AbortSignal) => {
-    const model = resolveModel(ctx);
+    const model = await resolveModel(ctx, signal);
+    if (signal.aborted) return null;
     if (!model) throw new Error('no model available');
     const reply = await ctx.modelRegistry.complete(
       model,

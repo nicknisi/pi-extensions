@@ -121,6 +121,61 @@ describe('heads-up', () => {
     expect(readStore().events[0]?.cost).toBe(0.12);
   });
 
+  it.each(['unconfigured', 'missing', 'lookup fails'])('falls back to the session model when %s', async (reason) => {
+    mkdirSync(join(dir, 'configs'), { recursive: true });
+    writeFileSync(join(dir, 'configs', 'heads-up.json'), JSON.stringify({ model: 'anthropic/claude-haiku-4-5' }));
+    const configured = { provider: 'anthropic', id: 'claude-haiku-4-5' };
+    const h = harness(NOTE, {
+      find: () => (reason === 'missing' ? undefined : configured),
+      getAvailableOfType: vi.fn(async () => {
+        if (reason === 'lookup fails') throw new Error('credential lookup failed');
+        return [];
+      }),
+    });
+    h.complete.mockImplementation(async (...args: unknown[]) => {
+      if (args[0] === configured) throw new Error('Provider is not configured: anthropic');
+      return { content: [{ type: 'text', text: NOTE }], stopReason: 'stop' } as AssistantMessage;
+    });
+    await h.fire('session_start');
+    await h.longTurn();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(h.notify).not.toHaveBeenCalledWith(expect.stringContaining('check failed:'), 'warning');
+    expect(h.complete).toHaveBeenCalledWith(h.ctx.model, expect.anything(), expect.anything());
+    expect(h.band()).toContain('migration test');
+
+    await h.press('0');
+    const current = { ...h.ctx.model!, provider: 'new-session-provider' };
+    h.ctx.model = current;
+    await h.commands.get('heads-up')!('check', h.ctx);
+    expect(h.complete).toHaveBeenCalledTimes(2);
+    expect(h.complete).toHaveBeenLastCalledWith(current, expect.anything(), expect.anything());
+    expect(h.notify.mock.calls.filter(([message]) => message.includes('using the session model'))).toHaveLength(1);
+  });
+
+  it('uses the configured model when its provider is available', async () => {
+    mkdirSync(join(dir, 'configs'), { recursive: true });
+    writeFileSync(join(dir, 'configs', 'heads-up.json'), JSON.stringify({ model: 'anthropic/claude-haiku-4-5' }));
+    const configured = { provider: 'anthropic', id: 'claude-haiku-4-5' };
+    const getAvailableOfType = vi.fn(async () => [configured]);
+    const h = harness(NOTE, { getAvailableOfType });
+    await h.commands.get('heads-up')!('check', h.ctx);
+
+    expect(getAvailableOfType).toHaveBeenCalledWith('chat', 'anthropic', { signal: expect.any(AbortSignal) });
+    expect(h.complete).toHaveBeenCalledWith(configured, expect.anything(), expect.anything());
+    expect(h.band()).toContain('migration test');
+    expect(h.notify).not.toHaveBeenCalledWith(expect.anything(), 'warning');
+  });
+
+  it('reports a failure when neither a configured nor a session model is available', async () => {
+    const h = harness();
+    h.ctx.model = undefined;
+    await h.commands.get('heads-up')!('check', h.ctx);
+
+    expect(h.complete).not.toHaveBeenCalled();
+    expect(h.notify).toHaveBeenCalledWith('heads-up: check failed: no model available', 'warning');
+  });
+
   it('a check that finds nothing is logged with its cost', async () => {
     const h = harness('learn: none');
     await h.fire('session_start');
