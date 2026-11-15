@@ -425,6 +425,11 @@ export default function headsUp(pi: ExtensionAPI) {
     timer = setInterval(() => tick(ctx), TICK_MS);
   });
 
+  pi.on('session_tree', () => {
+    inflight?.abort();
+    checkWanted = false;
+  });
+
   pi.on('session_shutdown', async () => {
     if (timer) clearInterval(timer);
     timer = undefined;

@@ -94,7 +94,7 @@ function harness(reply = NOTE, registry: Record<string, unknown> = {}, sessionMa
   } as unknown as ExtensionContext;
 
   headsUp(pi);
-  const fire = (name: string, event: unknown = {}) => handlers.get(name)!(event, ctx);
+  const fire = (name: string, event: unknown = {}) => handlers.get(name)?.(event, ctx);
   const band = () => widget?.({}, theme).render(200).join('\n');
   const press = async (...keys: string[]) => {
     panelKeys = keys;
@@ -186,7 +186,7 @@ describe('heads-up', () => {
     ]);
   });
 
-  it('does not post an Insight after session shutdown cancels the check', async () => {
+  it.each(['session_shutdown', 'session_tree'])('does not post a stale Insight after %s', async (event) => {
     const h = harness(INSIGHT);
     let finish!: (reply: AssistantMessage) => void;
     h.complete.mockImplementationOnce(
@@ -198,11 +198,16 @@ describe('heads-up', () => {
     await h.fire('session_start');
     await h.longTurn();
     await vi.advanceTimersByTimeAsync(10_000);
-    await h.fire('session_shutdown');
+    if (event === 'session_tree') {
+      h.sessionManager.resetLeaf();
+      h.sessionManager.appendMessage({ role: 'user', content: 'a different branch', timestamp: Date.now() });
+    }
+    await h.fire(event);
     finish({ content: [{ type: 'text', text: INSIGHT }], stopReason: 'stop' } as AssistantMessage);
     await vi.advanceTimersByTimeAsync(0);
     expect(h.appendEntry).not.toHaveBeenCalled();
     expect(readStore().events).toEqual([]);
+    expect(readStore().offered).toEqual([]);
   });
 
   it('a manual Insight does not report that nothing was found or open a panel', async () => {
