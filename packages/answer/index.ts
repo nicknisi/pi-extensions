@@ -1,6 +1,6 @@
-import type { Api, Model, UserMessage } from '@earendil-works/pi-ai';
+import type { UserMessage } from '@earendil-works/pi-ai';
 import { BorderedLoader, Theme, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { type Classifier, classifyBool, findClassifier } from '@nicknisi/pi-shared';
+import { type Classifier, classifyBool, findClassifier, selectSideModel } from '@nicknisi/pi-shared';
 import { loadAnswerConfig, parseModelPreference, type ModelPreference } from './config.js';
 import {
   type Component,
@@ -178,31 +178,6 @@ function findLastCompletedAssistantMessage(ctx: ExtensionContext): {
   }
 
   return { skippedIncomplete };
-}
-
-async function selectExtractionModel(
-  modelRegistry: {
-    find: (provider: string, modelId: string) => Model<Api> | undefined;
-    getApiKeyAndHeaders: (
-      model: Model<Api>,
-    ) => Promise<
-      | { ok: true; apiKey?: string; headers?: Record<string, string | null>; env?: Record<string, string> }
-      | { ok: false; error: string }
-    >;
-  },
-  preferences: readonly ModelPreference[],
-): Promise<Model<Api> | undefined> {
-  for (const candidate of preferences) {
-    const model = modelRegistry.find(candidate.provider, candidate.modelId);
-    if (!model) continue;
-
-    const auth = await modelRegistry.getApiKeyAndHeaders(model);
-    if (auth.ok) {
-      return model;
-    }
-  }
-
-  return undefined;
 }
 
 function buildAnswerMessage(questions: ExtractedQuestion[], answers: string[]): string {
@@ -532,10 +507,10 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify('Using the last completed assistant message', 'warning');
     }
 
-    const extractionModel = await selectExtractionModel(ctx.modelRegistry, extractionModelPreferences);
+    const extractionModel = await selectSideModel(ctx, config.extractionModels);
     if (!extractionModel) {
       ctx.ui.notify(
-        `No configured extraction model is available with a configured API key. Checked: ${formatExtractionModelPreferences(extractionModelPreferences)}`,
+        `No extraction or current session model is available. Checked: ${formatExtractionModelPreferences(extractionModelPreferences)}`,
         'error',
       );
       return;

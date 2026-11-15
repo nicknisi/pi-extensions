@@ -1,6 +1,6 @@
 import type { Api, AssistantMessage, Model } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -63,7 +63,7 @@ function harness(entries: BranchEntry[] = messages(4)) {
     mode: 'tui',
     model,
     isIdle: () => true,
-    modelRegistry: { complete, find: () => undefined },
+    modelRegistry: { complete, find: () => undefined, getAvailableOfType: vi.fn(async () => []) },
     sessionManager: { getBranch: () => branch },
     ui: { notify },
   } as unknown as ExtensionContext;
@@ -95,6 +95,53 @@ async function idleTick(ctx: ExtensionContext, handlers: Map<string, EventHandle
 }
 
 describe('recap extension', () => {
+  it.each(['unavailable', 'rejects', 'usable'])('selects recap model when preference %s', async (mode) => {
+    mkdirSync(join(agentDir, 'configs'));
+    writeFileSync(
+      join(agentDir, 'configs/recap.json'),
+      JSON.stringify({ model: { provider: 'optional', id: 'org/model' } }),
+    );
+    const h = harness();
+    const preferred = { ...h.model, provider: 'optional', id: 'org/model' };
+    h.ctx.modelRegistry.find = () => preferred;
+    vi.mocked(h.ctx.modelRegistry.getAvailableOfType).mockImplementation(async () => {
+      if (mode === 'rejects') throw new Error('lookup failed');
+      return mode === 'usable' ? [preferred] : [];
+    });
+    h.complete.mockResolvedValue({ content: [] } as unknown as AssistantMessage);
+    await h.commands.get('recap')!('', h.ctx);
+    expect(h.complete.mock.calls.at(-1)![0]).toBe(mode === 'usable' ? preferred : h.model);
+    h.ctx.model = { ...h.model, id: 'changed' };
+    await h.commands.get('recap')!('', h.ctx);
+    expect(h.complete.mock.calls.at(-1)![0]).toBe(mode === 'usable' ? preferred : h.ctx.model);
+    h.ctx.model = undefined;
+    h.complete.mockClear();
+    await h.commands.get('recap')!('', h.ctx);
+    if (mode === 'usable') expect(h.complete.mock.calls[0]![0]).toBe(preferred);
+    else expect(h.complete).not.toHaveBeenCalled();
+  });
+
+  it('tracks idle model changes but never carries a model across shutdown or extension instances', async () => {
+    const h = harness();
+    h.complete.mockResolvedValue({ content: [] } as unknown as AssistantMessage);
+    await h.handlers.get('session_start')!({}, h.ctx);
+    const changed = { ...h.model, id: 'changed-while-idle' };
+    await h.handlers.get('model_select')!({ model: changed }, h.ctx);
+    h.ctx.model = undefined;
+    await h.commands.get('recap')!('', h.ctx);
+    expect(h.complete.mock.calls.at(-1)![0]).toBe(changed);
+    const other = harness();
+    other.ctx.model = undefined;
+    await other.commands.get('recap')!('', other.ctx);
+    expect(other.complete).not.toHaveBeenCalled();
+    await h.handlers.get('session_shutdown')!({}, h.ctx);
+    h.complete.mockClear();
+    await h.handlers.get('session_start')!({}, h.ctx);
+    await h.commands.get('recap')!('', h.ctx);
+    expect(h.complete).not.toHaveBeenCalled();
+    await h.handlers.get('session_shutdown')!({}, h.ctx);
+  });
+
   it('completes custom-provider models through the model registry', async () => {
     const { appendEntry, commands, complete, ctx, model } = harness();
     complete.mockResolvedValue({

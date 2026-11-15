@@ -51,7 +51,7 @@ Config file: `~/.pi/agent/configs/session-name.json` (JSON, all keys optional; m
 | `autoName`           | `"off" \| "heuristic" \| "llm"` | `"heuristic"`         | Naming mode, applied when the first prompt is sent. `heuristic` uses the first non-empty line of the first user message (free, instant). `llm` makes a one-off title-generation call and falls back to the heuristic if it fails. `off` disables auto-naming.                      |
 | `heuristicMaxLength` | `number`                        | `60`                  | Max characters for derived names (applies to both heuristic and LLM titles; longer names are truncated with `…`).                                                                                                                                                                  |
 | `llmMaxWords`        | `number`                        | `6`                   | Max words requested in the LLM title-generation prompt.                                                                                                                                                                                                                            |
-| `llmModel`           | `string \| null`                | `null`                | Model for LLM titles as `"provider/model-id"`, e.g. `"anthropic/claude-haiku-4-5"`. `null` uses the session model. If the configured model isn't found in the registry, falls back to the session model and warns once.                                                            |
+| `llmModel`           | `string \| null`                | `null`                | Model for LLM titles as `"provider/model-id"`, e.g. `"anthropic/claude-haiku-4-5"`. `null` uses the session model. If unavailable with working credentials, falls back to the current session model and warns once.                                                                |
 | `notifyOnAutoName`   | `boolean`                       | `true`                | Show a `Session named: …` notification when auto-naming succeeds.                                                                                                                                                                                                                  |
 | `setTitle`           | `boolean`                       | `true`                | Mirror the session name into the terminal/window title.                                                                                                                                                                                                                            |
 | `titleFormat`        | `string`                        | `"{summary} — {dir}"` | Title template. Placeholders: `{summary}` (session name), `{dir}` (basename of cwd) and `{app}` (what the host calls itself — `π`, or the brand name under a rebranded distribution such as `arc`). When the session is unnamed the title is `{app} — {dir}` regardless of format. |
@@ -72,6 +72,8 @@ Example (`session-name.example.json`):
 
 No environment variables are read.
 
+LLM selection uses `selectSideModel` from `@nicknisi/pi-shared`, checking the preferred provider's available chat models. Missing credentials or a failed lookup falls back to the current session model, freshly selected for each naming attempt. IDs may contain slashes. With no model, naming uses the heuristic. Actual request failures also keep the existing heuristic fallback, not a retry on another model. Shutdown cancels selection and prevents pending auth/title results from naming a replaced session; OAuth auth remains supported.
+
 ## How auto-naming works
 
 1. On `before_agent_start`, skip if already named (via `/sn`, `/name`, `--name`, or a prior auto-name), if `autoName` is `"off"`, or if the run was started by a custom message rather than a user prompt. Slash commands never start a run, so they never trigger naming.
@@ -82,6 +84,8 @@ No environment variables are read.
 6. Manually naming or clearing a session sets the per-session guard so auto-naming never fires afterward in that session instance.
 
 ## Dependencies
+
+- `@nicknisi/pi-shared` — optional side-model selection (requires pi's async `getAvailableOfType()` API).
 
 - `@earendil-works/pi-coding-agent` (peer, `>=0.86.0`) — `ExtensionAPI`, `ExtensionContext`, `SessionEntry`, `SessionInfo`, `SessionManager` (used for `list`/`listAll` in `/sessions`).
 - `@earendil-works/pi-ai` (peer) — `Message` type for the LLM title request.

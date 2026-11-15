@@ -6,7 +6,7 @@ Auto-recap card for pi. When a TUI session sits idle for a configurable number o
 
 - Commands: `/recap`, `/recap-idle`
 - Entry type: `recap` (with a registered renderer)
-- Event hooks: `session_start`, `before_agent_start`, `agent_settled`, `session_shutdown`
+- Event hooks: `session_start`, `before_agent_start`, `agent_settled`, `model_select`, `session_shutdown`
 - Background timer (30s tick) that detects idle and fires the recap
 - No tools, keybindings, or overlays
 
@@ -43,10 +43,12 @@ Config file: `~/.pi/agent/configs/recap.json` (created on first `/recap-idle` wr
 }
 ```
 
-| Option        | Type                               | Default                     | Notes                                                                                        |
-| ------------- | ---------------------------------- | --------------------------- | -------------------------------------------------------------------------------------------- |
-| `idleMinutes` | number                             | `3`                         | Minutes of inactivity before an auto-recap fires. Set via `/recap-idle`.                     |
-| `model`       | `{ provider: string; id: string }` | session model (`ctx.model`) | Optional override. If omitted or not registered in Pi, recap uses the current session model. |
+| Option        | Type                               | Default                     | Notes                                                                                                        |
+| ------------- | ---------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `idleMinutes` | number                             | `3`                         | Minutes of inactivity before an auto-recap fires. Set via `/recap-idle`.                                     |
+| `model`       | `{ provider: string; id: string }` | session model (`ctx.model`) | Optional override. If omitted or unavailable with working credentials, recap uses the current session model. |
+
+Selection uses `selectSideModel` from `@nicknisi/pi-shared` and the provider's available chat models; lookup failures also fall back to the current session model. Model IDs may contain slashes. Each recap re-evaluates selection; request failures are not retried on another model. For idle contexts without `ctx.model`, recap remembers the latest model only within this extension/session, including `model_select` changes while idle. Shutdown clears it; no model from another session is reused. With neither model available, recap warns and skips generation.
 
 No environment variables are read.
 
@@ -66,7 +68,7 @@ Peer deps (all `@earendil-works/*`, provided by the pi host):
 - `@earendil-works/pi-coding-agent` — `ExtensionAPI`, `getMarkdownTheme`; uses `pi.registerCommand`, `pi.registerEntryRenderer`, `pi.appendEntry`, `pi.on`, `buildSessionContext`, `convertToLlm`, `ctx.sessionManager.getBranch`, `ctx.modelRegistry.complete`, `ctx.isIdle`, `ctx.ui.notify`
 - `@earendil-works/pi-tui` — `Box`, `Text`, `Markdown` for the card renderer
 
-No npm runtime deps, no workspace deps.
+Workspace dependency: `@nicknisi/pi-shared` for optional side-model selection (requires pi's async `getAvailableOfType()` API).
 
 ## Caveats
 

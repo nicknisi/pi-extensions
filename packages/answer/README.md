@@ -70,25 +70,25 @@ Optional global config: `~/.pi/agent/configs/answer.json`. Changes take effect o
 }
 ```
 
-`extractionModels` is a non-empty ordered list of `provider/model-id` strings. The first model that both exists in `ctx.modelRegistry` and passes `getApiKeyAndHeaders()` is used. Model IDs may contain additional slashes; only the first slash separates the provider. Missing or invalid config falls back to the list above and invalid config emits a warning.
+`extractionModels` is a non-empty ordered list of `provider/model-id` strings. The first exact model with working credentials in its provider's available chat models is used, via `selectSideModel` from `@nicknisi/pi-shared`. Unavailable candidates and credential lookup failures continue in order. Model IDs may contain additional slashes; only the first slash separates the provider. Missing or invalid config falls back to the list above and invalid config emits a warning.
 
 `hintModels` is an ordered list of classifier `provider/model-id` strings for the [answer hint](#answer-hint); the first with working credentials wins. It defaults to Jev on every provider pi lists it under. `[]` turns the hint off. An invalid list warns and keeps the default. See [`answer.example.json`](./answer.example.json).
 
-The current session model (`ctx.model`) is **not** used for extraction, and `/answer` works without one. API keys come from Pi's normal model authentication.
+If no preferred extraction model is available, extraction falls back to the **current session model** (`ctx.model`). Selection is re-evaluated each time, with no cached/sticky fallback. `/answer` also works without a session model when a preferred model is usable. If neither is available it reports an error. Request failures are not retried on another model. Authentication comes from Pi's normal model runtime; classifier hint selection is unchanged.
 
 ## Dependencies
 
 - `@earendil-works/pi-coding-agent` (peer, `>=0.86.0`) — `ExtensionAPI`, `ExtensionContext`, `BorderedLoader`, `Theme`; extraction runs through `ctx.modelRegistry.complete(model, { systemPrompt, messages }, { signal })`, which applies `models.json` overrides, extension-registered providers, and request-time auth
 - `@earendil-works/pi-tui` — `Component`, `Focusable`, `Editor`, `EditorTheme`, `Key`, `matchesKey`, `TUI`, `truncateToWidth`, `visibleWidth`, `wrapTextWithAnsi`
-- `@earendil-works/pi-ai` — types only (`Api`, `Model`, `UserMessage`)
-- `@nicknisi/pi-shared` — `findClassifier` and `classifyBool` for the answer hint
+- `@earendil-works/pi-ai` — types only (`UserMessage`)
+- `@nicknisi/pi-shared` — `selectSideModel` for extraction; `findClassifier` and `classifyBool` for the answer hint
 
 No third-party npm dependencies.
 
 ## Caveats
 
-- **Extraction-model availability.** If none of the configured candidates exist with working authentication, the command errors out listing every model it checked.
-- **Pi internals:** depends on `ctx.sessionManager.getBranch()` entry shapes (`entry.type === "message"`, `message.role`, `message.stopReason === "stop"`, content part `{ type: "text", text }`), `ctx.modelRegistry.find/getApiKeyAndHeaders/complete`, `ctx.ui.custom` component contract, and `pi.sendUserMessage(..., { deliverAs: "followUp" })`. Any of these changing across pi versions will break it.
+- **Extraction-model availability.** If no configured candidate is available with working authentication and no current session model exists, the command errors out listing the preferences it checked.
+- **Pi internals:** depends on `ctx.sessionManager.getBranch()` entry shapes (`entry.type === "message"`, `message.role`, `message.stopReason === "stop"`, content part `{ type: "text", text }`), `ctx.modelRegistry.getAvailableOfType/complete`, `ctx.ui.custom` component contract, and `pi.sendUserMessage(..., { deliverAs: "followUp" })`. Any of these changing across pi versions will break it.
 - **Editor render slicing.** `AnswerComponent.render` strips the first and last lines of the embedded `Editor.render()` output (`editorLines[1..len-2]`) assuming the Editor wraps its content in a border frame. If pi-tui's `Editor` render shape changes, answers will render wrong.
 - **Extraction is heuristic at the edges.** The LLM prompt tries to keep questions self-contained, but the regex fallback (`fallbackExtractQuestions`) is naive — it splits on sentence boundaries ending in `?` and can produce context-free or false-positive questions when extraction JSON parsing fails.
 - **Multi-part assistant messages** are flattened by joining all text parts with `\n`; non-text parts (tool calls, thinking) are ignored.

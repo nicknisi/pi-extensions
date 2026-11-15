@@ -34,7 +34,8 @@ import { join } from 'node:path';
 import type { AssistantMessage, Message, ThinkingLevel } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, SessionEntry, Theme } from '@earendil-works/pi-coding-agent';
 import { convertToLlm, CURRENT_SESSION_VERSION, getMarkdownTheme } from '@earendil-works/pi-coding-agent';
-import { loadBtwConfig, parseModelSpec } from './config.js';
+import { selectSideModel } from '@nicknisi/pi-shared';
+import { loadBtwConfig } from './config.js';
 import {
   Box,
   type Component,
@@ -414,12 +415,10 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const modelSpec = config.model ? parseModelSpec(config.model) : undefined;
-      const configuredModel = modelSpec ? ctx.modelRegistry.find(modelSpec.provider, modelSpec.id) : undefined;
-      if (config.model && !configuredModel) {
-        ctx.ui.notify(`btw model not found: ${config.model}; using current model`, 'warning');
+      const model = await selectSideModel(ctx, config.model ? [config.model] : []);
+      if (config.model && (!model || `${model.provider}/${model.id}` !== config.model)) {
+        ctx.ui.notify(`btw model unavailable: ${config.model}; using current model`, 'warning');
       }
-      const model = configuredModel ?? ctx.model;
       if (!model) {
         ctx.ui.notify('btw: no current model available', 'error');
         return;

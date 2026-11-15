@@ -8,6 +8,17 @@ It exists to centralize things that several extensions were duplicating: a set o
 
 `index.ts` re-exports everything from `tui-utils.ts`, `searchable-select-list.ts`, `subagents.ts`, `subagents-dir.ts` (`PI_SUBAGENTS_DIR` paths), `workflow.ts` (`runWorkflow`), `patches.ts` (`parseUnifiedDiff` for worktree patch handoffs), and `tools.ts` (`declareUnlessSearchable`).
 
+### Optional side models (`side-model.ts`)
+
+```ts
+import { selectSideModel } from '@nicknisi/pi-shared';
+const model = await selectSideModel(ctx, ['anthropic/claude-haiku-4-5'], signal);
+```
+
+`selectSideModel(ctx, preferences: readonly string[], signal?: AbortSignal)` returns a chat model or `undefined`. `ctx` needs only `model` and `modelRegistry`. Preferences are exact `provider/model-id` strings (IDs may contain slashes); malformed entries are skipped. Each preference uses provider-scoped async `getAvailableOfType('chat', provider, { signal })` to check working credentials, not just catalog presence. Lookup failures continue to the next preference. If none is usable, the helper reads `ctx.model` **at fallback time**; no current model means `undefined`. An abort returns `undefined`, never the session fallback. With no preferences it does no provider checks.
+
+There is no cache or sticky fallback. Selection does not make requests or retry request failures: callers retain their existing request/auth handling. This policy is for optional side calls, not explicit workflow or subagent model choices.
+
 ### TUI utilities (`tui-utils.ts`)
 
 ```ts
@@ -175,7 +186,7 @@ Consumers in this monorepo add the workspace dependency:
 }
 ```
 
-and import individual functions as shown above. Known consumers: `answer`, `header`, `heads-up`, `llm-council`, `statusline`, `subagents`, `workflows`.
+and import individual functions as shown above. Known consumers: `answer`, `btw`, `header`, `heads-up`, `llm-council`, `recap`, `session-name`, `statusline`, `subagents`, `workflows`.
 
 ### Tool exposure (`tools.ts`)
 

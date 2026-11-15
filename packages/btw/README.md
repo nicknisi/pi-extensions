@@ -85,7 +85,7 @@ Optional global config: `~/.pi/agent/configs/btw.json`. Changes take effect on t
 }
 ```
 
-`model` is an optional `provider/model-id` override registered in Pi with working authentication. Model IDs may contain additional slashes; only the first slash separates the provider. If it is omitted or cannot be resolved, `/btw` uses the current session model.
+`model` is an optional `provider/model-id` override registered in Pi with working authentication. Model IDs may contain additional slashes; only the first slash separates the provider. Selection uses `selectSideModel` from `@nicknisi/pi-shared`: the override must appear in the provider's available chat models with working credentials. If omitted, unavailable, or credential lookup fails, `/btw` uses the current session model (and warns for an unavailable override). With neither model it reports an error. Selection is fresh for each `/btw`; the chosen model stays fixed for that window's follow-ups and persisted thread. Request failures do not silently switch models.
 
 `thinking` is an optional thinking level for side questions: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. If it is omitted, `/btw` uses the current session thinking level. Use it to keep quick side questions cheap when the main session runs at `xhigh`.
 
@@ -99,7 +99,7 @@ Invalid values emit a warning and are ignored; other valid keys still apply. See
 
 ## Dependencies
 
-No runtime dependencies. Requires pi `>=0.86.0` (`ctx.modelRegistry.streamSimple()`).
+Runtime dependency: `@nicknisi/pi-shared` for optional side-model selection. Requires pi's async `ctx.modelRegistry.getAvailableOfType()` and `streamSimple()` APIs.
 
 Peer (pi APIs):
 
