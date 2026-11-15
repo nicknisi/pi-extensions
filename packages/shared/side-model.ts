@@ -13,7 +13,16 @@ export async function selectSideModel(
     const provider = preference.slice(0, slash);
     const id = preference.slice(slash + 1);
     try {
-      const available = await ctx.modelRegistry.getAvailableOfType('chat', provider, signal ? { signal } : {});
+      const registry = ctx.modelRegistry;
+      if (typeof registry.getAvailableOfType !== 'function') {
+        // Older supported hosts expose auth checks but not typed model availability.
+        const model = registry.find(provider, id);
+        if (model && (await registry.getApiKeyAndHeaders(model)).ok) {
+          return signal?.aborted ? undefined : model;
+        }
+        continue;
+      }
+      const available = await registry.getAvailableOfType('chat', provider, signal ? { signal } : {});
       if (signal?.aborted) return undefined;
       const model = available.find((model) => model.provider === provider && model.id === id);
       if (model) return model;

@@ -68,7 +68,7 @@ Peer deps (all `@earendil-works/*`, provided by the pi host):
 - `@earendil-works/pi-coding-agent` — `ExtensionAPI`, `getMarkdownTheme`; uses `pi.registerCommand`, `pi.registerEntryRenderer`, `pi.appendEntry`, `pi.on`, `buildSessionContext`, `convertToLlm`, `ctx.sessionManager.getBranch`, `ctx.modelRegistry.complete`, `ctx.isIdle`, `ctx.ui.notify`
 - `@earendil-works/pi-tui` — `Box`, `Text`, `Markdown` for the card renderer
 
-Workspace dependency: `@nicknisi/pi-shared` for optional side-model selection (requires pi's async `getAvailableOfType()` API).
+Workspace dependency: `@nicknisi/pi-shared` for optional side-model selection. Hosts without `getAvailableOfType()` use `find()` plus `getApiKeyAndHeaders()`.
 
 ## Caveats
 

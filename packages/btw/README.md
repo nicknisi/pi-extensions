@@ -99,7 +99,7 @@ Invalid values emit a warning and are ignored; other valid keys still apply. See
 
 ## Dependencies
 
-Runtime dependency: `@nicknisi/pi-shared` for optional side-model selection. Requires pi's async `ctx.modelRegistry.getAvailableOfType()` and `streamSimple()` APIs.
+Runtime dependency: `@nicknisi/pi-shared` for optional side-model selection. Requires pi `>=0.86.0` (`streamSimple()`); hosts without `getAvailableOfType()` use `find()` plus `getApiKeyAndHeaders()` to check preferred models.
 
 Peer (pi APIs):
 

@@ -85,7 +85,7 @@ LLM selection uses `selectSideModel` from `@nicknisi/pi-shared`, checking the pr
 
 ## Dependencies
 
-- `@nicknisi/pi-shared` — optional side-model selection (requires pi's async `getAvailableOfType()` API).
+- `@nicknisi/pi-shared` — optional side-model selection. Older supported hosts without `getAvailableOfType()` use `find()` plus `getApiKeyAndHeaders()`.
 
 - `@earendil-works/pi-coding-agent` (peer, `>=0.86.0`) — `ExtensionAPI`, `ExtensionContext`, `SessionEntry`, `SessionInfo`, `SessionManager` (used for `list`/`listAll` in `/sessions`).
 - `@earendil-works/pi-ai` (peer) — `Message` type for the LLM title request.

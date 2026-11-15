@@ -61,6 +61,24 @@ describe('selectSideModel', () => {
     expect(getAvailableOfType).not.toHaveBeenCalled();
   });
 
+  it.each(['available', 'unavailable', 'rejects', 'aborted'])(
+    'supports registries without getAvailableOfType when auth is %s',
+    async (mode) => {
+      const controller = new AbortController();
+      const find = vi.fn(() => preferred);
+      const getApiKeyAndHeaders = vi.fn(async () => {
+        if (mode === 'rejects') throw new Error('credential lookup failed');
+        if (mode === 'aborted') controller.abort();
+        return mode === 'unavailable' ? { ok: false, error: 'no credentials' } : { ok: true };
+      });
+      const ctx = { model: current, modelRegistry: { find, getApiKeyAndHeaders } } as unknown as ExtensionContext;
+      const result = await selectSideModel(ctx, ['remote/org/model'], controller.signal);
+      expect(result).toBe(mode === 'available' ? preferred : mode === 'aborted' ? undefined : current);
+      expect(find).toHaveBeenCalledWith('remote', 'org/model');
+      expect(getApiKeyAndHeaders).toHaveBeenCalledWith(preferred);
+    },
+  );
+
   it('returns undefined on abort before or during lookup, never falling back', async () => {
     const { ctx, getAvailableOfType } = harness();
     const controller = new AbortController();
