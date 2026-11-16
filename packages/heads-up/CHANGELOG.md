@@ -1,5 +1,15 @@
 # @nicknisi/pi-heads-up
 
+## 0.3.0
+
+### Minor Changes
+
+- 5877c29: Split actionable Heads up warnings from non-urgent Insights, which now appear inline as persistent UI-only transcript entries without requiring dismissal.
+
+### Patch Changes
+
+- 82a1c44: Fall back to the current session model when the configured heads-up model is unavailable or its provider has no credentials.
+
 ## 0.2.2
 
 ### Patch Changes
