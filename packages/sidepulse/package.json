@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-sidepulse",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Report pi agent status to SidePulse LEDs: working, waiting for input, done",
   "keywords": [
     "pi",

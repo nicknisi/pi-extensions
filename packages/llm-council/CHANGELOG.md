@@ -1,5 +1,12 @@
 # @nicknisi/pi-llm-council
 
+## 0.4.5
+
+### Patch Changes
+
+- Updated dependencies [fcb686c]
+  - @nicknisi/pi-shared@0.10.0
+
 ## 0.4.4
 
 ### Patch Changes

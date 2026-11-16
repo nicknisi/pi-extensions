@@ -1,5 +1,12 @@
 # @nicknisi/pi-header
 
+## 0.1.14
+
+### Patch Changes
+
+- Updated dependencies [fcb686c]
+  - @nicknisi/pi-shared@0.10.0
+
 ## 0.1.13
 
 ### Patch Changes

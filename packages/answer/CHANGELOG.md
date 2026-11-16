@@ -1,5 +1,13 @@
 # @nicknisi/pi-answer
 
+## 0.3.3
+
+### Patch Changes
+
+- fcb686c: Use credential-aware preferred-model selection with fallback to the current session model across btw, session-name, recap, answer, and heads-up.
+- Updated dependencies [fcb686c]
+  - @nicknisi/pi-shared@0.10.0
+
 ## 0.3.2
 
 ### Patch Changes
