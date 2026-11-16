@@ -22,7 +22,8 @@
     "tools.ts",
     "tui-utils.ts",
     "searchable-select-list.ts",
-    "classifier.ts"
+    "classifier.ts",
+    "side-model.ts"
   ],
   "type": "module",
   "exports": {

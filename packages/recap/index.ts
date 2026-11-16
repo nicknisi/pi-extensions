@@ -1,3 +1,4 @@
+import { selectSideModel } from '@nicknisi/pi-shared';
 import { uuidv7 } from '@earendil-works/pi-ai';
 import {
   buildSessionContext,
@@ -28,12 +29,6 @@ const TICK_MS = 30_000;
 const MIN_BRANCH_LEN = 4;
 const MAX_CARD_LINES = 5;
 const MAX_TOOL_ARGS_CHARS = 200;
-
-let lastActivity = Date.now();
-let firedThisIdle = false;
-let timer: ReturnType<typeof setInterval> | null = null;
-let piRef: ExtensionAPI | null = null;
-let lastModel: ExtensionContext['model'] = undefined;
 
 function readConfig(): Config {
   try {
@@ -112,71 +107,83 @@ function capLines(text: string, max: number): string {
   return lines.slice(0, max).join('\n') + ' …';
 }
 
-async function generateSummary(ctx: ExtensionContext): Promise<string> {
-  const cfg = readConfig();
-  const configuredModel =
-    cfg.model && typeof cfg.model.provider === 'string' && typeof cfg.model.id === 'string'
-      ? ctx.modelRegistry.find(cfg.model.provider, cfg.model.id)
-      : undefined;
-  const model = configuredModel ?? ctx.model ?? lastModel;
-  if (!model) {
-    ctx.ui.notify('recap: no model available', 'warning');
-    return '';
-  }
-  // Active context only: compaction summary + kept messages, not pre-compaction history.
-  const conversation = buildConversation(convertToLlm(buildSessionContext(ctx.sessionManager.getBranch()).messages));
-  if (!conversation.trim()) return '';
-  const response = await ctx.modelRegistry.complete(
-    model,
-    {
-      messages: [
-        {
-          role: 'user',
-          content: [{ type: 'text', text: summaryPrompt(conversation) }],
-          timestamp: Date.now(),
-        },
-      ],
-    },
-    {
-      reasoningEffort: 'low',
-      cacheRetention: 'none',
-      sessionId: uuidv7(),
-    },
-  );
-  return response.content
-    .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
-    .map((c) => c.text)
-    .join('\n');
-}
-
-async function injectRecap(ctx: ExtensionContext) {
-  const summary = await generateSummary(ctx);
-  if (!summary) return;
-  piRef?.appendEntry(ENTRY_TYPE, { summary, ts: Date.now() });
-}
-
-async function maybeFire(ctx: ExtensionContext) {
-  if (!ctx.isIdle() || firedThisIdle) return;
-  const cfg = readConfig();
-  if (Date.now() - lastActivity < cfg.idleMinutes * 60_000) return;
-  const branch: Entry[] = ctx.sessionManager.getBranch();
-  if (branch.filter((e) => e.type === 'message').length < MIN_BRANCH_LEN) return;
-  // Nothing new since the last recap (e.g. a reopened session): don't re-fire.
-  const last = [...branch]
-    .reverse()
-    .find(
-      (e) =>
-        e.type === 'message' || e.type === 'custom_message' || (e.type === 'custom' && e.customType === ENTRY_TYPE),
-    );
-  if (last?.type === 'custom') return;
-  firedThisIdle = true;
-  await injectRecap(ctx);
-}
-
 export default function (pi: ExtensionAPI) {
-  piRef = pi;
+  let lastActivity = Date.now();
+  let firedThisIdle = false;
+  let timer: ReturnType<typeof setInterval> | null = null;
+  let lastModel: ExtensionContext['model'];
+
+  async function generateSummary(ctx: ExtensionContext): Promise<string> {
+    const cfg = readConfig();
+    const preferences =
+      cfg.model && typeof cfg.model.provider === 'string' && typeof cfg.model.id === 'string'
+        ? [`${cfg.model.provider}/${cfg.model.id}`]
+        : [];
+    const model = await selectSideModel(
+      {
+        get model() {
+          return ctx.model ?? lastModel;
+        },
+        modelRegistry: ctx.modelRegistry,
+      },
+      preferences,
+    );
+    if (!model) {
+      ctx.ui.notify('recap: no model available', 'warning');
+      return '';
+    }
+    // Active context only: compaction summary + kept messages, not pre-compaction history.
+    const conversation = buildConversation(convertToLlm(buildSessionContext(ctx.sessionManager.getBranch()).messages));
+    if (!conversation.trim()) return '';
+    const response = await ctx.modelRegistry.complete(
+      model,
+      {
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'text', text: summaryPrompt(conversation) }],
+            timestamp: Date.now(),
+          },
+        ],
+      },
+      {
+        reasoningEffort: 'low',
+        cacheRetention: 'none',
+        sessionId: uuidv7(),
+      },
+    );
+    return response.content
+      .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
+      .map((c) => c.text)
+      .join('\n');
+  }
+
+  async function injectRecap(ctx: ExtensionContext) {
+    const summary = await generateSummary(ctx);
+    if (!summary) return;
+    pi.appendEntry(ENTRY_TYPE, { summary, ts: Date.now() });
+  }
+
+  async function maybeFire(ctx: ExtensionContext) {
+    if (!ctx.isIdle() || firedThisIdle) return;
+    const cfg = readConfig();
+    if (Date.now() - lastActivity < cfg.idleMinutes * 60_000) return;
+    const branch: Entry[] = ctx.sessionManager.getBranch();
+    if (branch.filter((e) => e.type === 'message').length < MIN_BRANCH_LEN) return;
+    // Nothing new since the last recap (e.g. a reopened session): don't re-fire.
+    const last = [...branch]
+      .reverse()
+      .find(
+        (e) =>
+          e.type === 'message' || e.type === 'custom_message' || (e.type === 'custom' && e.customType === ENTRY_TYPE),
+      );
+    if (last?.type === 'custom') return;
+    firedThisIdle = true;
+    await injectRecap(ctx);
+  }
 
   pi.on('session_start', async (_e, ctx) => {
+    lastModel = ctx.model;
     if (ctx.mode !== 'tui') return;
     lastActivity = Date.now();
     firedThisIdle = false;
@@ -212,12 +219,16 @@ export default function (pi: ExtensionAPI) {
     lastModel = ctx.model ?? lastModel;
   });
 
-  pi.on('session_shutdown', async (_e, ctx) => {
+  pi.on('model_select', (event) => {
+    lastModel = event.model;
+  });
+
+  pi.on('session_shutdown', async () => {
+    lastModel = undefined;
     if (timer) {
       clearInterval(timer);
       timer = null;
     }
-    void ctx;
   });
 
   pi.registerCommand('recap', {

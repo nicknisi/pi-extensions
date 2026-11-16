@@ -27,7 +27,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from '@earendil-works/pi-tui';
-import { type Classifier, classifyBool, findClassifier } from '@nicknisi/pi-shared';
+import { type Classifier, classifyBool, findClassifier, selectSideModel } from '@nicknisi/pi-shared';
 import {
   type Kind,
   loadConfig,
@@ -36,7 +36,6 @@ import {
   MAX_EVENTS,
   MAX_KNOWN,
   MAX_OFFERED,
-  parseModelSpec,
   pushFront,
   readStore,
   updateStore,
@@ -293,22 +292,13 @@ export default function headsUp(pi: ExtensionAPI) {
   };
 
   const resolveModel = async (ctx: ExtensionContext, signal: AbortSignal) => {
-    const spec = config.model ? parseModelSpec(config.model) : undefined;
-    let configured: ExtensionContext['model'];
-    if (spec) {
-      try {
-        const available = await ctx.modelRegistry.getAvailableOfType('chat', spec.provider, { signal });
-        configured = available.find((model) => model.id === spec.id);
-      } catch {
-        // Failed credential lookups must not prevent using the session model.
-      }
-    }
+    const model = await selectSideModel(ctx, config.model ? [config.model] : [], signal);
     if (signal.aborted) return;
-    if (config.model && !configured && !warnedModel) {
+    if (config.model && (!model || `${model.provider}/${model.id}` !== config.model) && !warnedModel) {
       warnedModel = true;
       ctx.ui.notify(`heads-up: model ${config.model} unavailable; using the session model`, 'warning');
     }
-    return configured ?? ctx.model;
+    return model;
   };
 
   /** One tool-less side request over a digest of the session: its text and its cost in USD. */

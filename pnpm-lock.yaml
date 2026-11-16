@@ -77,7 +77,11 @@ importers:
         specifier: workspace:*
         version: link:../shared
 
-  packages/btw: {}
+  packages/btw:
+    dependencies:
+      '@nicknisi/pi-shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/checkpoint:
     devDependencies:
@@ -154,7 +158,11 @@ importers:
 
   packages/pin-last-prompt: {}
 
-  packages/recap: {}
+  packages/recap:
+    dependencies:
+      '@nicknisi/pi-shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/relay:
     dependencies:
@@ -164,7 +172,11 @@ importers:
 
   packages/save-md: {}
 
-  packages/session-name: {}
+  packages/session-name:
+    dependencies:
+      '@nicknisi/pi-shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/shared: {}
 

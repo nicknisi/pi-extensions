@@ -38,6 +38,7 @@
  */
 
 import type { Message } from '@earendil-works/pi-ai';
+import { selectSideModel } from '@nicknisi/pi-shared';
 import {
   getAgentDir,
   getPackageDir,
@@ -281,23 +282,22 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
   }
 
   async function generateLlmTitle(ctx: ExtensionContext, userText: string): Promise<string | null> {
-    const model = resolveTitleModel(ctx);
-    if (!model) return null;
-    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-    if (!auth.ok) return null;
-
     const controller = new AbortController();
     titleAbort = controller;
-
-    const systemPrompt = `You generate concise session titles for a coding agent. Given the user's first prompt, reply with ONLY a short title of at most ${config.llmMaxWords} words. No quotes, no trailing punctuation, no explanation.`;
-    const body = `User's first prompt:\n${truncate(userText, 1000)}`;
-    const userMessage: Message = {
-      role: 'user',
-      content: [{ type: 'text', text: body }],
-      timestamp: Date.now(),
-    };
-
     try {
+      const model = await resolveTitleModel(ctx, controller.signal);
+      if (!model || controller.signal.aborted) return null;
+      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+      if (!auth.ok || controller.signal.aborted) return null;
+
+      const systemPrompt = `You generate concise session titles for a coding agent. Given the user's first prompt, reply with ONLY a short title of at most ${config.llmMaxWords} words. No quotes, no trailing punctuation, no explanation.`;
+      const body = `User's first prompt:\n${truncate(userText, 1000)}`;
+      const userMessage: Message = {
+        role: 'user',
+        content: [{ type: 'text', text: body }],
+        timestamp: Date.now(),
+      };
+
       const response = await ctx.modelRegistry.complete(
         model,
         { systemPrompt, messages: [userMessage] },
@@ -333,19 +333,16 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
   let warnedBadModel = false;
 
   /** Resolve the model for title generation: configured cheap model, else session model. */
-  function resolveTitleModel(ctx: ExtensionContext) {
-    if (config.llmModel) {
-      const slash = config.llmModel.indexOf('/');
-      const provider = slash > 0 ? config.llmModel.slice(0, slash) : '';
-      const modelId = slash > 0 ? config.llmModel.slice(slash + 1) : '';
-      const found = provider && modelId ? ctx.modelRegistry.find(provider, modelId) : undefined;
-      if (found) return found;
+  async function resolveTitleModel(ctx: ExtensionContext, signal: AbortSignal) {
+    const model = await selectSideModel(ctx, config.llmModel ? [config.llmModel] : [], signal);
+    if (signal.aborted) return undefined;
+    if (config.llmModel && (!model || `${model.provider}/${model.id}` !== config.llmModel)) {
       if (!warnedBadModel && ctx.hasUI) {
         warnedBadModel = true;
-        ctx.ui.notify(`session-name: model "${config.llmModel}" not found; using session model`, 'warning');
+        ctx.ui.notify(`session-name: model "${config.llmModel}" unavailable; using session model`, 'warning');
       }
     }
-    return ctx.model;
+    return model;
   }
 
   // ── /sn — set / show / clear ─────────────────────────────────────────
