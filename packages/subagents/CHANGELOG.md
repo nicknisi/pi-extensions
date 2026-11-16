@@ -1,5 +1,12 @@
 # @nicknisi/pi-subagents
 
+## 0.6.1
+
+### Patch Changes
+
+- Updated dependencies [fcb686c]
+  - @nicknisi/pi-shared@0.10.0
+
 ## 0.6.0
 
 ### Minor Changes

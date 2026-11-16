@@ -1,5 +1,12 @@
 # @nicknisi/pi-fast
 
+## 0.3.4
+
+### Patch Changes
+
+- Updated dependencies [fcb686c]
+  - @nicknisi/pi-shared@0.10.0
+
 ## 0.3.3
 
 ### Patch Changes
