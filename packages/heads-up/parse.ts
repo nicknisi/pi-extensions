@@ -1,4 +1,4 @@
-export type Tag = 'You should know' | 'Heads up';
+export type Tag = 'Insights' | 'Heads up';
 
 export type Note = { learn: string; tag: Tag; title: string; body: string };
 
@@ -17,7 +17,7 @@ const toTag = (raw: string): Tag | null => {
     .trim()
     .toLowerCase();
   if (plain === 'heads up') return 'Heads up';
-  if (plain === 'you should know') return 'You should know';
+  if (plain === 'insights' || plain === 'you should know') return 'Insights';
   return null;
 };
 

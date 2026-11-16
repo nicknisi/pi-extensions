@@ -1,18 +1,19 @@
 # @nicknisi/pi-heads-up
 
-A side agent that reads the session during long tasks and shows at most one short note above the editor: something with consequences you would plausibly miss. Its default answer is nothing.
+A side agent that reads the session during long tasks and flags things with consequences you would plausibly miss. Actionable **Heads up** warnings stay above the editor; non-urgent **Insights** appear inline in the transcript. Its default answer is nothing.
 
-Ported from the Claude Code `heads-up` mod, itself a fork of Claude Code's built-in "You should know" mod. The prompt, reply format, parser, thresholds, and actions are carried over. The parts that depend on Claude Code internals are rebuilt on pi APIs (see [Differences from the Claude Code mod](#differences-from-the-claude-code-mod)).
+Ported from the Claude Code `heads-up` mod, itself a fork of Claude Code's built-in "You should know" mod. The thresholds and warning actions are carried over; background knowledge is presented as inline Insights instead of another pinned warning. The parts that depend on Claude Code internals are rebuilt on pi APIs (see [Differences from the Claude Code mod](#differences-from-the-claude-code-mod)).
 
 ## What it adds
 
-| Surface       | Name                                | Notes                                                             |
-| ------------- | ----------------------------------- | ----------------------------------------------------------------- |
-| Widget        | `heads-up` (above editor)           | The collapsed note: `<tag> · <learn>` plus the shortcut hint      |
-| Shortcut      | `alt+h` (configurable)              | Opens the note's action panel in place of the editor              |
-| Slash command | `/heads-up [on\|off\|check\|show]`  | Status, toggle, force a check, open the panel                     |
-| Config file   | `~/.pi/agent/configs/heads-up.json` | Thresholds, model, shortcut, digest budget                        |
-| State file    | `~/.pi/agent/heads-up/store.json`   | Known topics, recent offers, on/off, feedback events (local only) |
+| Surface          | Name                                | Notes                                                             |
+| ---------------- | ----------------------------------- | ----------------------------------------------------------------- |
+| Widget           | `heads-up` (above editor)           | One actionable warning plus the shortcut hint                     |
+| Transcript entry | `heads-up-insight`                  | A persistent, UI-only Insight with its full explanation           |
+| Shortcut         | `alt+h` (configurable)              | Opens the note's action panel in place of the editor              |
+| Slash command    | `/heads-up [on\|off\|check\|show]`  | Status, toggle, force a check, open the panel                     |
+| Config file      | `~/.pi/agent/configs/heads-up.json` | Thresholds, model, shortcut, digest budget                        |
+| State file       | `~/.pi/agent/heads-up/store.json`   | Known topics, recent offers, on/off, feedback events (local only) |
 
 TUI only. In print, JSON, and RPC modes the extension does nothing.
 
@@ -25,7 +26,7 @@ TUI only. In print, JSON, and RPC modes the extension does nothing.
 - A run counts as **long** at `minTools` tool calls (default 8) or `minSeconds` (default 120).
 - `agent_end` for a run that ended with an answer (not aborted, not an error) requests a check if the run was long.
 - A 10 s timer, started on `session_start`, runs a requested check. It also runs one mid-run once the running run counts as long.
-- Gates: one check in flight, `cooldownSeconds` between checks (default 300), no note already showing, not turned off.
+- Gates: one check in flight, `cooldownSeconds` between checks (default 300), no Heads up warning already showing, not turned off. Inline Insights do not block later checks.
 
 The check runs from the timer, never inside an event handler, so a slow side request never holds up the agent loop.
 
@@ -47,7 +48,7 @@ The digest goes to the configured `model` (default: the session model) as one to
 
 Before an automatic check sends the digest to the side model, a classifier answers one yes/no question about the same digest: is there something with real consequences the person will plausibly miss? It also gets the recently offered and known topics so it can skip them. TypeSafe's Jev answers in about a second for a fraction of a cent, while the side request is a full uncached call to the session model.
 
-- **Shadow mode (default):** the classifier scores every automatic check, and the score is logged on the `proposed` event, or on a `none` event when the check found nothing. Nothing is skipped. Use the log to pick a threshold before you turn on enforcement.
+- **Shadow mode (default):** the classifier scores every automatic check, and the score is logged on the `proposed` (warning) or `insight` event, or on a `none` event when the check found nothing. Nothing is skipped. Use the log to pick a threshold before you turn on enforcement.
 - **Enforced (`gateEnforce: true`):** a check that scores below `gateThreshold` skips the side request and logs a `gated` event.
 - **No classifier:** with no credentials for any of the `gateModels`, an older pi without classifier support, or an empty `gateModels`, there is no gate and checks run as before. A classifier call that fails also lets the check run.
 
@@ -65,20 +66,22 @@ or
 
 ```
 learn: <~20 words, ends with a period>
-tag: Heads up | You should know
+tag: Heads up | Insights
 explain:
 **<title stating the takeaway>**
 <≤120 words>
 ```
 
 - **Heads up**: about this session's work, such as a decision the agent made in passing or a result that may be wrong.
-- **You should know**: how a system or concept works, when understanding it matters for the work.
+- **Insights**: non-urgent background knowledge about how a system or concept works, when understanding it matters for the work. A risk or decision requiring action belongs under Heads up instead.
 
-The parser tolerates bold labels, bullets, quotes, smart quotes, and a `#` heading title. Anything incomplete is no note, so a half note never shows.
+The parser tolerates bold labels, bullets, quotes, smart quotes, and a `#` heading title. Anything incomplete is no note, so a half note never shows. Replies using the old `You should know` tag are treated as Insights.
 
 ## Usage
 
-A note appears above the editor as a bordered card in the tag's color: amber `⚑ Heads up` for this session's work, accent `✦ You should know` for background knowledge.
+### Heads up: actionable warnings
+
+A Heads up warning appears above the editor as an amber `⚑ Heads up` card. Its existing panel and actions remain unchanged.
 
 ```
 ╭─ ⚑ Heads up ─────────────────────────────────────────────── alt+h to open ─╮
@@ -113,6 +116,21 @@ Rewrites are side requests too, over a fresh digest. The panel remembers the exp
 "Make a page" and "Ask in chat" send a user message to the main agent, queued as a follow-up when the agent is busy. "Make a page" asks for an artifact, which works best with [`@nicknisi/pi-artifacts`](../artifacts/).
 
 Submitting a prompt while a note is showing clears the note and logs it as `ignored_submit`.
+
+### Insights: inline background knowledge
+
+An Insight appears in the transcript where the check finishes, with its title and full explanation:
+
+```text
+✦ Insights
+Transactions make migration failures recoverable
+
+Wrapping the migration in a transaction rolls back earlier statements when a later one fails.
+```
+
+Insights scroll with the conversation and remain in the session when it is reopened. They do not occupy the above-editor widget, require dismissal, or open with `alt+h`. There are no panel actions or rewrite requests for Insights. `/heads-up off` stops new checks but does not erase past Insights.
+
+Insights are custom entries, not model messages: their text never enters the main agent's context or the next session digest. Their topics still enter the recent-offers list to discourage repeats, and their gate scores and costs are logged as `insight` events. Existing thresholds, cooldowns, classifier settings, and model fallback apply to both kinds of note. No extra model request is needed to classify or render them.
 
 ### Command
 
@@ -167,9 +185,9 @@ Invalid values fall back to the defaults. An unknown or unavailable `model` (inc
 | `disabled` | Set by `/heads-up off`                           |
 | `events`   | `{ ts, kind, learn, score?, cost? }`, last 2000  |
 
-Event kinds: `proposed`, `explained`, `page`, `chat`, `known`, `dismissed`, `ignored_submit`, `none` (a check that found nothing), and `gated` (a check the classifier gate skipped). `score` is the gate's probability for the check, present only when a classifier answered. `cost` is the check's side-request cost in USD at catalog prices, when the provider reports usage. These side requests are not part of the session, so they never show in the footer's cost; `/heads-up` shows the logged total. Use them to tune: a high dismiss or ignore rate means the bar is too low, and engaged notes that scored low mean the gate threshold is too high. `/heads-up` shows the tally.
+Event kinds: `proposed`, `explained`, `page`, `chat`, `known`, `dismissed`, `ignored_submit`, `none` (a check that found nothing), `insight` (background knowledge posted inline), and `gated` (a check the classifier gate skipped). `score` is the gate's probability for the check, present only when a classifier answered. `cost` is the check's side-request cost in USD at catalog prices, when the provider reports usage. These side requests are not part of the session, so they never show in the footer's cost; `/heads-up` shows the logged total. Use them to tune: a high dismiss or ignore rate means the bar is too low, and engaged notes that scored low mean the gate threshold is too high. `/heads-up` shows the tally.
 
-The note itself lives in memory and does not survive a restart.
+The active Heads up warning lives in memory and does not survive a restart. Insights are stored in the session as `heads-up-insight` custom entries and render again when that session is reopened.
 
 ## Differences from the Claude Code mod
 

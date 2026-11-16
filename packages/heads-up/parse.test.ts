@@ -25,7 +25,11 @@ describe('parse', () => {
 
   it('tolerates bold labels and a bold tag', () => {
     const note = parse(NOTE.replace('tag: Heads up', '**tag**: **You should know**').replace('learn:', '- **learn**:'));
-    expect(note?.tag).toBe('You should know');
+    expect(note?.tag).toBe('Insights');
+  });
+
+  it('reads the Insights tag', () => {
+    expect(parse(NOTE.replace('tag: Heads up', 'tag: Insights'))?.tag).toBe('Insights');
   });
 
   it('tolerates smart quotes and a heading title', () => {

@@ -1,9 +1,17 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { stripVTControlCharacters } from 'node:util';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import type { Component } from '@earendil-works/pi-tui';
+import {
+  initTheme,
+  SessionManager,
+  type EntryRenderer,
+  type ExtensionAPI,
+  type ExtensionContext,
+  type Theme,
+} from '@earendil-works/pi-coding-agent';
+import { type Component, visibleWidth } from '@earendil-works/pi-tui';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readStore } from './config.js';
 import headsUp from './index.js';
@@ -13,6 +21,12 @@ tag: Heads up
 explain:
 **The migration was never tested**
 The agent wrote the migration but did not run it.`;
+
+const INSIGHT = `learn: Database transactions keep a failed migration from leaving partially applied schema changes.
+tag: Insights
+explain:
+**Transactions make migration failures recoverable**
+Wrapping the migration in a transaction rolls back earlier statements when a later one fails.`;
 
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
 type Factory = (tui: unknown, theme: unknown, kb?: unknown, done?: (v: unknown) => void) => Component;
@@ -29,16 +43,19 @@ const withClassifier = (probability?: number) => ({
   ),
 });
 
-function harness(reply = NOTE, registry: Record<string, unknown> = {}) {
+function harness(reply = NOTE, registry: Record<string, unknown> = {}, sessionManager = SessionManager.inMemory()) {
   const handlers = new Map<string, Handler>();
   const commands = new Map<string, (args: string, ctx: ExtensionContext) => Promise<void>>();
   const shortcuts = new Map<string, (ctx: ExtensionContext) => Promise<void>>();
   const sendUserMessage = vi.fn();
+  sessionManager.appendMessage({ role: 'user', content: 'do the thing', timestamp: Date.now() });
+  const appendEntry = vi.fn((type: string, data: unknown) => sessionManager.appendCustomEntry(type, data));
+  const renderers = new Map<string, EntryRenderer>();
   const notify = vi.fn();
   let widget: Factory | undefined;
   let panelKeys: string[] = [];
   const complete = vi.fn(
-    async () =>
+    async (..._args: Parameters<ExtensionContext['modelRegistry']['complete']>) =>
       ({
         content: [{ type: 'text', text: reply }],
         stopReason: 'stop',
@@ -53,6 +70,8 @@ function harness(reply = NOTE, registry: Record<string, unknown> = {}) {
     registerShortcut: (key: string, s: { handler: (ctx: ExtensionContext) => Promise<void> }) =>
       shortcuts.set(key, s.handler),
     sendUserMessage,
+    appendEntry,
+    registerEntryRenderer: (name: string, renderer: EntryRenderer) => renderers.set(name, renderer),
   } as unknown as ExtensionAPI;
 
   const ctx = {
@@ -60,9 +79,7 @@ function harness(reply = NOTE, registry: Record<string, unknown> = {}) {
     model: { provider: 'p', id: 'm' },
     isIdle: () => true,
     modelRegistry: { complete, find: () => undefined, ...registry },
-    sessionManager: {
-      buildContextEntries: () => [{ type: 'message', message: { role: 'user', content: 'do the thing' } }],
-    },
+    sessionManager,
     ui: {
       notify,
       setWidget: (_key: string, content: Factory | undefined) => {
@@ -77,7 +94,7 @@ function harness(reply = NOTE, registry: Record<string, unknown> = {}) {
   } as unknown as ExtensionContext;
 
   headsUp(pi);
-  const fire = (name: string, event: unknown = {}) => handlers.get(name)!(event, ctx);
+  const fire = (name: string, event: unknown = {}) => handlers.get(name)?.(event, ctx);
   const band = () => widget?.({}, theme).render(200).join('\n');
   const press = async (...keys: string[]) => {
     panelKeys = keys;
@@ -88,7 +105,20 @@ function harness(reply = NOTE, registry: Record<string, unknown> = {}) {
     for (let i = 0; i < tools; i += 1) await fire('tool_execution_start');
     await fire('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop', content: [] }] });
   };
-  return { band, commands, complete, ctx, fire, longTurn, notify, press, sendUserMessage };
+  return {
+    appendEntry,
+    band,
+    commands,
+    complete,
+    ctx,
+    fire,
+    longTurn,
+    notify,
+    press,
+    renderers,
+    sendUserMessage,
+    sessionManager,
+  };
 }
 
 let dir: string;
@@ -115,10 +145,118 @@ describe('heads-up', () => {
     await vi.advanceTimersByTimeAsync(10_000);
 
     expect(h.complete).toHaveBeenCalledTimes(1);
+    expect(h.appendEntry).not.toHaveBeenCalled();
     expect(h.band()).toContain('migration test');
     expect(readStore().offered).toEqual(['The agent skipped the migration test because it needs a live database.']);
     expect(readStore().events.map((e) => e.kind)).toEqual(['proposed']);
     expect(readStore().events[0]?.cost).toBe(0.12);
+  });
+
+  it('posts an Insight inline without occupying the heads-up widget or sending a model message', async () => {
+    const h = harness(INSIGHT, withClassifier(0.7));
+    await h.fire('session_start');
+    await h.longTurn();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(h.appendEntry).toHaveBeenCalledExactlyOnceWith(
+      'heads-up-insight',
+      '**Transactions make migration failures recoverable**\n\nWrapping the migration in a transaction rolls back earlier statements when a later one fails.',
+    );
+    expect(h.band()).toBeUndefined();
+    expect(h.sendUserMessage).not.toHaveBeenCalled();
+    expect(h.ctx.sessionManager.getBranch()).toContainEqual(
+      expect.objectContaining({ type: 'custom', customType: 'heads-up-insight' }),
+    );
+    expect(h.sessionManager.buildSessionContext().messages).toEqual([
+      { role: 'user', content: 'do the thing', timestamp: expect.any(Number) },
+    ]);
+    expect(readStore().offered).toEqual([
+      'Database transactions keep a failed migration from leaving partially applied schema changes.',
+    ]);
+    expect(readStore().events).toMatchObject([{ kind: 'insight', score: 0.7, cost: 0.12 }]);
+
+    await h.fire('input', { source: 'interactive', text: 'next' });
+    expect(readStore().events.map((e) => e.kind)).toEqual(['insight']);
+    await h.longTurn();
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(h.complete).toHaveBeenCalledTimes(2);
+    expect(h.appendEntry).toHaveBeenCalledTimes(2);
+    expect(h.complete.mock.calls[1]?.[1].messages[0]?.content).toEqual([
+      expect.objectContaining({ text: expect.stringContaining('Already offered recently; skip these') }),
+    ]);
+  });
+
+  it.each(['session_shutdown', 'session_tree'])('does not post a stale Insight after %s', async (event) => {
+    const h = harness(INSIGHT);
+    let finish!: (reply: AssistantMessage) => void;
+    h.complete.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    await h.fire('session_start');
+    await h.longTurn();
+    await vi.advanceTimersByTimeAsync(10_000);
+    if (event === 'session_tree') {
+      h.sessionManager.resetLeaf();
+      h.sessionManager.appendMessage({ role: 'user', content: 'a different branch', timestamp: Date.now() });
+    }
+    await h.fire(event);
+    finish({ content: [{ type: 'text', text: INSIGHT }], stopReason: 'stop' } as AssistantMessage);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.appendEntry).not.toHaveBeenCalled();
+    expect(readStore().events).toEqual([]);
+    expect(readStore().offered).toEqual([]);
+  });
+
+  it('a manual Insight does not report that nothing was found or open a panel', async () => {
+    const h = harness(INSIGHT);
+    await h.commands.get('heads-up')!('check', h.ctx);
+    expect(h.appendEntry).toHaveBeenCalledTimes(1);
+    expect(h.notify).not.toHaveBeenCalledWith('heads-up: nothing worth flagging', 'info');
+    await h.press();
+    expect(h.notify).toHaveBeenLastCalledWith('heads-up: nothing to show', 'info');
+  });
+
+  it('keeps Insights when a saved session is reopened without adding model context', async () => {
+    const h = harness(INSIGHT, {}, SessionManager.create(dir, join(dir, 'sessions')));
+    await h.commands.get('heads-up')!('check', h.ctx);
+    const reopened = SessionManager.open(h.sessionManager.getSessionFile()!);
+    expect(reopened.getBranch()).toContainEqual(
+      expect.objectContaining({
+        type: 'custom',
+        customType: 'heads-up-insight',
+        data: expect.stringContaining('Transactions make migration failures recoverable'),
+      }),
+    );
+    expect(reopened.buildSessionContext().messages).toEqual(h.sessionManager.buildSessionContext().messages);
+    expect(reopened.buildSessionContext().messages).toHaveLength(1);
+  });
+
+  it('renders a persisted Insight with its full explanation at narrow widths', () => {
+    initTheme('dark');
+    const h = harness();
+    const renderer = h.renderers.get('heads-up-insight')!;
+    const entry = {
+      type: 'custom' as const,
+      customType: 'heads-up-insight',
+      id: 'insight',
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      data: '**Recoverable migrations**\n\nRoll back partial schema changes.',
+    };
+    const component = renderer(entry, { expanded: false }, theme as unknown as Theme)!;
+    const lines = component.render(30);
+    expect(lines.every((line) => visibleWidth(line) <= 30)).toBe(true);
+    const text = stripVTControlCharacters(lines.join('\n'));
+    expect(text).toContain('✦ Insights');
+    expect(text).toContain('Recoverable migrations');
+    expect(text).toContain('Roll back partial schema');
+    expect(text).not.toContain('alt+h');
+    component.invalidate();
+    expect(stripVTControlCharacters(component.render(80).join('\n'))).toContain('Roll back partial schema changes.');
+    expect(renderer({ ...entry, data: undefined }, { expanded: false }, theme as unknown as Theme)).toBeUndefined();
   });
 
   it.each(['unconfigured', 'missing', 'lookup fails'])('falls back to the session model when %s', async (reason) => {
