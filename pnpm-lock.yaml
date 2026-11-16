@@ -180,6 +180,8 @@ importers:
 
   packages/shared: {}
 
+  packages/sidepulse: {}
+
   packages/spinner: {}
 
   packages/stash: {}
