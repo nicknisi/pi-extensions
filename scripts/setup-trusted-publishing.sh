@@ -35,7 +35,17 @@ publish_pkg() {
   else
     echo "== publishing $name@$version"
     if ! (cd "$ROOT/packages/$dir" && pnpm publish --access public --no-git-checks --registry="$REGISTRY"); then
-      if curl -sf "$REGISTRY/$(echo "$name" | sed 's|/|%2f|')/$version" >/dev/null 2>&1; then
+      # A publish that landed can still report 409 ('previously staged') and take
+      # a while to show on the read replicas, so poll before calling it a failure.
+      local found=""
+      for _ in 1 2 3 4 5 6; do
+        if curl -sf "$REGISTRY/$(echo "$name" | sed 's|/|%2f|')/$version" >/dev/null 2>&1; then
+          found=1
+          break
+        fi
+        sleep 5
+      done
+      if [ -n "$found" ]; then
         echo "== $name@$version showed up after the failed publish (replica lag) — continuing"
       else
         echo "!! publish of $name failed for real" >&2
