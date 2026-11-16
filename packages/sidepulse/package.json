@@ -1,0 +1,37 @@
+{
+  "name": "@nicknisi/pi-sidepulse",
+  "version": "0.0.0",
+  "description": "Report pi agent status to SidePulse LEDs: working, waiting for input, done",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-package",
+    "sidepulse"
+  ],
+  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/sidepulse#readme",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicknisi/pi-extensions.git",
+    "directory": "packages/sidepulse"
+  },
+  "files": [
+    "dist",
+    "index.ts"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
