@@ -468,9 +468,6 @@ async function runCouncil(
   };
 }
 
-// ── Live progress bridge (renderCall workaround for isPartial bug) ────────
-let liveDetails: CouncilDetails | null = null;
-
 // ── Tool registration ────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
@@ -714,7 +711,6 @@ export default function (pi: ExtensionAPI) {
       const council = applySelection(currentCouncil(ctx), overrides);
       signal?.throwIfAborted();
       return runCouncil(subagents, params.question, ctx.cwd, council, signal, (details) => {
-        liveDetails = details;
         const stageLabels: Record<string, string> = {
           members: CONFIG.shared.status.waitingLabel,
           chairman: CONFIG.shared.status.synthesizingLabel,
@@ -743,33 +739,14 @@ export default function (pi: ExtensionAPI) {
 
       if (!ctx?.isPartial) {
         clearSpinner(ctx);
-        liveDetails = null;
         return makeText(ctx?.lastComponent, toolHeader('LLM Council', summary, theme));
       }
 
+      // Header only: the tree is rendered solely by renderResult. pi keeps the
+      // renderCall component on screen alongside renderResult once the first
+      // onUpdate fires, so rendering the tree here too shows it twice.
       const frame = ensureSpinner(ctx);
-      const lines = [toolHeader('LLM Council', summary, theme, spinnerDot(theme, frame)), ''];
-
-      // Live progress from onUpdate
-      if (!liveDetails) {
-        lines.push(
-          indentLine(
-            branchLine(applyColor(theme, CONFIG.shared.status.workingColor, CONFIG.shared.status.workingLabel), theme),
-          ),
-        );
-        return makeText(ctx.lastComponent, lines.join('\n'));
-      }
-      const details = liveDetails;
-      lines.push(
-        ...renderMemberTree(details, theme, frame, {
-          memberSubLine: (m) => memberLiveSubLine(m, theme),
-          chairmanSubLine:
-            details.stage === 'chairman' && details.chairman?.status === 'working'
-              ? workingLine(theme, details.chairman.usage, CONFIG.shared.status.synthesizingLabel)
-              : applyColor(theme, CONFIG.shared.status.workingColor, CONFIG.shared.status.waitingLabel),
-        }),
-      );
-      return makeText(ctx.lastComponent, lines.join('\n'));
+      return makeText(ctx.lastComponent, toolHeader('LLM Council', summary, theme, spinnerDot(theme, frame)));
     },
 
     renderResult(result, options, theme, ctx) {
