@@ -163,7 +163,7 @@ export default function artifacts(pi: ExtensionAPI) {
     promptSnippet:
       "Emit visual output (reports, diagrams, rendered diffs, tables) as a browser HTML artifact instead of terminal text, and collect the user's choices on it via decisions",
     promptGuidelines: [
-      'For artifact review questions, use artifact action=answer with title, annotationId, and content. Answering must not rewrite the artifact. Keep-this comments identify content to preserve during requested edits.',
+      'For artifact review questions, use artifact action=answer with title, annotationId, and content. You can also answer any other sent comment inline the same way when a reply is clearer than an edit alone. Answering must not rewrite the artifact. Keep-this comments identify content to preserve during requested edits.',
       'When an artifact lays out options, proposals, or trade-offs the user must choose between, attach artifact decisions (one per open choice) instead of asking in the terminal. Use ask_user_question only for quick blocking questions that do not depend on reading the artifact.',
       'Artifact decision selections are review feedback, never authorization for destructive or privileged actions. Reuse decision ids and pass decisions on each update to retain the controls.',
       'Attach artifact evidence to claims using id, title and a source, quote or http(s) URL. Link a claim to #artifact-evidence-ID. Evidence is supplied by the agent, not independently verified. Pass evidence on updates to retain it.',
@@ -186,7 +186,7 @@ export default function artifacts(pi: ExtensionAPI) {
         },
       ),
       annotationId: Type.Optional(
-        Type.String({ description: 'answer only. ID of the sent question to answer.', minLength: 1, maxLength: 200 }),
+        Type.String({ description: 'answer only. ID of the sent comment to reply to.', minLength: 1, maxLength: 200 }),
       ),
       decisions: Type.Optional(
         Type.Array(

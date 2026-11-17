@@ -183,13 +183,13 @@ export function annotationState(slug: string, cwd = process.cwd()): { annotation
   return { annotations, revision: createHash('sha256').update(JSON.stringify(annotations)).digest('hex') };
 }
 
-/** Add an answer to a sent question without touching the artifact itself. */
+/** Reply inline to any sent comment without touching the artifact itself. */
 export function answerQuestion(slug: string, id: string, reply: string): void {
   if (!reply.trim() || reply.length > 20000) throw new Error('answer must contain 1 to 20000 characters');
   const list = readAnnotations(slug);
-  const question = list.find((a) => a.id === id && a.intent === 'question' && a.sentAt);
-  if (!question) throw new Error('no sent question with that annotationId');
-  question.reply = reply.trim();
+  const target = list.find((a) => a.id === id && a.sentAt);
+  if (!target) throw new Error('no sent comment with that annotationId');
+  target.reply = reply.trim();
   writeAnnotations(slug, list);
 }
 
@@ -424,6 +424,10 @@ export function composeFeedback(
       '',
     );
   }
+  parts.push(
+    'Any comment can get an inline reply the same way (action "answer" with its annotationId) when a reply explains more clearly than an edit alone, for example to push back or explain a change.',
+    '',
+  );
   if (anns.some((a) => a.intent === 'keep'))
     parts.push('Keep this: preserve the marked content when making requested revisions.', '');
   if (anns.some((a) => a.intent === 'decision'))

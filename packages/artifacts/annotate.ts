@@ -917,7 +917,7 @@ const PANEL_JS = `function aaPanel(channel, cfg) {
       var intent = '<span class="intent-label">' + escapeHtml(a.intent === "keep" ? "Keep this" : a.intent === "question" ? "Question" : a.intent === "decision" ? "Decision" : "Comment") + '</span>';
       var body = state.editing === i ? '<textarea aria-label="Edit comment" data-edittext>' + escapeHtml(a.comment) + '</textarea><div class="actions"><button type="button" class="link" data-editsave="' + i + '">Save</button><button type="button" class="link" data-editcancel>Cancel</button></div>' : '<div class="comment md-preview">' + (a._html || escapeHtml(a.comment)) + '</div>';
       if (!STATIC && !a.sentAt && state.editing !== i) body += '<div class="actions"><button type="button" class="link" data-edit="' + i + '">Edit</button><button type="button" class="link" data-del="' + i + '">Delete</button></div>';
-      if (a.sentAt && a.intent === "question") body += '<div class="reply">' + escapeHtml(a.reply ? "Agent: " + a.reply : "Waiting for the agent’s answer") + '</div>';
+      if (a.sentAt && (a.reply || a.intent === "question")) body += '<div class="reply">' + escapeHtml(a.reply ? "Agent: " + a.reply : "Waiting for the agent’s answer") + '</div>';
       var location = a.quote || a.element ? '<button type="button" class="quote link" data-scroll="' + i + '">' + anchor + '</button>' : '<div class="quote">' + anchor + '</div>';
       return '<div class="item" data-i="' + i + '"><div class="item-meta">' + intent + (a._stale ? '<span class="stale">Original content changed</span>' : '') + '</div>' + location + body + '</div>';
     }
