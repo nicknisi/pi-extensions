@@ -106,7 +106,9 @@ it('sends general, keep, element, question and decision feedback once and preser
   answerQuestion(slug, 'question', 'Because it is simpler.');
   expect(readAnnotations(slug).find((a) => a.id === 'question')?.reply).toBe('Because it is simpler.');
   expect(readFileSync(artifactPath(slug), 'utf8')).toBe(original);
-  expect(() => answerQuestion(slug, 'general', 'Wrong target')).toThrow();
+  answerQuestion(slug, 'general', 'Replying to a plain comment.');
+  expect(readAnnotations(slug).find((a) => a.id === 'general')?.reply).toBe('Replying to a plain comment.');
+  expect(() => answerQuestion(slug, 'missing', 'Wrong target')).toThrow('no sent comment');
   const hydration = await (await fetch(`${base}/${slug}.html`)).text();
   expect(hydration).toContain('Because it is simpler.');
   const shared = bakeAnnotations(slug)!;
