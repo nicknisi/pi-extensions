@@ -1,5 +1,11 @@
 # @nicknisi/pi-artifacts
 
+## 1.8.0
+
+### Minor Changes
+
+- f4e0041: The `answer` action can now reply inline to any sent review comment, not just questions, and the review panel shows those replies.
+
 ## 1.7.0
 
 ### Minor Changes

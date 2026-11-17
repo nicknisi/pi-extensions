@@ -1,5 +1,11 @@
 # @nicknisi/pi-llm-council
 
+## 0.4.6
+
+### Patch Changes
+
+- a29e2a9: Fix the `llm_council` tool rendering the member/chairman progress tree twice while running. The tool header now shows only the spinner, and the live tree is drawn once by the result renderer. This also removes module-level progress state that concurrent council calls could share.
+
 ## 0.4.5
 
 ### Patch Changes
