@@ -2018,7 +2018,11 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
             () => done(undefined),
           );
         },
-        { overlay: true, overlayOptions: { width: '80%', maxHeight: '75%', anchor: 'center' } },
+        {
+          overlay: true,
+          overlayOptions: { width: '80%', maxHeight: '75%', anchor: 'center' },
+          blocked: { kind: 'permission', message: 'Review pending patches' },
+        },
       );
     },
   });

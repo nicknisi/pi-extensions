@@ -591,9 +591,10 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const answersResult = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-      return new AnswerComponent(extractionOutcome.result.questions, tui, theme, done);
-    });
+    const answersResult = await ctx.ui.custom<string | null>(
+      (tui, theme, _kb, done) => new AnswerComponent(extractionOutcome.result.questions, tui, theme, done),
+      { blocked: { kind: 'question', message: 'Answer the questions' } },
+    );
 
     if (answersResult === null) {
       ctx.ui.notify('Cancelled', 'info');
