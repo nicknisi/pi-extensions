@@ -186,3 +186,22 @@ describe('randomVerb', () => {
     expect(randomVerb(['', '  '])).toBe('Working');
   });
 });
+
+describe('prototype keys', () => {
+  it('warn as unknown instead of reading Object.prototype', () => {
+    const run = () =>
+      loadFrom({
+        constructor: 1,
+        box: { toString: 'x' },
+        items: { branch: { constructor: 'x', toString: 1 } },
+        prompt: { states: { typing: { constructor: 'x' } } },
+        spinner: { frames: 'constructor' },
+        style: 'toString',
+      });
+    expect(run).not.toThrow();
+    const { config, warnings } = run();
+    expect(warnings.some((w) => w.includes('items.branch.constructor'))).toBe(true);
+    expect(config.style).toBe('classic');
+    expect(config.items.branch).toEqual({});
+  });
+});

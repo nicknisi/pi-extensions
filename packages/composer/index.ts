@@ -220,9 +220,11 @@ export default function composer(pi: ExtensionAPI) {
   function loadKeeping(ctx: ExtensionContext): LoadResult {
     const next = load(sessionStyle);
     report(ctx, next);
-    if (next.unreadable && hasLoaded) {
+    // A session style shows the preset as shipped and never reads composer.json,
+    // so only a config that comes from the file is kept back.
+    if (next.unreadable && hasLoaded && !sessionStyle) {
       ctx.ui.notify('composer: kept the previous config until composer.json parses again', 'warning');
-      return next;
+      return { ...next, kept: true };
     }
     loaded = next;
     hasLoaded = true;
@@ -415,8 +417,17 @@ export default function composer(pi: ExtensionAPI) {
           ctx.ui.notify(`composer: no style "${name}". Styles: ${styleNames.join(', ')}`, 'error');
           return;
         }
+        const previous = sessionStyle;
         sessionStyle = name as StyleName | undefined;
-        reload(ctx);
+        if (reload(ctx).kept) {
+          // Going back to an unreadable composer.json: stay on what's showing, and say so.
+          sessionStyle = previous;
+          ctx.ui.notify(
+            `composer: composer.json can't be read, so staying on ${previous ? `"${previous}"` : 'the last good config'}`,
+            'error',
+          );
+          return;
+        }
         ctx.ui.notify(
           sessionStyle
             ? `composer: trying "${sessionStyle}" as shipped (your overrides are paused). /composer style to go back; set "style" in composer.json to keep it.`

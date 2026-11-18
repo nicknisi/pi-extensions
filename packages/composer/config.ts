@@ -308,7 +308,8 @@ const BOX_LOOK_TYPES: Record<string, FieldType> = { color: 'string' };
 function checkFields(path: string, obj: Json, types: Record<string, FieldType>, warnings: string[]): Json {
   const out: Json = {};
   for (const [key, value] of Object.entries(obj)) {
-    const type = types[key];
+    // Own keys only: "constructor" or "toString" must read as unknown, not as Object's.
+    const type = Object.hasOwn(types, key) ? types[key] : undefined;
     if (!type) {
       warnings.push(`unknown key "${path}.${key}"${suggest(key, Object.keys(types))}`);
       continue;
@@ -341,11 +342,11 @@ export function validate(user: Json, warnings: string[]): Json {
   for (const [key, value] of Object.entries(user)) {
     if (key.startsWith('$')) continue; // $schema, $comment
     if (key === 'style') {
-      if (typeof value === 'string' && value in STYLES) clean.style = value;
+      if (typeof value === 'string' && Object.hasOwn(STYLES, value)) clean.style = value;
       else warnings.push(`style: "${String(value)}" is not a style; use one of ${Object.keys(STYLES).join(', ')}`);
       continue;
     }
-    if (!(key in DEFAULTS)) {
+    if (!Object.hasOwn(DEFAULTS, key)) {
       if (!LEGACY_KEYS.includes(key)) warnings.push(`unknown key "${key}"${suggest(key, Object.keys(DEFAULTS))}`);
       continue;
     }
@@ -360,7 +361,8 @@ function validateValue(path: string, value: unknown, base: unknown, warnings: st
     warnings.push(`${path}: expected ${want}, got ${JSON.stringify(value)}`);
     return undefined;
   };
-  if (ENUMS[path]) return ENUMS[path].includes(value as string) ? value : bad(`one of ${ENUMS[path].join(', ')}`);
+  const allowed = Object.hasOwn(ENUMS, path) ? ENUMS[path] : undefined;
+  if (allowed) return allowed.includes(value as string) ? value : bad(`one of ${allowed.join(', ')}`);
   if (path === 'slots') {
     if (!isObject(value)) return bad('an object of slot lists');
     const out: Json = {};
@@ -410,7 +412,7 @@ function validateValue(path: string, value: unknown, base: unknown, warnings: st
     return out;
   }
   if (path === 'spinner.frames')
-    return (typeof value === 'string' && value in SPINNERS) ||
+    return (typeof value === 'string' && Object.hasOwn(SPINNERS, value)) ||
       (Array.isArray(value) && value.every((f) => typeof f === 'string'))
       ? value
       : bad(`a preset (${Object.keys(SPINNERS).join(', ')}) or a list of frames`);
@@ -426,7 +428,7 @@ function validateValue(path: string, value: unknown, base: unknown, warnings: st
     if (!isObject(value)) return bad('an object');
     const out: Json = {};
     for (const [k, v] of Object.entries(value)) {
-      if (!(k in base)) {
+      if (!Object.hasOwn(base, k)) {
         warnings.push(`unknown key "${path}.${k}"${suggest(k, Object.keys(base))}`);
         continue;
       }
@@ -486,6 +488,8 @@ export interface LoadResult {
   config: ComposerConfig;
   /** The file exists but couldn't be read or parsed; callers keep the previous config. */
   unreadable?: boolean;
+  /** Set by the extension when it kept the previous config instead of applying this one. */
+  kept?: boolean;
   /** Fatal-for-the-file problems (bad JSON, pre-1.0 keys). */
   errors: string[];
   warnings: string[];
