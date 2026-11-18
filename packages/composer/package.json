@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-composer",
-  "version": "0.4.1",
+  "version": "1.0.0",
   "description": "The whole bottom of pi's screen: input box, footer, working message and spinner, as configurable styles and slots",
   "keywords": [
     "pi",

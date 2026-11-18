@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-save-md",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Save the last assistant message or session as markdown",
   "keywords": [
     "pi",

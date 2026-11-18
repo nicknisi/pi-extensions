@@ -1,5 +1,15 @@
 # @nicknisi/pi-relay
 
+## 0.7.0
+
+### Minor Changes
+
+- e434bdb: Show expand hints with the `keyText` pi passes to renderers, so they follow your configured keybindings. If `app.tools.expand` has no key, the hint is left out. Requires pi 1.5.0 or later.
+
+### Patch Changes
+
+- e434bdb: Ship `CHANGELOG.md` in the npm package so pi 1.5 can show what changed under "Extension Updates" after `pi update`.
+
 ## 0.6.1
 
 ### Patch Changes

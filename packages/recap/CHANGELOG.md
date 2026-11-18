@@ -1,5 +1,11 @@
 # @nicknisi/pi-recap
 
+## 0.1.10
+
+### Patch Changes
+
+- e434bdb: Ship `CHANGELOG.md` in the npm package so pi 1.5 can show what changed under "Extension Updates" after `pi update`.
+
 ## 0.1.9
 
 ### Patch Changes

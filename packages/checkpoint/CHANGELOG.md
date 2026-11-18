@@ -1,5 +1,15 @@
 # @nicknisi/pi-checkpoint
 
+## 0.3.0
+
+### Minor Changes
+
+- 9897517: The context-meter handshake now talks to composer: Checkpoint listens for `composer:context-bar` and asks with `composer:request-context-bar` (formerly `statusline:*`). With composer 1.0 showing a `context` item, Checkpoint colours it and hides its own widget, as it did with statusline.
+
+### Patch Changes
+
+- e434bdb: Ship `CHANGELOG.md` in the npm package so pi 1.5 can show what changed under "Extension Updates" after `pi update`.
+
 ## 0.2.3
 
 ### Patch Changes
