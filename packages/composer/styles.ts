@@ -118,7 +118,7 @@ export const STYLES = {
 
   /** After btop: titled box, meters in a panel beside the composer on wide panes. */
   sidepanel: {
-    box: { border: 'rounded', inlay: 'bracket', states: { nearFull: { color: 'context' } } },
+    box: { border: 'rounded', states: { nearFull: { color: 'context' } } },
     slots: {
       ...NO_SLOTS,
       topLeft: ['working', 'label'],

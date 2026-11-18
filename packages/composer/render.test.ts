@@ -95,7 +95,10 @@ describe('styles', () => {
   it('sidepanel: panel beside the box when wide, folded into the footer when narrow', () => {
     const cfg = loadFrom({ style: 'sidepanel' }).config;
     const wide = renderAll(cfg, SCENARIOS.idle, 120);
-    expect(wide.editor[0]).toMatch(/╮ ╭─┤◆ Claude Opus 5.5 high├─+╮$/);
+    expect(wide.editor[0]).toMatch(/╮ ╭─ ◆ Claude Opus 5.5 high ─+╮$/);
+    // btop-style brackets are opt-in, for the box and the panel alike.
+    const bracket = loadFrom({ style: 'sidepanel', box: { inlay: 'bracket' } }).config;
+    expect(renderAll(bracket, SCENARIOS.idle, 120).editor[0]).toMatch(/^╭─┤.*├─+╮ ╭─┤◆ Claude Opus 5.5 high├─+╮$/);
     expect(wide.footer).toEqual([]);
     const narrow = renderAll(cfg, SCENARIOS.idle, 80);
     expect(narrow.editor[0]!.endsWith('╮')).toBe(true);

@@ -360,7 +360,11 @@ function renderPanel(c: Ctx, e: ItemEnv, paint: Painter, width: number, height: 
   });
   const title = (entries: SlotEntry[], isTop: boolean) => {
     const f = fitRow(slot(c, e, entries), [], inner - 4, fitOpts(c));
-    const t = f.width ? paint.border('┤') + f.left + paint.border('├') : '';
+    const t = !f.width
+      ? ''
+      : c.cfg.box.inlay === 'bracket'
+        ? paint.border('┤') + f.left + paint.border('├')
+        : ` ${f.left} `;
     const fill = Math.max(0, inner - 1 - visibleWidth(t));
     return isTop
       ? paint.border('─') + t + paint.border('─'.repeat(fill))
