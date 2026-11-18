@@ -81,6 +81,11 @@ export class Composer extends CustomEditor {
     this.onIndicator(indicator);
   }
 
+  /** pi copies its editorPaddingX setting onto custom editors; composer's spacing is box.padX. */
+  override setPaddingX(_padding: number): void {
+    super.setPaddingX(0);
+  }
+
   pasteCount(): number {
     return (this as unknown as EditorInternals).pastes.size;
   }

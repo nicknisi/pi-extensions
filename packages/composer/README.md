@@ -228,6 +228,7 @@ Peer dependencies: `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, 
 - **pi internals**: paste-expand and history-cursor reach into pi-tui `Editor` privates (`state`, `pastes`, `pasteCounter`, `historyIndex`, …) and override the TS-private `handlePaste` and `navigateHistory`. The box is drawn by re-wrapping pi's stock editor render, detecting its `─` rules and `↑/↓ N more` hints by string matching. A pi-tui change to either can break them.
 - **One editor**: pi's `setEditorComponent`, `setFooter` and working indicator are last-call-wins. Another extension that replaces any of them after composer takes that piece over.
 - **Narrow panes**: if the input would be narrower than 4 cells, composer falls back to pi's stock editor for that frame.
+- **pi's `editorPaddingX` setting** doesn't apply inside composer (it would stack with composer's own padding); use `box.padX`.
 - **Usage** is shown only for Anthropic models and needs an Anthropic OAuth token (pi's `auth.json`, or Claude Code's keychain entry on macOS). `/composer` reports why it's missing.
 - **Colour effects** (`pulse`, shimmer) need theme tokens that resolve to truecolor; otherwise they fall back to a steady colour. `rainbow` always uses truecolor.
 - **Glyphs**: `icons: "nerd"` needs a Nerd Font; `tps` and the meters use block characters.
