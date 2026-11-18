@@ -182,6 +182,7 @@ export default function composer(pi: ExtensionAPI) {
   function mount(ctx: ExtensionContext): void {
     ctx.ui.setEditorComponent((tui, editorTheme, kb) => {
       rt.tui = tui;
+      rt.keybindings = kb as Runtime['keybindings'];
       setDataListener(repaint);
       if (cfg().box.focusColor) enableFocusTracking(tui);
       else disableFocusTracking();

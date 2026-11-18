@@ -18,7 +18,8 @@
     "dist",
     "index.ts",
     "extensions",
-    ".pi/self-compact"
+    ".pi/self-compact",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {
@@ -32,12 +33,13 @@
     "build": "tsgo -p tsconfig.build.json"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "1.4.0",
-    "@earendil-works/pi-coding-agent": "1.4.0",
-    "@earendil-works/pi-tui": "1.4.0",
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@earendil-works/pi-tui": "1.5.2",
     "@types/node": "^24.0.0",
-    "typebox": "^1.1.0",
-    "vitest": "^3.2.4"
+    "typebox": "^1.4.7",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.1"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": ">=0.87.0",

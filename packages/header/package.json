@@ -18,7 +18,8 @@
     "dist",
     "index.ts",
     "frames-*.ts",
-    "gen-frames.mjs"
+    "gen-frames.mjs",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {

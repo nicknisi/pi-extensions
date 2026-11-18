@@ -18,7 +18,8 @@
     "dist",
     "index.ts",
     "config.ts",
-    "answer.example.json"
+    "answer.example.json",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {

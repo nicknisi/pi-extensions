@@ -6,16 +6,18 @@ Replicates Claude Code's message stash using `ctrl+s`. Rebind Pi's built-in `ctr
 
 - **Keybinding:** `ctrl+s` toggles stash/restore. See the behavior table below.
 - **Widget:** a single-line widget above the editor, visible whenever the stash stack is non-empty, showing a 60-char preview of the most recent stash, the count of additional stashes (`(+N more)`), and a `ctrl+s to restore` hint
-- **Events hooked:** `before_agent_start` — after a message is submitted and the agent starts, the most recent stash is auto-restored into the now-empty editor (mirrors Claude Code)
+- **Events hooked:**
+  - `before_agent_start`: after a message is submitted and the agent starts, this session's most recent stash is auto-restored into the now-empty editor (mirrors Claude Code).
+  - `session_start`: shows the widget for drafts already saved for this directory.
 - No slash commands, no tools, no custom entry types.
 
 ### Keybinding behavior
 
-| Editor state on `ctrl+s`                  | Action                                     |
-| ----------------------------------------- | ------------------------------------------ |
-| Contains text                             | Push text onto the stack, clear the editor |
-| Empty (or whitespace) and stack non-empty | Pop the most recent stash into the editor  |
-| Empty and stack empty                     | No-op                                      |
+| Editor state on `ctrl+s`                  | Action                                                                         |
+| ----------------------------------------- | ------------------------------------------------------------------------------ |
+| Contains text                             | Push text onto the stack, clear the editor                                     |
+| Empty (or whitespace) and stack non-empty | Pop the most recent stash into the editor (from any session in this directory) |
+| Empty and stack empty                     | No-op                                                                          |
 
 ## Usage
 
@@ -26,7 +28,18 @@ ctrl+s      "⧉ stashed: Refactor the auth module to..." · editor cleared
 ctrl+s      (with empty editor) pops the stash back manually
 ```
 
-The stash is in-memory only (per session, per process). It is not persisted across restarts.
+## Persistence
+
+Drafts are saved per working directory under `<agentDir>/stash/<hash of cwd>/` (normally `~/.pi/agent/stash/`), one file per draft, so they survive `/reload`, quitting Pi, and starting a new session in the same directory. The stack keeps the newest 10 drafts and drops the oldest.
+
+No file is ever rewritten, so there is no lock:
+
+- **Stashing** writes the draft to a temporary file (mode `0600`), flushes it to disk, and renames it into place. The editor is cleared only after the rename, so a saved draft survives Pi exiting or crashing. The folder is also flushed after the rename for power-loss protection, but only on a best-effort basis: it's skipped on Windows, and a failed folder flush is ignored.
+- **Restoring** claims a draft by deleting its file. Only one window's delete can succeed, so two windows never get the same draft. The draft is put in the editor right after the claim, before anything else that could fail.
+
+Each draft remembers the session that stashed it. Sending a message only auto-restores drafts from the current session, so another Pi window in the same directory never has a draft pulled into its editor. `ctrl+s` on an empty editor restores the newest draft from any session.
+
+A draft file that can't be read is skipped and left alone. If a draft can't be saved, the extension reports an error and leaves the text in the editor.
 
 ## Configuration
 
@@ -44,15 +57,14 @@ Merge these entries into your existing config, then run `/reload`. Model-save an
 
 ## Dependencies
 
-- **Peer:** `@earendil-works/pi-coding-agent` (`*`). Uses only the public extension API: `pi.registerShortcut`, `pi.on("before_agent_start")`, `ctx.ui.getEditorText` / `setEditorText` / `setWidget` / `theme`, and `ctx.hasUI`.
-- No runtime npm dependencies, no workspace deps.
+- **Peer:** `@earendil-works/pi-coding-agent` (`*`). Uses only the public extension API: `pi.registerShortcut`, `pi.on("before_agent_start" | "session_start")`, `getAgentDir()`, `ctx.sessionManager.getSessionId()`, `ctx.ui.getEditorText` / `setEditorText` / `setWidget` / `notify` / `theme`, and `ctx.hasUI`.
+- Node built-ins: `node:crypto`, `node:fs`, `node:path`. No runtime npm dependencies, no workspace deps.
 
 ## Caveats
 
 - UI-gated: every handler checks `ctx.hasUI`; the extension is a no-op in headless/non-TUI mode.
 - Depends on the editor text APIs (`ctx.ui.getEditorText` / `setEditorText`) and the widget system (`ctx.ui.setWidget`) — these are stable pi extension APIs, but a pi version that changes editor or widget semantics could affect it.
 - The `before_agent_start` auto-restore pops a stash whenever a message is sent with an empty editor. If you intentionally sent a quick command and wanted the stash to stay parked, it will still be restored into the editor (you can `ctrl+s` it back). This matches Claude Code's behavior.
-- Stash stack is module-local state; it does not survive session reload or extension reload.
 - The shifted replacement shortcuts require a terminal that reports them distinctly, for example through the Kitty keyboard protocol. The widget preview uses the Unicode glyphs `⧉` and `…`.
 
 ## Install

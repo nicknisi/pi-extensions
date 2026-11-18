@@ -32,17 +32,18 @@ jobs:
       # and this workflow file (release.yml). OIDC + provenance are
       # handled by npm itself (requires npm CLI >= 11.5.1 in CI).
       - name: Create release PR or publish
-        uses: changesets/action@v1
+        # v2 is the line that supports @changesets/cli 3. It uses the workflow's
+        # GITHUB_TOKEN by default and reads published packages from the
+        # CHANGESETS_OUTPUT file, which `pnpm run release` passes through.
+        uses: changesets/action@v2
         with:
           # `pnpm run version`, not `pnpm version` — the latter is pnpm's builtin
           # version command (it requires a semver argument and never runs the
           # package.json script of the same name).
-          version: pnpm run version
+          version-script: pnpm run version
           # `pnpm run release`, not a bare `changeset publish` — packages ship
           # compiled JS from dist/, which is git-ignored, so it must be built
           # in CI before anything is published.
-          publish: pnpm run release
-          title: 'chore: version packages'
-          commit: 'chore: version packages'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          publish-script: pnpm run release
+          pr-title: 'chore: version packages'
+          commit-message: 'chore: version packages'

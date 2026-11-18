@@ -248,6 +248,8 @@ type BranchEntry = ReturnType<ExtensionContext['sessionManager']['getBranch']>[n
 export function computeTotals(entries: readonly BranchEntry[]): Totals {
   const totals: Totals = { cost: 0, added: 0, removed: 0 };
   for (const entry of entries) {
+    // Cache warms (on by default since pi 1.5.1) are billed as usage entries, not messages.
+    if (entry.type === 'usage') totals.cost += entry.usage?.cost?.total ?? 0;
     if (entry.type !== 'message') continue;
     const message = entry.message;
     if (message.role === 'assistant') totals.cost += (message as AssistantMessage).usage?.cost?.total ?? 0;

@@ -46,7 +46,7 @@ async function harness(mode: string) {
     getSessionName: () => '',
     setSessionName,
   } as unknown as ExtensionAPI);
-  const fire = (name: string) => handlers.get(name)!({ prompt: 'Fix the tests', messageType: 'user' }, ctx);
+  const fire = (name: string, prompt = 'Fix the tests') => handlers.get(name)!({ prompt, messageType: 'user' }, ctx);
   return { ctx, preferred, current, getAvailableOfType, getApiKeyAndHeaders, complete, setSessionName, fire };
 }
 
@@ -107,4 +107,40 @@ it.each(['selection', 'auth'])('shutdown cancels pending %s before completion', 
   expect(h.setSessionName).not.toHaveBeenCalled();
   const options = h.getAvailableOfType.mock.calls[0] as unknown as [string, string, { signal: AbortSignal }];
   expect(options[2].signal.aborted).toBe(true);
+});
+
+it('waits for a prompt that states a task before naming', async () => {
+  const h = await harness('usable');
+  for (const prompt of ['ok', 'hello', 'hi there']) h.fire('before_agent_start', prompt);
+  await settle();
+  expect(h.complete).not.toHaveBeenCalled();
+  expect(h.setSessionName).not.toHaveBeenCalled();
+
+  h.fire('before_agent_start', 'Fix the flaky login test');
+  await settle();
+  expect(h.setSessionName).toHaveBeenCalledWith('Generated title');
+});
+
+it('strips markdown and control characters from LLM titles', async () => {
+  const h = await harness('usable');
+  h.complete.mockResolvedValueOnce({
+    stopReason: 'stop',
+    content: [{ type: 'text', text: '## **Critique of the\x1b]0;x\x07 opening turn**' }],
+  });
+  h.fire('before_agent_start');
+  await settle();
+  expect(h.setSessionName).toHaveBeenCalledWith('Critique of the ]0;x opening turn');
+});
+
+it.each([
+  ['Fix foo__bar parsing', 'Fix foo__bar parsing'],
+  ['**Fix login**.', 'Fix login'],
+  ['**Fix** and **test**', 'Fix and test'],
+  ['__Fix__ the parser', 'Fix the parser'],
+])('cleans emphasis in LLM title %j', async (raw, expected) => {
+  const h = await harness('usable');
+  h.complete.mockResolvedValueOnce({ stopReason: 'stop', content: [{ type: 'text', text: raw }] });
+  h.fire('before_agent_start');
+  await settle();
+  expect(h.setSessionName).toHaveBeenCalledWith(expected);
 });

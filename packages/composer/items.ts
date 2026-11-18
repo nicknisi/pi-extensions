@@ -91,19 +91,20 @@ function sparkline(values: number[]): string {
   return values.map((v) => SPARK[Math.min(7, Math.round((v / max) * 7))]).join('');
 }
 
-function keyFor(action: string, fallback: string): string {
+/** First key bound to `action`: pi's injected keybindings first, the global manager as a fallback. */
+function keyFor(rt: Runtime, action: string, fallback: string): string {
   try {
-    const keys = getKeybindings().getKeys(action as Parameters<ReturnType<typeof getKeybindings>['getKeys']>[0]);
-    return keys[0] ?? fallback;
+    const manager = rt.keybindings ?? getKeybindings();
+    return (manager.getKeys as (a: string) => string[])(action)[0] ?? fallback;
   } catch {
     return fallback;
   }
 }
 
 /** Key hints for the current state: [key, what it does]. */
-function hintsFor(states: StateName[]): [string, string][] {
+function hintsFor(states: StateName[], rt: Runtime): [string, string][] {
   const top = states[states.length - 1];
-  const interrupt = keyFor('app.interrupt', 'esc');
+  const interrupt = keyFor(rt, 'app.interrupt', 'esc');
   switch (top) {
     case 'prompt':
       return []; // pi's dialog shows its own keys
@@ -112,8 +113,8 @@ function hintsFor(states: StateName[]): [string, string][] {
       return [
         [interrupt, 'interrupt'],
         ['enter', 'steer'],
-        [keyFor('app.message.followUp', 'alt+enter'), 'follow-up'],
-        [keyFor('app.tools.expand', 'ctrl+o'), 'expand'],
+        [keyFor(rt, 'app.message.followUp', 'alt+enter'), 'follow-up'],
+        [keyFor(rt, 'app.tools.expand', 'ctrl+o'), 'expand'],
       ];
     case 'nearFull':
       return [
@@ -122,19 +123,19 @@ function hintsFor(states: StateName[]): [string, string][] {
       ];
     case 'scrolled':
       return [
-        [keyFor('tui.altScreen.bottom', 'ctrl+end'), 'follow'],
-        [keyFor('tui.altScreen.pageUp', 'pgup'), 'scroll'],
+        [keyFor(rt, 'tui.altScreen.bottom', 'ctrl+end'), 'follow'],
+        [keyFor(rt, 'tui.altScreen.pageUp', 'pgup'), 'scroll'],
       ];
     case 'paste':
       return [
         ['enter', 'send'],
         ['paste again', 'expand'],
-        [keyFor('tui.input.newLine', 'shift+enter'), 'newline'],
+        [keyFor(rt, 'tui.input.newLine', 'shift+enter'), 'newline'],
       ];
     case 'typing':
       return [
         ['enter', 'send'],
-        [keyFor('tui.input.newLine', 'shift+enter'), 'newline'],
+        [keyFor(rt, 'tui.input.newLine', 'shift+enter'), 'newline'],
       ];
     default:
       return [
@@ -316,8 +317,8 @@ function body(name: string, o: ItemOptions, env: ItemEnv): Body | null {
       };
     }
     case 'hints': {
-      if (hintsFor(env.states).length === 0) return null;
-      const hints = hintsFor(env.states).map(
+      if (hintsFor(env.states, rt).length === 0) return null;
+      const hints = hintsFor(env.states, rt).map(
         ([key, what]) => `${env.theme.bg('selectedBg', ` ${key} `)} ${dim(env, what)}`,
       );
       return { forms: [hints.join('  '), hints.slice(0, 2).join('  '), hints.slice(0, 1).join('')] };
@@ -341,7 +342,7 @@ function body(name: string, o: ItemOptions, env: ItemEnv): Body | null {
     }
     case 'scroll': {
       if (!isScrolledBack(rt) && rt.preview !== 'scrolled') return null;
-      const key = keyFor('tui.altScreen.bottom', 'ctrl+end');
+      const key = keyFor(rt, 'tui.altScreen.bottom', 'ctrl+end');
       return {
         forms: [
           paint(env, o.color ?? 'accent', `↓ scrolled · ${key} to follow`),

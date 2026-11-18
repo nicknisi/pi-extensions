@@ -53,6 +53,7 @@ type SentMessage = { message: Record<string, unknown>; options: Record<string, u
 function start() {
   const handlers = new Map<string, Handler>();
   let execute!: Execute;
+  let parameters: unknown;
   let branch: unknown[] = [];
   const sends: SentMessage[] = [];
   const ctx = {
@@ -64,8 +65,9 @@ function start() {
       handlers.set(name, handler);
     },
     getSessionName: () => 'Self',
-    registerTool: (tool: { execute: Execute }) => {
+    registerTool: (tool: { execute: Execute; parameters: unknown }) => {
       execute = tool.execute;
+      parameters = tool.parameters;
     },
     registerCommand: () => {},
     registerMessageRenderer: () => {},
@@ -88,11 +90,17 @@ function start() {
     },
     emit,
     sends,
+    parameters,
   };
 }
 function delivery(l: Letter) {
   return { type: 'custom_message', customType: 'relay:delivery', details: l };
 }
+
+it('keeps the tool schema free of keywords OpenAI strict mode rejects', () => {
+  fixture();
+  expect(JSON.stringify(start().parameters)).not.toContain('uniqueItems');
+});
 
 it('registered discovery, exact sessionId send, watch, and invalid-limit recovery work together', async () => {
   const root = fixture();

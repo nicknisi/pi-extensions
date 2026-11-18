@@ -18,7 +18,8 @@
     "dist",
     "index.ts",
     "sound.ts",
-    "sprite.ts"
+    "sprite.ts",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {

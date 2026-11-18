@@ -126,6 +126,7 @@ function harness(mode: ExtensionContext['mode'] = 'tui') {
     commands,
     events,
     run,
+    tool,
   };
 }
 
@@ -170,6 +171,10 @@ afterEach(() => {
 });
 
 describe('council selection and execution', () => {
+  it('keeps the tool schema free of keywords OpenAI strict mode rejects', () => {
+    expect(JSON.stringify(harness().tool.parameters)).not.toContain('uniqueItems');
+  });
+
   it('asks a question, runs the selected council with conversation context, and displays its answer', async () => {
     const h = harness();
     h.messages.push({ role: 'user', content: 'The existing design uses SQLite.', timestamp: 1 });
@@ -289,7 +294,11 @@ describe('council selection and execution', () => {
     expect(message.content).toContain('Incomplete synthesis:');
     expect(message.content).toContain('Partial synthesis');
     const renderer = h.registerMessageRenderer.mock.calls[0]![1];
-    expect(renderer(message, { expanded: false }, theme).render(100).join('\n')).toContain('Connection lost');
+    expect(
+      renderer(message, { expanded: false, keyText: () => 'ctrl+o' }, theme)
+        .render(100)
+        .join('\n'),
+    ).toContain('Connection lost');
   });
 
   it('requires fixing an unavailable qualified model instead of choosing another provider or newer variant', async () => {

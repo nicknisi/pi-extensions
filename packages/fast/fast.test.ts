@@ -8,6 +8,8 @@ import {
   isCoolingDown,
   isFastEnabled,
   noteFastError,
+  noteFastUnavailable,
+  withFastCost,
   type FastState,
 } from './fast.js';
 
@@ -22,12 +24,15 @@ function state(overrides: Partial<FastState> = {}): FastState {
 }
 
 describe('getFastEligibility', () => {
-  it.each(['claude-opus-4-8', 'claude-opus-5', 'claude-opus-5-5'])('supports current Anthropic Fast model %s', (id) => {
-    expect(getFastEligibility(model('anthropic', id, 'anthropic-messages'), false)).toMatchObject({
-      eligible: true,
-      provider: 'anthropic',
-    });
-  });
+  it.each(['claude-opus-4-8', 'claude-opus-5', 'claude-opus-5-5', 'claude-fable-5-2', 'claude-mythos-5-2'])(
+    'supports current Anthropic Fast model %s',
+    (id) => {
+      expect(getFastEligibility(model('anthropic', id, 'anthropic-messages'), false)).toMatchObject({
+        eligible: true,
+        provider: 'anthropic',
+      });
+    },
+  );
 
   it.each(['claude-opus-4-6', 'claude-opus-4-7'])('rejects retired Anthropic Fast model %s', (id) => {
     expect(getFastEligibility(model('anthropic', id, 'anthropic-messages'), false).eligible).toBe(false);
@@ -39,8 +44,15 @@ describe('getFastEligibility', () => {
     expect(getFastEligibility(selected, true)).toMatchObject({ eligible: true, provider: 'openai' });
   });
 
-  it.each(['gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol'])('supports Codex Fast model %s', (id) => {
-    expect(getFastEligibility(model('openai-codex', id, 'openai-codex-responses'), true).eligible).toBe(true);
+  it.each(['gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6.2-astra', 'gpt-6.2-sol'])(
+    'supports Codex Fast model %s',
+    (id) => {
+      expect(getFastEligibility(model('openai-codex', id, 'openai-codex-responses'), true).eligible).toBe(true);
+    },
+  );
+
+  it('rejects GPT-5.5, which Codex retired for ChatGPT sign-in', () => {
+    expect(getFastEligibility(model('openai-codex', 'gpt-5.5', 'openai-codex-responses'), true).eligible).toBe(false);
   });
 
   it('rejects unsupported APIs and model IDs', () => {
@@ -88,13 +100,13 @@ describe('injectFastPayload', () => {
     });
   });
 
-  it('injects the Codex Fast service tier', () => {
-    const selected = model('openai-codex', 'gpt-5.5', 'openai-codex-responses');
+  it('injects the priority service tier, which the Codex backend accepts for Fast mode', () => {
+    const selected = model('openai-codex', 'gpt-6.2-sol', 'openai-codex-responses');
     const eligibility = getFastEligibility(selected, true);
 
     expect(injectFastPayload({ model: selected.id }, selected, eligibility, state())).toEqual({
       model: selected.id,
-      service_tier: 'fast',
+      service_tier: 'priority',
     });
   });
 
@@ -132,6 +144,20 @@ describe('injectFastPayload', () => {
   });
 });
 
+describe('withFastCost', () => {
+  it('doubles every cost component and keeps token counts', () => {
+    const message = {
+      role: 'assistant',
+      usage: { input: 100, output: 50, cost: { input: 0.4, output: 1, cacheRead: 0.02, cacheWrite: 0.5, total: 1.92 } },
+    };
+    expect(withFastCost(message)).toEqual({
+      role: 'assistant',
+      usage: { input: 100, output: 50, cost: { input: 0.8, output: 2, cacheRead: 0.04, cacheWrite: 1, total: 3.84 } },
+    });
+    expect(message.usage.cost.total).toBe(1.92);
+  });
+});
+
 describe('rate-limit cooldown', () => {
   it.each([
     '429 {"type":"error","error":{"type":"rate_limit_error","message":"Fast mode rate limit"}}',
@@ -147,6 +173,22 @@ describe('rate-limit cooldown', () => {
     expect(
       injectFastPayload({ model: selected.id }, selected, eligibility, current, 1_000 + DEFAULT_COOLDOWN_MS),
     ).toEqual({ model: selected.id, speed: 'fast' });
+  });
+
+  it('stops requesting Fast for a model the plan refuses, and only that model', () => {
+    const sol = model('openai-codex', 'gpt-6.2-sol', 'openai-codex-responses');
+    const astra = model('openai-codex', 'gpt-6.2-astra', 'openai-codex-responses');
+    const current = state();
+    const refusal =
+      "Codex error: Fast mode isn't available for the selected model in your workspace. Choose Standard speed or another model.";
+
+    expect(noteFastUnavailable(current, '429 rate_limit_error', 'openai-codex/gpt-6.2-sol')).toBe(false);
+    expect(noteFastUnavailable(current, refusal, 'openai-codex/gpt-6.2-sol')).toBe(true);
+    expect(injectFastPayload({ model: sol.id }, sol, getFastEligibility(sol, true), current)).toBeUndefined();
+    expect(injectFastPayload({ model: astra.id }, astra, getFastEligibility(astra, true), current)).toEqual({
+      model: astra.id,
+      service_tier: 'priority',
+    });
   });
 
   it('ignores other errors', () => {

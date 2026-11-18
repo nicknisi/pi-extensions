@@ -12,7 +12,7 @@
  */
 
 import * as path from 'node:path';
-import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, ExtensionContext, KeybindingHints, Theme } from '@earendil-works/pi-coding-agent';
 import {
   BorderedLoader,
   buildSessionContext,
@@ -39,7 +39,7 @@ import {
   SELECTION_ENTRY,
   updateCouncilStatus,
 } from './selection.js';
-import { applyColor, formatElapsed, getExpandToggleKey, getVisibleWidth } from './utils.js';
+import { applyColor, formatElapsed, getVisibleWidth } from './utils.js';
 
 // ── Derived constants (computed once from CONFIG) ────────────────────────
 
@@ -64,8 +64,9 @@ function indentLine(text: string): string {
   return `${' '.repeat(INDENT_WIDTH)}${text}`;
 }
 
-function expandHint(theme: Theme): string {
-  return applyColor(theme, CONFIG.shared.expandHint.color, ` • ${getExpandToggleKey()} to expand`);
+function expandHint(theme: Theme, keyText: KeybindingHints['keyText']): string {
+  const key = keyText('app.tools.expand');
+  return key ? applyColor(theme, CONFIG.shared.expandHint.color, ` • ${key} to expand`) : '';
 }
 
 function toolHeader(label: string, summary: string, theme: Theme, dot?: string, isError?: boolean): string {
@@ -507,9 +508,8 @@ export default function (pi: ExtensionAPI) {
     if (options.expanded && message.details) {
       container.addChild(createExpandedView(message.details, theme, getMarkdownTheme()));
     } else {
-      container.addChild(
-        new Text(theme.fg('dim', `${getExpandToggleKey()} to show individual responses and errors`), 0, 0),
-      );
+      const key = options.keyText('app.tools.expand');
+      if (key) container.addChild(new Text(theme.fg('dim', `${key} to show individual responses and errors`), 0, 0));
     }
     return container;
   });
@@ -694,7 +694,6 @@ export default function (pi: ExtensionAPI) {
       models: Type.Optional(
         Type.Array(Type.String({ minLength: 1 }), {
           minItems: 1,
-          uniqueItems: true,
           description: 'Member models for this call only. Provider/model IDs or unambiguous names.',
         }),
       ),
@@ -826,7 +825,7 @@ export default function (pi: ExtensionAPI) {
                     details.chairman.error?.slice(0, 60) || CONFIG.shared.status.errorLabel,
                   )
                 : doneLine(theme, details.chairman!),
-            chairmanSubLineSuffix: expandHint(theme),
+            chairmanSubLineSuffix: expandHint(theme, ctx.keyText),
           }),
         ];
         return makeText(ctx?.lastComponent, lines.join('\n'));

@@ -17,7 +17,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
-import { Box, getKeybindings, Text } from '@earendil-works/pi-tui';
+import { Box, Text } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import { discoverRelaySessions } from './discovery.js';
 import { resolveReplyTarget, resolveSessionTarget } from './routing.js';
@@ -135,10 +135,6 @@ function relativeTime(ts: number, now: number = Date.now()): string {
   const m = Math.round(s / 60);
   if (m < 60) return `${m}m ago`;
   return `${Math.round(m / 60)}h ago`;
-}
-
-function expandToggleKey(): string {
-  return getKeybindings().getKeys('app.tools.expand')[0] ?? 'ctrl+o';
 }
 
 // ── Resumability (for sweep) ─────────────────────────────────────────────
@@ -635,7 +631,6 @@ export default function relay(pi: ExtensionAPI) {
         Type.Array(Type.String({ minLength: 1, maxLength: 256 }), {
           minItems: 1,
           maxItems: 64,
-          uniqueItems: true,
           description: 'Exact full Pi session IDs; defaults to all presence states and may include self.',
         }),
       ),
@@ -844,7 +839,7 @@ export default function relay(pi: ExtensionAPI) {
   // Deliveries are custom MESSAGES (they must stay in LLM context), so the
   // TUI renders them via registerMessageRenderer — an entry renderer would
   // never fire for them.
-  pi.registerMessageRenderer<DeliveryDetails>(DELIVERY_TYPE, (message, { expanded }, theme) => {
+  pi.registerMessageRenderer<DeliveryDetails>(DELIVERY_TYPE, (message, { expanded, keyText }, theme) => {
     const d = message.details;
     if (!d || typeof d.id !== 'string' || typeof d.ts !== 'number' || typeof d.body !== 'string' || !d.from) {
       return undefined; // pre-renderer entries: keep pi's default custom-message box
@@ -877,9 +872,8 @@ export default function relay(pi: ExtensionAPI) {
     if (d.kind === 'ask') {
       out.push(theme.fg('dim', `└─ reply via relay { action: "reply", replyTo: "${id8}" }`));
     }
-    if (truncated) {
-      out.push(theme.fg('dim', `… ${expandToggleKey()} to expand`));
-    }
+    const key = keyText('app.tools.expand');
+    if (truncated && key) out.push(theme.fg('dim', `… ${key} to expand`));
     // Whole card on the theme's custom-message background, full width —
     // peer mail is visually a different thing from user/assistant text.
     const box = new Box(1, 1, (t) => theme.bg('customMessageBg', t));

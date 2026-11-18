@@ -33,6 +33,8 @@ export interface Runtime {
   theme?: Theme | undefined;
   footerData?: FooterDataLike | undefined;
   editor?: EditorLike | undefined;
+  /** The keybindings pi injects into the editor factory (follows the user's config). */
+  keybindings?: { getKeys(action: never): string[] } | undefined;
   /** Between agent_start and agent_settled, or during a /composer preview. */
   busy: boolean;
   busySince: number;

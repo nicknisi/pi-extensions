@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DEFAULTS, load, loadFrom, spinnerFrames } from './config.js';
-import { cacheDirIsPrivate, countDiffLines, parseUsage } from './data.js';
+import { cacheDirIsPrivate, computeTotals, countDiffLines, parseUsage } from './data.js';
 import { randomVerb, VERBS } from './verbs.js';
 import { streamedChars } from './index.js';
 import { fitRow, type Piece } from './layout.js';
@@ -260,5 +260,16 @@ describe('load', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('computeTotals', () => {
+  it('adds cache-warm usage entries to the session cost', () => {
+    const entries = [
+      { type: 'message', message: { role: 'assistant', usage: { cost: { total: 1 } } } },
+      { type: 'usage', usage: { cost: { total: 0.25 } } },
+      { type: 'message', message: { role: 'toolResult', details: { diff: '+1 a\n-1 b' } } },
+    ] as unknown as Parameters<typeof computeTotals>[0];
+    expect(computeTotals(entries)).toEqual({ cost: 1.25, added: 1, removed: 1 });
   });
 });

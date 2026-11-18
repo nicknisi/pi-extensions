@@ -17,7 +17,8 @@
   "files": [
     "dist",
     "index.ts",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {

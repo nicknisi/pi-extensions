@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-llm-council",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "description": "LLM Council — multiple models answer independently, chairman synthesizes",
   "keywords": [
     "pi",
@@ -24,7 +24,8 @@
     "picker.ts",
     "README.md",
     "llm-council.example.json",
-    "llm-council.project.example.json"
+    "llm-council.project.example.json",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {
@@ -37,7 +38,7 @@
     "@nicknisi/pi-shared": "workspace:*"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-coding-agent": ">=1.5.0",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
