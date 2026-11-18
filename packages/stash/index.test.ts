@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -128,4 +128,32 @@ it('does not create a stash file when there is nothing to stash', async () => {
 
 it('previews the first line without control characters', () => {
   expect(preview('Evil\x1b[31m\x07draft\nsecond line')).toBe('Evil [31m draft');
+});
+
+it('releases the lock after saving, and reclaims one left by a crashed window', async () => {
+  const w = window('a');
+  const lock = `${stashFile('/work/repo')}.lock`;
+  w.type('first');
+  await w.ctrlS();
+  expect(existsSync(lock)).toBe(false);
+
+  mkdirSync(lock);
+  const old = new Date(Date.now() - 60_000);
+  utimesSync(lock, old, old);
+  w.type('second');
+  await w.ctrlS();
+  expect(w.text).toBe('');
+  expect(JSON.parse(readFileSync(stashFile('/work/repo'), 'utf8'))).toHaveLength(2);
+});
+
+it('waits for a window holding the lock, then gives up without losing the draft', async () => {
+  const w = window('a');
+  w.type('seed');
+  await w.ctrlS();
+  mkdirSync(`${stashFile('/work/repo')}.lock`); // held by another window right now
+  w.type('precious draft');
+  await w.ctrlS();
+  expect(w.text).toBe('precious draft');
+  expect(w.notify).toHaveBeenCalledWith(expect.stringContaining('busy in another window'), 'error');
+  expect(JSON.parse(readFileSync(stashFile('/work/repo'), 'utf8'))).toHaveLength(1);
 });

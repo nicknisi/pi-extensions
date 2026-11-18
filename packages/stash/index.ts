@@ -15,13 +15,27 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, join } from 'node:path';
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 
 const WIDGET_KEY = 'message-stash';
 /** Oldest drafts beyond this are dropped. */
 export const MAX_DRAFTS = 10;
+/** A lock is held for milliseconds; one older than this was left by a crashed process. */
+const STALE_LOCK_MS = 10_000;
+const LOCK_ATTEMPTS = 100;
+const LOCK_RETRY_MS = 20;
 
 interface Draft {
   text: string;
@@ -50,33 +64,93 @@ function load(cwd: string): Draft[] {
   return drafts;
 }
 
-/**
- * Re-read, change and atomically rewrite a directory's drafts.
- * shortcut: no cross-process lock; two windows stashing in the same instant can drop one draft. Add a lock if that shows up.
- */
-function update(cwd: string, change: (drafts: Draft[]) => Draft[]): Draft[] {
-  const drafts = change(load(cwd));
+/** Write drafts durably: fsync the temp file, rename it into place, then fsync the directory. */
+function save(cwd: string, drafts: Draft[]): void {
   const file = stashFile(cwd);
   const tmp = `${file}.${randomUUID()}.tmp`;
-  mkdirSync(join(getAgentDir(), 'stash'), { recursive: true });
   try {
-    writeFileSync(tmp, JSON.stringify(drafts), { mode: 0o600 });
+    const fd = openSync(tmp, 'w', 0o600);
+    try {
+      writeFileSync(fd, JSON.stringify(drafts));
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tmp, file);
+    // Makes the rename itself survive a power loss. Windows can't open a directory.
+    if (process.platform !== 'win32') {
+      const dir = openSync(dirname(file), 'r');
+      try {
+        fsyncSync(dir);
+      } finally {
+        closeSync(dir);
+      }
+    }
   } finally {
     rmSync(tmp, { force: true });
   }
-  return drafts;
 }
 
-/** Copy of drafts without the newest one that matches. */
-function withoutNewest(drafts: Draft[], match: (draft: Draft) => boolean): Draft[] {
-  for (let i = drafts.length - 1; i >= 0; i--) {
-    if (match(drafts[i]!)) return [...drafts.slice(0, i), ...drafts.slice(i + 1)];
+function lockAge(lock: string): number {
+  try {
+    return Date.now() - statSync(lock).mtimeMs;
+  } catch {
+    return 0; // released meanwhile; just retry
   }
-  return drafts;
 }
 
-const isDraft = (draft: Draft) => (other: Draft) => other.text === draft.text && other.session === draft.session;
+/**
+ * Run `fn` holding the directory's stash lock, so another Pi window can't read
+ * and rewrite the same stash at the same time. `mkdir` is atomic, so whoever
+ * creates the lock directory owns it.
+ */
+function withLock<T>(cwd: string, fn: () => T): T {
+  const lock = `${stashFile(cwd)}.lock`;
+  mkdirSync(dirname(lock), { recursive: true, mode: 0o700 });
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  for (let attempt = 0; ; attempt++) {
+    try {
+      mkdirSync(lock);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      if (attempt >= LOCK_ATTEMPTS) throw new Error('the stash is busy in another window; try again');
+      // shortcut: two windows reclaiming the same stale lock at once could both proceed; needs a crash plus a collision.
+      if (lockAge(lock) > STALE_LOCK_MS) rmSync(lock, { recursive: true, force: true });
+      else Atomics.wait(pause, 0, 0, LOCK_RETRY_MS);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    rmSync(lock, { recursive: true, force: true });
+  }
+}
+
+/** Under the lock: re-read, change, and save only if `change` returned a new list. */
+function update(cwd: string, change: (drafts: Draft[]) => Draft[]): Draft[] {
+  return withLock(cwd, () => {
+    const current = load(cwd);
+    const drafts = change(current);
+    if (drafts !== current) save(cwd, drafts);
+    return drafts;
+  });
+}
+
+/** Under the lock: remove and return the newest draft that matches. */
+function take(cwd: string, match: (draft: Draft) => boolean): { draft?: Draft; drafts: Draft[] } {
+  let draft: Draft | undefined;
+  const drafts = update(cwd, (current) => {
+    for (let i = current.length - 1; i >= 0; i--) {
+      if (match(current[i]!)) {
+        draft = current[i];
+        return [...current.slice(0, i), ...current.slice(i + 1)];
+      }
+    }
+    return current;
+  });
+  return draft ? { draft, drafts } : { drafts };
+}
 
 /** First line of a draft, with control characters (ESC, BEL, …) removed, for the widget. */
 export function preview(text: string, max = 60): string {
@@ -124,11 +198,9 @@ export default function stash(pi: ExtensionAPI) {
           updateWidget(ctx, drafts);
           return;
         }
-        const restored = load(ctx.cwd).at(-1);
-        if (!restored) return;
-        // Re-read inside update: another window may have changed the stack meanwhile.
-        const drafts = update(ctx.cwd, (current) => withoutNewest(current, isDraft(restored)));
-        ctx.ui.setEditorText(restored.text);
+        if (load(ctx.cwd).length === 0) return; // cheap check without the lock
+        const { draft, drafts } = take(ctx.cwd, () => true);
+        if (draft) ctx.ui.setEditorText(draft.text);
         updateWidget(ctx, drafts);
       });
     },
@@ -141,10 +213,12 @@ export default function stash(pi: ExtensionAPI) {
     if (!ctx.hasUI || ctx.ui.getEditorText().trim().length > 0) return;
     run(ctx, () => {
       const session = ctx.sessionManager.getSessionId();
-      const restored = [...load(ctx.cwd)].reverse().find((draft) => draft.session === session);
-      if (!restored) return;
-      const drafts = update(ctx.cwd, (current) => withoutNewest(current, isDraft(restored)));
-      ctx.ui.setEditorText(restored.text);
+      const own = (draft: Draft) => draft.session === session;
+      // Every send lands here, so check without the lock first.
+      if (!load(ctx.cwd).some(own)) return;
+      const { draft, drafts } = take(ctx.cwd, own);
+      if (!draft) return;
+      ctx.ui.setEditorText(draft.text);
       updateWidget(ctx, drafts);
     });
   });
