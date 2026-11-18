@@ -17,6 +17,7 @@
   "files": [
     "dist",
     "index.ts",
+    "background.ts",
     "fleet.ts",
     "profiles.ts",
     "CHANGELOG.md"

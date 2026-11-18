@@ -60,8 +60,11 @@ import {
   type SpawnUsage,
   declareUnlessSearchable,
   HOST_EXIT,
+  THINKING_LEVELS,
+  type ThinkingLevel,
 } from '@nicknisi/pi-shared';
 import { Type } from 'typebox';
+import { backgroundNotice, MAX_TASK_OUTPUT_CHARS } from './background.js';
 import { scopeFleetRuns, type FleetScope } from './fleet.js';
 import {
   applyProfile,
@@ -94,7 +97,6 @@ const STATUS_INTERVAL = 2000;
 const MAX_TASKS = 8;
 const DEFAULT_TOOLS = ['read', 'grep', 'find', 'ls'];
 const TREE_MUTATING_TOOLS = new Set(['edit', 'write', 'bash']);
-const MAX_TASK_OUTPUT_CHARS = 4000;
 const MAX_FLEET_LIST = 20;
 /** How long session_shutdown waits for aborted runs to settle before letting pi exit. */
 const SHUTDOWN_SETTLE_MS = 5000;
@@ -114,6 +116,7 @@ interface TaskSpec {
   agent?: string | undefined;
   profile?: string | undefined;
   model?: string | undefined;
+  thinking?: ThinkingLevel | undefined;
   tools?: string[] | undefined;
   systemPrompt?: string | undefined;
   background?: boolean | undefined;
@@ -158,6 +161,7 @@ function toSpawnOptions(spec: TaskSpec, cwd: string, parentSession: string | und
   };
   if (spec.agent) opts.agent = spec.agent;
   if (spec.model) opts.model = spec.model;
+  if (spec.thinking) opts.thinkingLevel = spec.thinking;
   if (spec.systemPrompt) opts.systemPrompt = spec.systemPrompt;
   if (spec.replaceSystemPrompt) opts.replaceSystemPrompt = true;
   if (spec.skillPaths && spec.skillPaths.length > 0) opts.skillPaths = spec.skillPaths;
@@ -440,15 +444,8 @@ function watchBackground(
     .then((result) => {
       backgroundRuns.delete(runId);
       refreshBackgroundWidget();
-      const status = result.ok ? 'completed' : `failed: ${result.error}`;
-      // A resumed run's original caller is gone, so its answer comes with the notice.
-      const answer = resumed && result.text ? `\n\n${result.text.slice(0, MAX_TASK_OUTPUT_CHARS)}` : '';
-      pi.sendMessage({
-        customType: 'subagents:background',
-        content: `${resumed ? 'Resumed' : 'Background'} subagent ${runId.slice(0, 8)} (${label}) ${status}${answer}`,
-        display: true,
-        details: { runId, ok: result.ok },
-      });
+      const { message, options } = backgroundNotice(runId, label, result, resumed);
+      pi.sendMessage(message, options);
     })
     .catch((err) => {
       backgroundRuns.delete(runId);
@@ -1543,7 +1540,7 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
       `Use dispatch for independent parallel subtasks (max ${MAX_TASKS}); never for sequential work or trivial questions.`,
       'Children default to read-only tools (read, grep, find, ls). Pass tools explicitly for builders.',
       'Prefer profile: "<name>" when a defined profile matches the work — it attaches the persona\'s skills, tools, and prompt.',
-      'Set background: true for long-running tasks; results surface via the fleet tool.',
+      'Set background: true for long-running tasks; the result arrives as a message when the child finishes (starting a turn if idle), so do other work or end the turn instead of polling fleet.',
       'Tasks with edit/write/bash tools need allowTreeMutation: true and serialize after the parallel batch — or set worktree: true to isolate them and keep them parallel.',
     ],
     parameters: Type.Object({
@@ -1558,11 +1555,22 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
             }),
           ),
           model: Type.Optional(Type.String({ description: 'Model spec, e.g. "anthropic/claude-haiku-4-5"' })),
+          thinking: Type.Optional(
+            Type.Union(
+              THINKING_LEVELS.map((level) => Type.Literal(level)),
+              {
+                description:
+                  'Thinking level for this child only, e.g. "low" for a quick scout. Works with or without model; omit for the model\'s default.',
+              },
+            ),
+          ),
           tools: Type.Optional(
             Type.Array(Type.String(), { description: 'Tool allowlist; default read-only (read, grep, find, ls)' }),
           ),
           systemPrompt: Type.Optional(Type.String({ description: 'Appended to the child system prompt' })),
-          background: Type.Optional(Type.Boolean({ description: 'Run detached; check results via the fleet tool' })),
+          background: Type.Optional(
+            Type.Boolean({ description: 'Run detached; the result arrives as a message when the child finishes' }),
+          ),
           allowTreeMutation: Type.Optional(
             Type.Boolean({
               description:
@@ -1703,7 +1711,9 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
         task.status = 'background';
         task.runId = runId;
         task.startedAt = Date.now();
-        lines.push(`⏳ ${task.label} — background run ${runId.slice(0, 8)} (check the fleet tool)`);
+        lines.push(
+          `⏳ ${task.label} — background run ${runId.slice(0, 8)} (its result arrives as a message when it finishes)`,
+        );
         watchBackground(pi, runId, task.label, done);
         emit();
       }
