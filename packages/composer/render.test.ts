@@ -1,7 +1,8 @@
 import { visibleWidth } from '@earendil-works/pi-tui';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { loadFrom, STATES } from './config.js';
-import { ansiTheme, plainTheme, renderAll, SCENARIOS } from './fixtures.js';
+import { ansiTheme, plainTheme, renderAll, runtimeFor, SCENARIOS, stockLines } from './fixtures.js';
+import { geometry, renderEditor, renderFooter } from './render.js';
 import { clipStats } from './layout.js';
 import { STYLES, type StyleName } from './styles.js';
 
@@ -125,5 +126,18 @@ describe('composition', () => {
     expect(renderAll(cfg, SCENARIOS.idle, 80).editor[1]).toMatch(/^│ λ /);
     expect(renderAll(cfg, SCENARIOS.typing, 80).editor[1]).toMatch(/^│ » /);
     expect(renderAll(cfg, SCENARIOS.working, 80).editor[1]).toMatch(/^│ [◐◓◑◒] /);
+  });
+});
+
+describe('/composer preview', () => {
+  it('shows sample input and near-full context without an agent or real usage', () => {
+    const cfg = loadFrom({}).config;
+    const rt = runtimeFor(SCENARIOS.idle);
+    const c = { cfg, rt, theme: plainTheme };
+    const g = geometry(cfg, 80);
+    rt.preview = 'typing';
+    expect(renderEditor(c, 80, stockLines('', g.contentWidth))![1]).toContain('refactor the footer');
+    rt.preview = 'nearFull';
+    expect(renderFooter(c, 80)[0]).toContain('8% ctx');
   });
 });

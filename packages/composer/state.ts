@@ -72,6 +72,7 @@ export function createRuntime(): Runtime {
 
 /** Context left in percent, or undefined when pi doesn't know yet. */
 export function contextLeft(rt: Runtime): number | undefined {
+  if (rt.preview === 'nearFull') return 8;
   const usage = rt.ctx?.getContextUsage();
   if (!usage || usage.percent == null) return undefined;
   return Math.max(0, Math.round(100 - usage.percent));
@@ -79,6 +80,7 @@ export function contextLeft(rt: Runtime): number | undefined {
 
 /** Colour of the context meter: checkpoint's policy colour when it publishes one. */
 export function contextColor(rt: Runtime, left: number): ContextColor {
+  if (rt.preview === 'nearFull') return 'error';
   return rt.contextColor ?? (left > 50 ? 'success' : left > 20 ? 'warning' : 'error');
 }
 

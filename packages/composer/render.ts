@@ -192,6 +192,11 @@ export function renderEditor(c: Ctx, width: number, stock: string[]): string[] |
   const paint = painter(c, states);
   const pad = ' '.repeat(box.padX);
   const empty = (c.rt.editor?.getText() ?? '') === '' && !c.rt.preview;
+  // /composer preview: show sample input for the typing and paste states.
+  if (c.rt.preview && (c.rt.editor?.getText() ?? '') === '') {
+    const sample = PREVIEW_TEXT[c.rt.preview];
+    if (sample) split.rows = sample.map((t) => applyColor(c.theme, 'text', truncate(t, g.contentWidth)));
+  }
 
   // Text rows: prompt symbol on the first, right prompt and placeholder on the first.
   const rp = slot(c, e, c.cfg.slots.rightPrompt);
@@ -284,6 +289,11 @@ export function renderEditor(c: Ctx, width: number, stock: string[]): string[] |
 function trimEnd(line: string): string {
   return line.replace(/ +((?:\x1b\[[0-9;]*m)*)$/, '$1');
 }
+
+const PREVIEW_TEXT: Partial<Record<StateName, string[]>> = {
+  typing: ['refactor the footer so the context bar never disappears'],
+  paste: ['here is the failing output:', '[paste #1 +42 lines]', 'why does the bar vanish at 40 columns?'],
+};
 
 function truncate(s: string, w: number): string {
   return visibleWidth(s) <= w ? s : `${[...s].slice(0, Math.max(0, w - 1)).join('')}…`;

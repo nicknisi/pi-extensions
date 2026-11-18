@@ -366,6 +366,11 @@ export default function composer(pi: ExtensionAPI) {
       if (busy && !rt.busy) beginBusy();
       if (!busy && rt.busy) endBusy();
       rt.tool = state === 'tool' ? { name: 'bash', detail: '', since: rt.now() } : undefined;
+      if (busy) {
+        // Sample numbers so the tokens and tps items have something to show.
+        rt.tokens = 1284;
+        rt.tps = [12, 40, 66, 84, 79, 81];
+      }
       ctx.ui.notify(`composer preview: ${state}`, 'info');
       repaint();
       previewTimer = setTimeout(step, 1600);
