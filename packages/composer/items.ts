@@ -106,11 +106,7 @@ function hintsFor(states: StateName[]): [string, string][] {
   const interrupt = keyFor('app.interrupt', 'esc');
   switch (top) {
     case 'prompt':
-      return [
-        ['↑↓', 'choose'],
-        ['enter', 'confirm'],
-        [interrupt, 'cancel'],
-      ];
+      return []; // pi's dialog shows its own keys
     case 'tool':
     case 'working':
       return [
@@ -320,6 +316,7 @@ function body(name: string, o: ItemOptions, env: ItemEnv): Body | null {
       };
     }
     case 'hints': {
+      if (hintsFor(env.states).length === 0) return null;
       const hints = hintsFor(env.states).map(
         ([key, what]) => `${env.theme.bg('selectedBg', ` ${key} `)} ${dim(env, what)}`,
       );

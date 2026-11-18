@@ -74,7 +74,8 @@ describe('styles', () => {
     const cfg = loadFrom({ style: 'keycaps' }).config;
     expect(renderAll(cfg, SCENARIOS.idle, 120).footer[0]).toMatch(/ \/ +commands.*71% context left $/);
     expect(renderAll(cfg, SCENARIOS.working, 120).footer[0]).toContain('interrupt');
-    expect(renderAll(cfg, SCENARIOS.prompt, 120).footer[0]).toContain('confirm');
+    // A dialog shows its own keys, so composer adds none.
+    expect(renderAll(cfg, SCENARIOS.prompt, 120).footer[0]).not.toContain('interrupt');
     // The literal "esc to interrupt" only shows alongside a real working message.
     expect(renderAll(cfg, SCENARIOS.idle, 120).above).toEqual([]);
   });
