@@ -429,8 +429,13 @@ export function loadFrom(raw: unknown, styleOverride?: StyleName): LoadResult {
   const errors: string[] = [];
   const warnings: string[] = [];
   if (raw !== undefined && !isObject(raw)) errors.push('composer.json must be a JSON object');
-  const obj = isObject(raw) ? raw : {};
+  const obj = isObject(raw) ? { ...raw } : {};
   const legacy = Object.keys(obj).filter((k) => LEGACY_KEYS.includes(k));
+  // 0.x had a boolean `spinner`; 1.0's `spinner` is an object.
+  if (typeof obj.spinner === 'boolean') {
+    legacy.push('spinner');
+    delete obj.spinner;
+  }
   if (legacy.length)
     errors.push(
       `composer.json uses pre-1.0 keys that are now ignored: ${legacy.join(', ')}. ` +

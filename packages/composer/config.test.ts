@@ -27,8 +27,14 @@ describe('loadFrom', () => {
   });
 
   it('pre-1.0 keys are a hard error and are ignored', () => {
-    const { config, errors } = loadFrom({ boxedView: false, glowStyle: 'shimmer', style: 'keycaps' });
-    expect(errors[0]).toMatch(/pre-1.0 keys that are now ignored: boxedView, glowStyle/);
+    const { config, errors, warnings } = loadFrom({
+      boxedView: false,
+      glowStyle: 'shimmer',
+      spinner: true,
+      style: 'keycaps',
+    });
+    expect(errors[0]).toMatch(/pre-1.0 keys that are now ignored: boxedView, glowStyle, spinner/);
+    expect(warnings).toEqual([]);
     expect(errors[0]).toMatch(/Migrating from 0.x/);
     expect(config.style).toBe('keycaps');
   });
