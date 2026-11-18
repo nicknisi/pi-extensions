@@ -338,8 +338,8 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
         .split(/\n/)[0]!
         .trim()
         .replace(/^#+\s*/, '')
-        // Only an emphasis pair around the whole title; `foo__bar` is content.
-        .replace(/^(\*\*|__)(.+)\1$/, '$2')
+        // Each `**span**`/`__span__` whose markers sit at word edges; `foo__bar` is content.
+        .replace(/(^|\W)(\*\*|__)(?=\S)(.+?)(?<=\S)\2(?=\W|$)/g, '$1$3')
         .replace(/^["'`]+|["'`]+$/g, '')
         .replace(/[.!?]+$/, '')
         .trim();

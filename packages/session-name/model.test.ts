@@ -132,10 +132,15 @@ it('strips markdown and control characters from LLM titles', async () => {
   expect(h.setSessionName).toHaveBeenCalledWith('Critique of the ]0;x opening turn');
 });
 
-it('keeps double underscores that are part of the title', async () => {
+it.each([
+  ['Fix foo__bar parsing', 'Fix foo__bar parsing'],
+  ['**Fix login**.', 'Fix login'],
+  ['**Fix** and **test**', 'Fix and test'],
+  ['__Fix__ the parser', 'Fix the parser'],
+])('cleans emphasis in LLM title %j', async (raw, expected) => {
   const h = await harness('usable');
-  h.complete.mockResolvedValueOnce({ stopReason: 'stop', content: [{ type: 'text', text: 'Fix foo__bar parsing' }] });
+  h.complete.mockResolvedValueOnce({ stopReason: 'stop', content: [{ type: 'text', text: raw }] });
   h.fire('before_agent_start');
   await settle();
-  expect(h.setSessionName).toHaveBeenCalledWith('Fix foo__bar parsing');
+  expect(h.setSessionName).toHaveBeenCalledWith(expected);
 });
