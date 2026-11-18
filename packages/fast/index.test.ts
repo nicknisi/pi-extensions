@@ -43,6 +43,81 @@ afterAll(() => {
 });
 afterEach(() => childExtensions().delete('fast'));
 
+describe('Anthropic Fast cost', () => {
+  const reply = () => ({
+    role: 'assistant',
+    provider: 'anthropic',
+    stopReason: 'stop',
+    usage: { cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, total: 3 } },
+  });
+
+  it('prices a Fast reply at 2x once, and leaves standard replies alone', async () => {
+    const pi = fakePi();
+    fastExtension(pi.api);
+    pi.emit('session_start', {}, ctx);
+    const request = () => pi.emit('before_provider_request', { payload: { model: model.id } }, ctx);
+
+    request();
+    expect(pi.emit('message_end', { message: reply() }, ctx)).toBeUndefined(); // /fast is off
+
+    await pi.commands.get('fast')!.handler('', ctx);
+    request();
+    expect(pi.emit('message_end', { message: reply() }, ctx)?.message.usage.cost.total).toBe(6);
+    // No new request, so a second assistant message is not doubled again.
+    expect(pi.emit('message_end', { message: reply() }, ctx)).toBeUndefined();
+  });
+
+  it('leaves Codex Fast replies at the standard estimate', async () => {
+    const codex = { provider: 'openai-codex', id: 'gpt-6.2-sol', api: 'openai-codex-responses' };
+    const codexCtx = { ...ctx, model: codex, modelRegistry: { isUsingOAuth: () => true } };
+    const pi = fakePi();
+    fastExtension(pi.api);
+    pi.emit('session_start', {}, codexCtx);
+    await pi.commands.get('fast')!.handler('', codexCtx);
+
+    expect(pi.emit('before_provider_request', { payload: { model: codex.id } }, codexCtx)).toMatchObject({
+      service_tier: 'priority',
+    });
+    expect(pi.emit('message_end', { message: { ...reply(), provider: 'openai-codex' } }, codexCtx)).toBeUndefined();
+  });
+});
+
+describe('Fast mode refused by the plan', () => {
+  it('falls back to standard speed for that model and tells the user', async () => {
+    const codex = { provider: 'openai-codex', id: 'gpt-6.2-sol', api: 'openai-codex-responses' };
+    const notes: string[] = [];
+    const codexCtx = {
+      ...ctx,
+      model: codex,
+      hasUI: true,
+      modelRegistry: { isUsingOAuth: () => true },
+      ui: { notify: (text: string) => notes.push(text), setStatus() {} },
+    };
+    const pi = fakePi();
+    fastExtension(pi.api);
+    pi.emit('session_start', {}, codexCtx);
+    await pi.commands.get('fast')!.handler('', codexCtx);
+    const request = () => pi.emit('before_provider_request', { payload: { model: codex.id } }, codexCtx);
+
+    expect(request()).toEqual({ model: codex.id, service_tier: 'priority' });
+    pi.emit(
+      'message_end',
+      {
+        message: {
+          role: 'assistant',
+          provider: 'openai-codex',
+          model: codex.id,
+          stopReason: 'error',
+          errorMessage: "Codex error: Fast mode isn't available for the selected model in your workspace.",
+        },
+      },
+      codexCtx,
+    );
+    expect(notes.at(-1)).toContain('openai-codex/gpt-6.2-sol');
+    expect(request()).toBeUndefined();
+  });
+});
+
 describe('fast mode in subagent children', () => {
   it('children follow the parent session /fast toggle and share its cooldown', async () => {
     const parent = fakePi();
