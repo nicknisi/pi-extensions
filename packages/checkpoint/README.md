@@ -38,9 +38,9 @@ pi -e /abs/path/packages/checkpoint/extensions/self-compact/self-compact.ts
 - **Commands:** `/self-compact-info` (thresholds, usage, handoff state — never
   calls the model) and `/self-compact-now` (asks the agent to checkpoint now;
   retries a pending note verbatim).
-- **Context display:** when `@nicknisi/pi-statusline` is loaded, Checkpoint
-  colors its existing context bar and hides the separate widget. Without that
-  extension, a 20-cell context widget remains above the editor (legend below).
+- **Context display:** when `@nicknisi/pi-composer` (1.0+) shows a context
+  meter, Checkpoint colors it and hides the separate widget. Without one, a
+  20-cell context widget remains above the editor (legend below).
   No other extension is required.
 - **Flags:** `--compact-soft-at`, `--compact-at`, `--compact-buffer`,
   `--compact-prompt`.
@@ -115,16 +115,18 @@ delivered separately as a continuation.
 
 ## Context bar legend
 
-With `@nicknisi/pi-statusline`, the existing footer meter keeps its size, fill,
+With `@nicknisi/pi-composer`, composer's context meter keeps its size, fill,
 labels, and **remaining-context** meaning. Checkpoint supplies its color:
 green below soft, blue/accent at soft, amber at warning, red at hard or on a
 failed handoff, and dim while usage is unknown. No threshold ticks or additional
 footer row are added. Theme colors may differ from these descriptions.
 
-The optional integration uses Pi's event bus and works in either load order.
-If the statusline is removed, the standalone widget returns automatically.
+The optional integration uses Pi's event bus (`composer:context-bar`,
+`composer:request-context-bar`) and works in either load order. If composer is
+removed, or its config has no `context` item, the standalone widget returns
+automatically.
 
-When running without the statusline, the widget renders 20 cells inside brackets (each cell = 5% of the window),
+When running without that meter, the widget renders 20 cells inside brackets (each cell = 5% of the window),
 followed by the used percentage. With explicit 20%/50%/10% thresholds,
 40% usage and half the used context cached:
 
@@ -195,13 +197,13 @@ All checks run from the repository root.
 
 ```bash
 pnpm --filter @nicknisi/pi-checkpoint build
-pnpm exec vitest run packages/checkpoint packages/statusline
+pnpm exec vitest run packages/checkpoint packages/composer
 pnpm --filter @nicknisi/pi-checkpoint typecheck
-pnpm exec oxlint packages/checkpoint packages/statusline
-pnpm exec oxfmt --check packages/checkpoint packages/statusline
+pnpm exec oxlint packages/checkpoint packages/composer
+pnpm exec oxfmt --check packages/checkpoint packages/composer
 ```
 
-The suite covers lifecycle recovery, thresholds, prompts, packaging, and statusline
+The suite covers lifecycle recovery, thresholds, prompts, packaging, and composer
 integration. Pi session and CLI tests use an offline scripted provider, so no
 model credentials or paid API calls are required. The helpers under `verify/`
 are fixtures used by those tests.

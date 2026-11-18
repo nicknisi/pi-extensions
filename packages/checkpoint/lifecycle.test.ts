@@ -649,7 +649,7 @@ describe('recovery after interrupted compaction', () => {
   });
 });
 
-describe('statusline color integration', () => {
+describe('composer context-bar integration', () => {
   it('publishes zone colors while keeping the standalone widget as a fallback', async () => {
     const h = makeHarness();
     const colors: unknown[] = [];
@@ -669,29 +669,29 @@ describe('statusline color integration', () => {
     }
   });
 
-  it('hides the duplicate widget when statusline claims the bar, and restores it on release', async () => {
+  it('hides the duplicate widget when composer claims the bar, and restores it on release', async () => {
     const h = makeHarness();
     await h.fire('session_start');
     expect(h.widget()).toBeDefined();
-    h.events.emit('statusline:context-bar', true);
+    h.events.emit('composer:context-bar', true);
     expect(h.widget()).toBeUndefined();
     h.setUsage(255000);
     await h.fire('turn_end');
     expect(h.widget()).toBeUndefined();
-    h.events.emit('statusline:context-bar', false);
+    h.events.emit('composer:context-bar', false);
     expect(h.widget()).toBeDefined();
   });
 
-  it('discovers an already loaded statusline and clears its color on shutdown', async () => {
+  it('discovers an already loaded composer and clears its color on shutdown', async () => {
     const h = makeHarness();
     const colors: unknown[] = [];
-    h.events.on('statusline:request-context-bar', () => h.events.emit('statusline:context-bar', true));
+    h.events.on('composer:request-context-bar', () => h.events.emit('composer:context-bar', true));
     h.events.on('self-compact:context-color', (color) => colors.push(color));
     await h.fire('session_start');
     expect(h.widget()).toBeUndefined();
     await h.fire('session_shutdown');
     expect(colors.at(-1)).toBeUndefined();
-    h.events.emit('statusline:context-bar', false);
+    h.events.emit('composer:context-bar', false);
     expect(h.widget()).toBeUndefined();
   });
 });
