@@ -4,8 +4,16 @@ import { askTool } from './test-utils/dialog.js';
 import { useTempAgentDir } from './test-utils/index.js';
 
 // Regression tests for upstream bugs fixed in this fork (CodeRabbit review of PR #238).
-const editWithExternalEditor = vi.hoisted(() => vi.fn(async () => 'edited in editor'));
-vi.mock('./state/external-editor.js', () => ({ editWithExternalEditor }));
+const { editWithExternalEditor, editorModule } = vi.hoisted(() => {
+  let release: () => void = () => {};
+  const loaded = new Promise<void>((resolve) => (release = resolve));
+  return { editWithExternalEditor: vi.fn(async () => 'edited in editor'), editorModule: { loaded, release } };
+});
+// The editor module finishes loading only when a test releases it, so a test can close the dialog first.
+vi.mock('./state/external-editor.js', async () => {
+  await editorModule.loaded;
+  return { editWithExternalEditor };
+});
 
 useTempAgentDir();
 afterEach(() => vi.unstubAllEnvs());
@@ -92,10 +100,12 @@ describe('fork fixes', () => {
     await q.mounted;
     q.press(DOWN);
     q.press(DOWN); // "Type something."
-    q.press(CTRL_G); // starts loading the editor modules
+    q.press(CTRL_G); // starts loading the editor module, held by the barrier
     bus.emit(ASK_USER_ANSWER_EVENT, { toolCallId: 'tc', answers: [{ questionIndex: 0, optionIndexes: [1] }] });
     expect((await q.result).details).toMatchObject({ answers: [{ answer: 'Overlay' }] });
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    editorModule.release();
+    await import('./state/external-editor.js'); // the pending load has finished
+    await new Promise((resolve) => setImmediate(resolve)); // and so has the code after it
     expect(editWithExternalEditor).not.toHaveBeenCalled();
   });
 });

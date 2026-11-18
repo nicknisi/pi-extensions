@@ -100,7 +100,16 @@ describe('i18n soft-peer shim — runtime fallback contract', () => {
     expect(t('any.key', 'literal fallback')).toBe('literal fallback');
     expect(t('sentinel.next', 'Next')).toBe('Next');
     expect(warn).not.toHaveBeenCalled(); // absent is the normal case: no noise
-    expect(isMissingModule(Object.assign(new Error('x'), { code: 'ERR_MODULE_NOT_FOUND' }))).toBe(true);
+    // Absent SDK, as Node, jiti and Vite word it: silent.
+    expect(isMissingModule(new Error("Cannot find package '@juicesharp/rpiv-i18n' imported from /x/a.js"))).toBe(true);
+    expect(isMissingModule(new Error("Cannot find module '@juicesharp/rpiv-i18n/loader'"))).toBe(true);
+    expect(isMissingModule(new Error('Could not resolve "@juicesharp/rpiv-i18n" imported by "x"'))).toBe(true);
+    // Installed but broken: reported.
+    expect(
+      isMissingModule(
+        new Error("Cannot find package 'dep' imported from /n/node_modules/@juicesharp/rpiv-i18n/i18n.js"),
+      ),
+    ).toBe(false);
     expect(isMissingModule(new SyntaxError('Unexpected token'))).toBe(false);
   });
 });

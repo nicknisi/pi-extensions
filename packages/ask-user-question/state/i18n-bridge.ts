@@ -38,14 +38,15 @@ type I18nSDK = { scope: (namespace: string) => ScopeFn };
 // before evaluating any importer.
 // A variable specifier keeps this optional peer out of the type graph: it ships raw .ts, which this repo's build can't compile.
 const I18N_SDK: string = '@juicesharp/rpiv-i18n';
-/** True when the optional SDK simply isn't installed (the normal case), as opposed to installed but broken. */
+/**
+ * True only when the module that couldn't be found is the optional SDK itself (the normal case),
+ * not one of its own dependencies (installed but broken, which should be reported). Node, jiti and
+ * Vite all quote the missing target right after the phrase; an "imported from" path that merely
+ * contains the SDK's name is not the target.
+ */
 function isMissingModule(error: unknown): boolean {
-  const code = (error as { code?: unknown } | null)?.code;
-  return (
-    code === 'ERR_MODULE_NOT_FOUND' ||
-    code === 'MODULE_NOT_FOUND' ||
-    /Cannot find (module|package)|Could not resolve/.test(String(error))
-  );
+  const target = /(?:Cannot find (?:module|package)|Could not resolve) ['"]([^'"]+)['"]/.exec(String(error))?.[1];
+  return target === I18N_SDK || target?.startsWith(`${I18N_SDK}/`) === true;
 }
 let scopeImpl: ScopeFn;
 try {
