@@ -196,11 +196,7 @@ importers:
 
   packages/sidepulse: {}
 
-  packages/spinner: {}
-
   packages/stash: {}
-
-  packages/statusline: {}
 
   packages/subagents:
     dependencies:
