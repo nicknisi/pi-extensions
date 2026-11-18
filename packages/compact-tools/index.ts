@@ -1,5 +1,4 @@
 import {
-  keyText,
   type AgentToolResult,
   type ExtensionAPI,
   type Theme,
@@ -163,7 +162,8 @@ function compactRenderers(toolName: string, base: ToolRenderers | undefined): To
           const images = result.content.filter((part) => part.type === 'image').length;
           if (images) preview += ` [${images} image${images === 1 ? '' : 's'}]`;
           if (context.isError) preview = `Error: ${preview}`;
-          const hint = ` [${keyText('app.tools.expand')}]`;
+          const key = context.keyText('app.tools.expand');
+          const hint = key ? ` [${key}]` : '';
           return theme.fg(color, truncateToWidth(`  ${preview}`, Math.max(0, width - hint.length)) + hint);
         },
         paint(theme, context),

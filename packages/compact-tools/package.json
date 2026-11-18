@@ -30,7 +30,7 @@
     "@nicknisi/pi-shared": "workspace:*"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=1.0.1",
+    "@earendil-works/pi-coding-agent": ">=1.5.0",
     "@earendil-works/pi-tui": "*"
   },
   "pi": {

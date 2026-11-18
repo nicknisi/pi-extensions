@@ -294,7 +294,11 @@ describe('council selection and execution', () => {
     expect(message.content).toContain('Incomplete synthesis:');
     expect(message.content).toContain('Partial synthesis');
     const renderer = h.registerMessageRenderer.mock.calls[0]![1];
-    expect(renderer(message, { expanded: false }, theme).render(100).join('\n')).toContain('Connection lost');
+    expect(
+      renderer(message, { expanded: false, keyText: () => 'ctrl+o' }, theme)
+        .render(100)
+        .join('\n'),
+    ).toContain('Connection lost');
   });
 
   it('requires fixing an unavailable qualified model instead of choosing another provider or newer variant', async () => {

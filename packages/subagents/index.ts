@@ -25,11 +25,11 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
   ExtensionUIContext,
+  KeybindingHints,
   Theme,
 } from '@earendil-works/pi-coding-agent';
 import { getAgentDir, getSelectListTheme } from '@earendil-works/pi-coding-agent';
 import {
-  getKeybindings,
   Key,
   matchesKey,
   SelectList,
@@ -297,9 +297,9 @@ function branchLine(text: string, theme: Theme): string {
   return `${theme.fg('dim', BRANCH_PREFIX)} ${text}`;
 }
 
-function expandHint(theme: Theme): string {
-  const key = getKeybindings().getKeys('app.tools.expand')[0] ?? 'ctrl+o';
-  return theme.fg('dim', ` • ${key} to expand`);
+function expandHint(theme: Theme, keyText: KeybindingHints['keyText']): string {
+  const key = keyText('app.tools.expand');
+  return key ? theme.fg('dim', ` • ${key} to expand`) : '';
 }
 
 function dispatchHeader(summary: string, theme: Theme, dot?: string): string {
@@ -1824,7 +1824,7 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
 
       if (!options?.expanded) {
         const tree = renderTaskTree(details.tasks, theme, frame);
-        tree[tree.length - 1] += expandHint(theme);
+        tree[tree.length - 1] += expandHint(theme, ctx.keyText);
         return makeText(ctx?.lastComponent, ['', ...tree].join('\n'));
       }
 
@@ -2043,7 +2043,7 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
 
   // Collapsible transcript block for inline `&` dispatches — reuses the same
   // renderTaskTree / createExpandedDispatchView machinery as the dispatch tool.
-  pi.registerMessageRenderer('subagents:inline', (message, { expanded }, theme) => {
+  pi.registerMessageRenderer('subagents:inline', (message, { expanded, keyText }, theme) => {
     const details = message.details as DispatchDetails | undefined;
     if (!details?.tasks || details.tasks.length === 0) return undefined;
     const task = details.tasks[0]!;
@@ -2052,7 +2052,7 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
     const header = dispatchHeader(`${task.label}${model}`, theme, dot);
     if (!expanded) {
       const tree = renderTaskTree(details.tasks, theme, 0);
-      tree[tree.length - 1] += expandHint(theme);
+      tree[tree.length - 1] += expandHint(theme, keyText);
       return inlineComponent(() => ['', header, ...tree]);
     }
     const view = createExpandedDispatchView(details.tasks, theme);
