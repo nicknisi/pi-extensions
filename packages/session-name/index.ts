@@ -116,12 +116,31 @@ function contentToText(content: unknown): string {
   return '';
 }
 
-/** First user message text in the branch (oldest first). */
-function firstUserText(branch: SessionEntry[]): string | undefined {
+/** Prompts with fewer words than this ("ok", "hello") carry no task to name. */
+const MIN_TASK_WORDS = 3;
+
+/** Whether a prompt says enough to name a session from. */
+export function hasTask(text: string): boolean {
+  return text.split(/\s+/).filter((word) => /[\p{L}\p{N}]/u.test(word)).length >= MIN_TASK_WORDS;
+}
+
+/**
+ * Replace control and bidi characters with spaces. Names end up inside the
+ * terminal-title escape sequence, where a stray ESC or BEL breaks out of it.
+ */
+export function cleanName(text: string): string {
+  return text
+    .replace(/[\p{Cc}\p{Bidi_Control}]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** First user message in the branch (oldest first) that states a task. */
+function firstTaskText(branch: SessionEntry[]): string | undefined {
   for (const entry of branch) {
     if (entry.type === 'message' && entry.message.role === 'user') {
       const text = contentToText(entry.message.content);
-      if (text.trim()) return text;
+      if (hasTask(text)) return text;
     }
   }
   return undefined;
@@ -185,11 +204,13 @@ function appTitle(): string {
 export function buildTitle(name: string | undefined, cwd: string, format: string): string {
   const dir = basename(cwd) || cwd;
   const app = appTitle();
-  if (!name) return `${app} — ${dir}`;
-  return format
-    .replace(/\{summary\}/g, name)
-    .replace(/\{dir\}/g, dir)
-    .replace(/\{app\}/g, app);
+  if (!name) return cleanName(`${app} — ${dir}`);
+  return cleanName(
+    format
+      .replace(/\{summary\}/g, name)
+      .replace(/\{dir\}/g, dir)
+      .replace(/\{app\}/g, app),
+  );
 }
 
 // ── Extension ─────────────────────────────────────────────────────────────
@@ -251,8 +272,10 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
     }
 
     // A resumed unnamed session is named from its first prompt, not this one.
-    const userText = firstUserText(ctx.sessionManager.getBranch()) ?? event.prompt;
-    if (!userText.trim()) return;
+    // Prompts like "ok" or "hello" are skipped; the next prompt gets another try.
+    const userText =
+      firstTaskText(ctx.sessionManager.getBranch()) ?? (hasTask(event.prompt) ? event.prompt : undefined);
+    if (!userText) return;
 
     autoNamed = true;
     // Not awaited: the agent run must not wait on the title call.
@@ -271,6 +294,7 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
       }
     }
     name ??= deriveHeuristicName(userText, config.heuristicMaxLength);
+    name = name && (cleanName(name) || null);
 
     // The name may have been set (or the session replaced) while the LLM call was in flight.
     if (!name || shutDown || pi.getSessionName()) return;
@@ -313,6 +337,9 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
       let title = raw
         .split(/\n/)[0]!
         .trim()
+        .replace(/^#+\s*/, '')
+        // Each `**span**`/`__span__` whose markers sit at word edges; `foo__bar` is content.
+        .replace(/(^|\W)(\*\*|__)(?=\S)(.+?)(?<=\S)\2(?=\W|$)/g, '$1$3')
         .replace(/^["'`]+|["'`]+$/g, '')
         .replace(/[.!?]+$/, '')
         .trim();
@@ -369,9 +396,10 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
         return;
       }
 
-      pi.setSessionName(arg);
+      const name = cleanName(arg);
+      pi.setSessionName(name);
       autoNamed = true; // user named manually; don't overwrite later
-      ctx.ui.notify(`Session named: ${arg}`, 'info');
+      ctx.ui.notify(`Session named: ${name}`, 'info');
     },
   });
 

@@ -39,6 +39,12 @@ describe('buildTitle', () => {
     expect(buildTitle(undefined, '/tmp/work', '{summary} — {dir}')).toBe('π — work');
   });
 
+  it('keeps control characters out of the terminal-title escape sequence', () => {
+    expect(buildTitle('Evil\x1b]0;pwned\x07Name\u202E\u200E\u200F\u061C', '/tmp/work', '{summary} — {dir}')).toBe(
+      'Evil ]0;pwned Name — work',
+    );
+  });
+
   it('substitutes {app} in the format', () => {
     process.env.PI_PACKAGE_DIR = brandedPackageDir('arc');
     expect(buildTitle('Fix the parser', '/tmp/work', '{app}: {summary} ({dir})')).toBe('arc: Fix the parser (work)');
