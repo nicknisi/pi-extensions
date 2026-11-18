@@ -25,6 +25,7 @@ export function setDataListener(fn: (() => void) | undefined): void {
 // ─── Usage (Anthropic OAuth API) ──────────────────────────────────────────
 
 const USAGE_CACHE_TTL_S = 120;
+// Same cache directory statusline used, so an upgrade keeps the warm cache.
 const usageCacheDir = () => join(process.env.TMPDIR || '/tmp', 'pi-statusline-cache');
 const usageCacheFile = () => join(usageCacheDir(), 'usage.json');
 
