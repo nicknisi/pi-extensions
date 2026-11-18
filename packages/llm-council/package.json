@@ -24,7 +24,8 @@
     "picker.ts",
     "README.md",
     "llm-council.example.json",
-    "llm-council.project.example.json"
+    "llm-council.project.example.json",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {

@@ -24,7 +24,8 @@
     "policy.ts",
     "format.ts",
     "discovery.ts",
-    "routing.ts"
+    "routing.ts",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {

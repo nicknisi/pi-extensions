@@ -33,7 +33,8 @@
     "templates.ts",
     "utils.ts",
     "README.md",
-    "artifacts.example.json"
+    "artifacts.example.json",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {

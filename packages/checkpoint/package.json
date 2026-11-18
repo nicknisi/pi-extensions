@@ -18,7 +18,8 @@
     "dist",
     "index.ts",
     "extensions",
-    ".pi/self-compact"
+    ".pi/self-compact",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {

@@ -16,7 +16,8 @@
   },
   "files": [
     "dist",
-    "index.ts"
+    "index.ts",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {

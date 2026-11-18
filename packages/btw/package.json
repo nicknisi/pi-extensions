@@ -18,7 +18,8 @@
     "dist",
     "index.ts",
     "config.ts",
-    "btw.example.json"
+    "btw.example.json",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {
