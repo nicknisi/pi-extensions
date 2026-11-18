@@ -8,9 +8,9 @@
  */
 
 import type { AssistantMessage } from '@earendil-works/pi-ai';
-import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { getAgentDir, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -25,9 +25,9 @@ export function setDataListener(fn: (() => void) | undefined): void {
 // ─── Usage (Anthropic OAuth API) ──────────────────────────────────────────
 
 const USAGE_CACHE_TTL_S = 120;
-// Same cache directory statusline used, so an upgrade keeps the warm cache.
-const usageCacheDir = () => join(process.env.TMPDIR || '/tmp', 'pi-statusline-cache');
-const usageCacheFile = () => join(usageCacheDir(), 'usage.json');
+// In pi's agent dir (owned by the user), not a shared temp dir another user could pre-create.
+const usageCacheDir = () => join(getAgentDir(), 'cache');
+const usageCacheFile = () => join(usageCacheDir(), 'composer-usage.json');
 
 export interface UsageWindow {
   utilization: number;
@@ -41,10 +41,24 @@ export interface UsageData {
 /** Why usage is or isn't showing, reported by /composer. */
 export let usageHealth = 'not requested yet';
 let usageInFlight = false;
+/** After a failed refresh, wait this long before asking again (no hammering a 429, no keychain prompts). */
+let usageRetryAt = 0;
+
+const isWindow = (w: unknown): w is UsageWindow =>
+  typeof w === 'object' &&
+  w !== null &&
+  Number.isFinite((w as UsageWindow).utilization) &&
+  typeof (w as UsageWindow).resets_at === 'string';
+
+/** A usage payload with both windows, or undefined. */
+export function parseUsage(raw: unknown): UsageData | undefined {
+  const d = raw as Partial<UsageData> | null;
+  return d && isWindow(d.five_hour) && isWindow(d.seven_day) ? (d as UsageData) : undefined;
+}
 
 async function oauthToken(): Promise<string | undefined> {
   try {
-    const auth = JSON.parse(readFileSync(join(process.env.HOME || '', '.pi', 'agent', 'auth.json'), 'utf8'));
+    const auth = JSON.parse(readFileSync(join(getAgentDir(), 'auth.json'), 'utf8'));
     if (auth?.anthropic?.access) return auth.anthropic.access;
   } catch {
     /* fall through to the keychain */
@@ -62,60 +76,45 @@ async function oauthToken(): Promise<string | undefined> {
 function readUsageCache(allowStale: boolean): UsageData | undefined {
   try {
     const file = usageCacheFile();
-    if (!existsSync(file)) return undefined;
     const ageS = (Date.now() - statSync(file).mtimeMs) / 1000;
     if (!allowStale && ageS >= USAGE_CACHE_TTL_S) return undefined;
-    return JSON.parse(readFileSync(file, 'utf8'));
+    return parseUsage(JSON.parse(readFileSync(file, 'utf8')));
   } catch {
     return undefined;
   }
 }
 
+function failUsage(reason: string): void {
+  usageHealth = reason;
+  usageRetryAt = Date.now() + USAGE_CACHE_TTL_S * 1000;
+}
+
 function refreshUsage(): void {
-  if (usageInFlight) return;
+  if (usageInFlight || Date.now() < usageRetryAt) return;
   usageInFlight = true;
   void (async () => {
     try {
       const token = await oauthToken();
-      if (!token) {
-        usageHealth = 'no Anthropic OAuth token (pi auth.json or Claude Code keychain)';
-        return;
-      }
-      const { stdout } = await execFileP(
-        'curl',
-        [
-          '-s',
-          '--max-time',
-          '3',
-          '-w',
-          '\n%{http_code}',
-          '-H',
-          `Authorization: Bearer ${token}`,
-          '-H',
-          'anthropic-beta: oauth-2025-04-20',
-          'https://api.anthropic.com/api/oauth/usage',
-        ],
-        { timeout: 5000 },
-      );
-      const cut = stdout.lastIndexOf('\n');
-      const body = stdout.slice(0, cut);
-      const status = stdout.slice(cut + 1).trim();
-      if (status !== '200') {
-        usageHealth = `usage API answered HTTP ${status || '(no response)'}`;
-        return;
-      }
-      const data = JSON.parse(body);
-      if (data?.five_hour?.utilization === undefined) {
-        usageHealth = 'usage API response had no five_hour window';
-        return;
-      }
-      mkdirSync(usageCacheDir(), { recursive: true });
-      writeFileSync(usageCacheFile(), body);
+      if (!token) return failUsage('no Anthropic OAuth token (pi auth.json or Claude Code keychain)');
+      // In-process, so the token never appears in a process list.
+      const res = await fetch('https://api.anthropic.com/api/oauth/usage', {
+        headers: { Authorization: `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20' },
+        signal: AbortSignal.timeout(3000),
+      });
+      const body = await res.text();
+      if (res.status !== 200) return failUsage(`usage API answered HTTP ${res.status}`);
+      if (!parseUsage(JSON.parse(body))) return failUsage('usage API response was missing a 5h or 7d window');
+      mkdirSync(usageCacheDir(), { recursive: true, mode: 0o700 });
+      // Write then rename: atomic, and never follows a link planted at the target name.
+      const tmp = `${usageCacheFile()}.${process.pid}.tmp`;
+      writeFileSync(tmp, body, { mode: 0o600 });
+      renameSync(tmp, usageCacheFile());
       usageHealth = 'ok';
+      usageRetryAt = 0;
       memo = undefined;
       onDataUpdated?.();
     } catch (error) {
-      usageHealth = `usage fetch failed: ${error instanceof Error ? error.message : String(error)}`;
+      failUsage(`usage fetch failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       usageInFlight = false;
     }

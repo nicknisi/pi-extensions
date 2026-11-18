@@ -141,3 +141,22 @@ describe('/composer preview', () => {
     expect(renderFooter(c, 80)[0]).toContain('8% ctx');
   });
 });
+
+describe('robustness', () => {
+  it('a slab background the theme does not know draws without a background instead of throwing', () => {
+    const cfg = loadFrom({ style: 'keycaps', box: { background: 'nope' } }).config;
+    const throwing = {
+      ...plainTheme,
+      bg: (token: string, text: string) => {
+        if (token === 'nope') throw new Error('unknown bg');
+        return text;
+      },
+    } as unknown as typeof plainTheme;
+    expect(() => renderAll(cfg, SCENARIOS.idle, 80, throwing)).not.toThrow();
+  });
+
+  it('panel titles fall back to the footer even with an empty panel slot', () => {
+    const cfg = loadFrom({ slots: { footerLeft: [], footerRight: [], panel: [], panelTop: ['context'] } }).config;
+    expect(renderAll(cfg, SCENARIOS.idle, 120).footer[0]).toContain('71%');
+  });
+});

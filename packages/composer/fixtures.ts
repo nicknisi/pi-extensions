@@ -108,6 +108,12 @@ export function renderAll(cfg: ComposerConfig, s: Scenario, width: number, theme
   const rt = runtimeFor(s);
   const c: Ctx = { cfg, rt, theme };
   const g = geometry(cfg, width);
-  const editor = s.state === 'prompt' ? [] : (renderEditor(c, width, stockLines(s.text ?? '', g.contentWidth)) ?? []);
+  // A dialog replaces the editor in the prompt state; everywhere else composer must draw it.
+  let editor: string[] = [];
+  if (s.state !== 'prompt') {
+    const rendered = renderEditor(c, width, stockLines(s.text ?? '', g.contentWidth));
+    if (!rendered) throw new Error(`renderEditor fell back to pi's stock editor for ${s.state} @ ${width}`);
+    editor = rendered;
+  }
   return { above: renderAbove(c, width), editor, footer: renderFooter(c, width) };
 }

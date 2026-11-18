@@ -19,7 +19,12 @@ function detectPaneFocus(): boolean {
   try {
     return paneHasFocusedClient(
       process.env.TMUX_PANE,
-      execFileSync('tmux', ['list-clients', '-F', '#{client_flags}\t#{pane_id}'], { encoding: 'utf8' }),
+      // A hung tmux must not block the TUI, and its errors must not land on screen.
+      execFileSync('tmux', ['list-clients', '-F', '#{client_flags}\t#{pane_id}'], {
+        encoding: 'utf8',
+        timeout: 1000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }),
     );
   } catch {
     return true;

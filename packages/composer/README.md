@@ -221,7 +221,7 @@ Remove `@nicknisi/pi-statusline` and `@nicknisi/pi-spinner` from your pi package
 
 ## Dependencies
 
-Peer dependencies: `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, `@earendil-works/pi-ai` (types). External commands, all optional and async: `gh` (PR lookup), `curl` and macOS `security` (Anthropic usage), `tmux` (focus).
+Peer dependencies: `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, `@earendil-works/pi-ai` (types). External commands, all optional and async: `gh` (PR lookup), macOS `security` (Anthropic token from the keychain), `tmux` (focus). Usage is fetched in-process and cached in `<agent dir>/cache/composer-usage.json`.
 
 ## Caveats
 

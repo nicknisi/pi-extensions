@@ -328,7 +328,12 @@ function rule(
 }
 
 function slabRow(c: Ctx, line: string): string {
-  const open = c.theme.bg(c.cfg.box.background as Parameters<Theme['bg']>[0], '\u0000').split('\u0000')[0] ?? '';
+  let open = '';
+  try {
+    open = c.theme.bg(c.cfg.box.background as Parameters<Theme['bg']>[0], '\u0000').split('\u0000')[0] ?? '';
+  } catch {
+    // Not a background token this theme knows: draw the slab without a background.
+  }
   // Re-open the background after any reset inside the row (cursor, coloured text).
   return open + line.replace(/\x1b\[0m/g, `\x1b[0m${open}`).replace(/\x1b\[49m/g, open) + '\x1b[49m';
 }
@@ -375,7 +380,7 @@ export function renderFooter(c: Ctx, width: number): string[] {
   let left = slot(c, e, c.cfg.slots.footerLeft);
   const right = slot(c, e, c.cfg.slots.footerRight);
   // Panel items fall back to the footer when the pane is too narrow for the panel.
-  if (c.cfg.slots.panel.length && !panelVisible(c.cfg, width))
+  if (!panelVisible(c.cfg, width))
     left = [...left, ...slot(c, e, [...c.cfg.slots.panelTop, ...c.cfg.slots.panel, ...c.cfg.slots.panelBottom])];
   const toast = c.cfg.toasts && c.rt.toast && c.rt.toast.until > c.rt.now() ? c.rt.toast.text : undefined;
   if (toast) left = [{ forms: [toast], priority: 1000, group: -1 }];

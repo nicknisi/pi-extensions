@@ -16,9 +16,7 @@ export const VERBS = [
   'ATE-ing',
   'Achieving perfect run eventually',
   'Add a plate',
-  'Adding ',
-  '10x',
-  'to the plan and subtracting all nuance',
+  'Adding 10x to the plan and subtracting all nuance',
   'Adding "Thought Leader" to my LinkedIn bio',
   'Adjusting tie before the crash',
   'Aeropress extracting',
@@ -274,8 +272,7 @@ export const VERBS = [
   'Doomscrolling',
   'Dose-weighing',
   'Double jumping over deadlines',
-  'Drafting a LinkedIn post that begins with "No one talks about this',
-  '',
+  'Drafting a LinkedIn post that begins with "No one talks about this"',
   'Drinking Comed-Tea for inspiration',
   'Drinking bulletproof coffee out of a Yeti tumbler',
   'Drop a "interested" below.',
@@ -752,8 +749,7 @@ export const VERBS = [
   'Realizing you are in the wrong line',
   'Realizing your stamps have expired',
   'Reasoning step by step',
-  'Rebranding stress as "founder energy',
-  '',
+  'Rebranding stress as "founder energy"',
   'Recomping',
   'Reconning',
   'Recycling the Same Joke',
@@ -925,8 +921,7 @@ export const VERBS = [
   "Stacking passive income streams like it's a competitive sport",
   'Stacking wins so high the algorithm has no choice but to notice',
   'Stalking raptors',
-  'Stamping the form "REQUIRES ADDITIONAL REVIEW',
-  '',
+  'Stamping the form "REQUIRES ADDITIONAL REVIEW"',
   'Standing on business with this PR',
   'Stapler-jello-ing',
   'Star-powering',
@@ -1045,8 +1040,7 @@ export const VERBS = [
   'Trying not to overfit your question',
   'Tuning alerts to reduce deja vu',
   'Turning "busy" into a personality trait with measurable outcomes',
-  'Turning "just a hobby" into "just a revenue stream',
-  '',
+  'Turning "just a hobby" into "just a revenue stream"',
   'Turning It Off and On Again',
   'Turning a coffee into a content pillar',
   'Turning a hobby into a revenue stream',
@@ -1068,8 +1062,7 @@ export const VERBS = [
   'Untangling the attention heads',
   'Updating my priors',
   'Updating priors on midnight fixes',
-  'Updating the status to "UNDER CONSIDERATION',
-  '',
+  'Updating the status to "UNDER CONSIDERATION"',
   'Updating the threat model',
   'Upgrading your NPC scripts',
   'VHS-rewinding',
@@ -1139,7 +1132,8 @@ export const VERBS = [
 ];
 
 export function randomVerb(list: readonly string[] = VERBS): string {
-  return list[Math.floor(Math.random() * list.length)] ?? 'Working';
+  const usable = list.filter((v) => v.trim() !== '');
+  return usable[Math.floor(Math.random() * usable.length)] ?? 'Working';
 }
 
 export interface ShimmerOptions {

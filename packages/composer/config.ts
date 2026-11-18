@@ -271,6 +271,65 @@ const ENUMS: Record<string, readonly string[]> = {
   icons: ['nerd', 'unicode', 'ascii'],
 };
 
+// Periods and band widths divide by these; 0 would render NaN colours.
+const MIN_VALUE: Record<string, number> = {
+  'box.effectPeriodMs': 1,
+  'working.shimmerPeriodMs': 1,
+  'working.bandWidth': 1,
+  'panel.width': 10,
+};
+// Cell counts must be whole numbers or rows stop adding up to the pane width.
+const INTEGER_KEYS = new Set([
+  'box.padX',
+  'box.padY',
+  'box.menuGap',
+  'box.menuIndent',
+  'panel.width',
+  'panel.minWidth',
+]);
+
+type FieldType = 'string' | 'number' | 'strings' | readonly string[];
+const ITEM_OPTION_TYPES: Record<string, FieldType> = {
+  priority: 'number',
+  color: 'string',
+  icon: 'string',
+  prefix: 'string',
+  suffix: 'string',
+  show: ['bar', 'percent', 'tokens'],
+  barWidth: 'number',
+  label: 'string',
+  hide: 'strings',
+  showBelow: 'number',
+};
+const PROMPT_LOOK_TYPES: Record<string, FieldType> = { symbol: 'string', color: 'string' };
+const BOX_LOOK_TYPES: Record<string, FieldType> = { color: 'string' };
+
+/** Keep the well-typed fields of `obj`; warn (with the full path) about the rest. */
+function checkFields(path: string, obj: Json, types: Record<string, FieldType>, warnings: string[]): Json {
+  const out: Json = {};
+  for (const [key, value] of Object.entries(obj)) {
+    const type = types[key];
+    if (!type) {
+      warnings.push(`unknown key "${path}.${key}"${suggest(key, Object.keys(types))}`);
+      continue;
+    }
+    const ok =
+      type === 'string'
+        ? typeof value === 'string'
+        : type === 'number'
+          ? typeof value === 'number' && Number.isFinite(value) && value >= 0
+          : type === 'strings'
+            ? Array.isArray(value) && value.every((v) => typeof v === 'string')
+            : type.includes(value as string);
+    if (ok) out[key] = value;
+    else
+      warnings.push(
+        `${path}.${key}: expected ${type === 'strings' ? 'a list of strings' : typeof type === 'string' ? `a ${type}` : `one of ${type.join(', ')}`}, got ${JSON.stringify(value)}`,
+      );
+  }
+  return out;
+}
+
 const isEntry = (v: unknown) => typeof v === 'string' || (Array.isArray(v) && v.every((x) => typeof x === 'string'));
 
 /**
@@ -334,17 +393,19 @@ function validateValue(path: string, value: unknown, base: unknown, warnings: st
         warnings.push(`items.${name}: expected an object`);
         continue;
       }
-      out[name] = opts;
+      out[name] = checkFields(`items.${name}`, opts, ITEM_OPTION_TYPES, warnings);
     }
     return out;
   }
   if (path === 'prompt.states' || path === 'box.states') {
     if (!isObject(value)) return bad('an object keyed by state');
     const out: Json = {};
+    const fields = path === 'prompt.states' ? PROMPT_LOOK_TYPES : BOX_LOOK_TYPES;
     for (const [state, look] of Object.entries(value)) {
       if (!(STATES as readonly string[]).includes(state))
         warnings.push(`${path}: unknown state "${state}"${suggest(state, STATES)}`);
-      else if (isObject(look)) out[state] = look;
+      else if (!isObject(look)) warnings.push(`${path}.${state}: expected an object`);
+      else out[state] = checkFields(`${path}.${state}`, look, fields, warnings);
     }
     return out;
   }
@@ -374,7 +435,12 @@ function validateValue(path: string, value: unknown, base: unknown, warnings: st
     }
     return out;
   }
-  if (typeof base === 'number') return typeof value === 'number' && value >= 0 ? value : bad('a number ≥ 0');
+  if (typeof base === 'number') {
+    const min = MIN_VALUE[path] ?? 0;
+    const int = INTEGER_KEYS.has(path);
+    const ok = typeof value === 'number' && Number.isFinite(value) && value >= min && (!int || Number.isInteger(value));
+    return ok ? value : bad(`${int ? 'a whole number' : 'a number'} ≥ ${min}`);
+  }
   if (typeof value !== typeof base) return bad(`a ${typeof base}`);
   return value;
 }
@@ -418,6 +484,8 @@ export const CONFIG_PATH = join(getAgentDir(), 'configs', 'composer.json');
 
 export interface LoadResult {
   config: ComposerConfig;
+  /** The file exists but couldn't be read or parsed; callers keep the previous config. */
+  unreadable?: boolean;
   /** Fatal-for-the-file problems (bad JSON, pre-1.0 keys). */
   errors: string[];
   warnings: string[];
@@ -454,6 +522,7 @@ export function load(styleOverride?: StyleName, path = CONFIG_PATH): LoadResult 
     if (code !== 'ENOENT') {
       const result = loadFrom(undefined, styleOverride);
       result.errors.push(`could not read ${path}: ${error instanceof Error ? error.message : String(error)}`);
+      result.unreadable = true;
       return result;
     }
   }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULTS, loadFrom, spinnerFrames } from './config.js';
-import { countDiffLines } from './data.js';
+import { countDiffLines, parseUsage } from './data.js';
+import { randomVerb, VERBS } from './verbs.js';
 import { streamedChars } from './index.js';
 import { fitRow, type Piece } from './layout.js';
 
@@ -133,5 +134,55 @@ describe('streamedChars', () => {
       ]),
     ).toBe(3 + 5 + 7);
     expect(streamedChars(undefined)).toBe(0);
+  });
+});
+
+describe('field-level validation', () => {
+  it('drops badly typed item options and state looks, keeping the rest', () => {
+    const { config, warnings } = loadFrom({
+      items: { statuses: { hide: 5 }, branch: { priority: 'high', color: 'accent', colour: 'x' } },
+      prompt: { states: { typing: { symbol: 5, color: 'accent' }, idle: 'red' } },
+    });
+    expect(warnings).toEqual(
+      expect.arrayContaining([
+        'items.statuses.hide: expected a list of strings, got 5',
+        'items.branch.priority: expected a number, got "high"',
+        'unknown key "items.branch.colour" (did you mean "color"?)',
+        'prompt.states.typing.symbol: expected a string, got 5',
+        'prompt.states.idle: expected an object',
+      ]),
+    );
+    expect(config.items.branch).toEqual({ color: 'accent' });
+    expect(config.prompt.states.typing).toEqual({ color: 'accent' });
+  });
+
+  it('rejects zero periods and fractional cell counts', () => {
+    const { config, warnings } = loadFrom({
+      box: { effectPeriodMs: 0, padX: 1.5 },
+      working: { bandWidth: 0 },
+      spinner: { intervalMs: 0 },
+    });
+    expect(config.box.effectPeriodMs).toBe(2000);
+    expect(config.box.padX).toBe(1);
+    expect(config.working.bandWidth).toBe(6);
+    expect(config.spinner.intervalMs).toBe(0); // 0 is the documented "preset speed"
+    expect(warnings).toHaveLength(3);
+  });
+});
+
+describe('parseUsage', () => {
+  const w = { utilization: 38, resets_at: '2099-01-01T00:00:00Z' };
+  it('needs both windows with a numeric utilization', () => {
+    expect(parseUsage({ five_hour: w, seven_day: w })).toBeDefined();
+    expect(parseUsage({ five_hour: w })).toBeUndefined();
+    expect(parseUsage({ five_hour: w, seven_day: { utilization: 'x', resets_at: '' } })).toBeUndefined();
+    expect(parseUsage(null)).toBeUndefined();
+  });
+});
+
+describe('randomVerb', () => {
+  it('never returns a blank verb', () => {
+    expect(VERBS.every((v) => v.trim() !== '')).toBe(true);
+    expect(randomVerb(['', '  '])).toBe('Working');
   });
 });

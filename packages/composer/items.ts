@@ -209,7 +209,7 @@ function body(name: string, o: ItemOptions, env: ItemEnv): Body | null {
     }
     case 'usage': {
       const data = rt.ctx ? getUsage(rt.ctx) : undefined;
-      if (!data) return null;
+      if (!data?.five_hour || !data.seven_day) return null;
       const five = Math.max(0, Math.round(100 - data.five_hour.utilization));
       const seven = Math.max(0, Math.round(100 - data.seven_day.utilization));
       if (o.showBelow !== undefined && five >= o.showBelow && seven >= o.showBelow) return null;

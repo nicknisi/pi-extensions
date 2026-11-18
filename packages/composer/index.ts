@@ -57,6 +57,8 @@ export default function composer(pi: ExtensionAPI) {
   let previewTimer: ReturnType<typeof setTimeout> | undefined;
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   let agentRunning = false;
+  /** A config has been applied before, so an unreadable file can fall back to it. */
+  let hasLoaded = false;
 
   const cfg = (): ComposerConfig => loaded.config;
   // Read the theme every frame: a live theme switch must repaint in the new colours.
@@ -214,13 +216,25 @@ export default function composer(pi: ExtensionAPI) {
     announceContextBar();
   }
 
+  /** Load composer.json; if it can't be read or parsed, keep what we had and say so. */
+  function loadKeeping(ctx: ExtensionContext): LoadResult {
+    const next = load(sessionStyle);
+    report(ctx, next);
+    if (next.unreadable && hasLoaded) {
+      ctx.ui.notify('composer: kept the previous config until composer.json parses again', 'warning');
+      return next;
+    }
+    loaded = next;
+    hasLoaded = true;
+    return next;
+  }
+
   function reload(ctx: ExtensionContext): LoadResult {
-    loaded = load(sessionStyle);
-    report(ctx, loaded);
+    const result = loadKeeping(ctx);
     mount(ctx);
     if (rt.busy) startAnimation();
     repaint();
-    return loaded;
+    return result;
   }
 
   // ── Event wiring ─────────────────────────────────────────────────────────
@@ -243,8 +257,7 @@ export default function composer(pi: ExtensionAPI) {
     rt.pi = pi;
     rt.sessionName = pi.getSessionName() || undefined;
     rt.labelOverride = undefined;
-    loaded = load(sessionStyle);
-    report(ctx, loaded);
+    loadKeeping(ctx);
     mount(ctx);
     pi.events.emit('composer:label-request', {});
   });
@@ -355,6 +368,7 @@ export default function composer(pi: ExtensionAPI) {
       ctx.ui.notify('composer: preview is unavailable while the agent is running', 'warning');
       return;
     }
+    cancelPreview(); // one preview at a time
     const steps: StateName[] = STATES.filter((s) => s !== 'idle');
     let i = 0;
     const step = () => {

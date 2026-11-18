@@ -107,7 +107,7 @@ Cross-package helpers go in `packages/shared`, consumed as `"@nicknisi/pi-shared
 
 - Runtime configs live outside the repo: `~/.pi/agent/configs/<name>.json` for most packages. Example configs ship with the packages that need them.
 - Several extensions lean on pi internals (component tree shapes, editor privates, fullscreen renderer state) — each README's caveats section calls these out; a pi upgrade can break them.
-- macOS-centric: composer's usage lookup (keychain) and focus indicator, and btw's fork-to-window, assume macOS/tmux/ghostty.
+- macOS-centric: composer's Anthropic usage lookup can read the token from the macOS keychain, and btw's fork-to-window assumes macOS/tmux/ghostty. Composer's focus indicator needs tmux with `focus-events on`, on any OS.
 
 ### Retired
 
