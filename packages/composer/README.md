@@ -127,29 +127,29 @@ A row with nothing to say takes no space: no working message while idle, no cost
 
 ### Items
 
-| Item           | Shows                                                                                                                  | Shorter forms              |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------------- |
-| `label`        | Text pushed over `composer:set-label`, else the session name                                                           | truncated                  |
-| `model`        | `Claude Opus 5.5`                                                                                                      | `Opus 5.5`, `opus`         |
-| `thinking`     | Thinking level, on reasoning models                                                                                    |                            |
-| `cost`         | Session cost, once it's above $0.001                                                                                   |                            |
-| `lines`        | Lines added/removed by edits (`+38/-12`)                                                                               |                            |
-| `usage`        | Anthropic 5h and 7d plan windows with reset times (`items.usage.showBelow` hides it until a window drops below that %) | `5h 62% 7d 81%`, `5h 62%`  |
-| `context`      | Context left: `show` is `bar` (an elastic meter), `percent`, or `tokens`                                               | `71% ctx`, `71%`           |
-| `branch`       | Git branch                                                                                                             | truncated                  |
-| `pr`           | Open PR for the branch (`#226`, a link), via `gh`                                                                      |                            |
-| `cwd`          | Working directory name                                                                                                 |                            |
-| `statuses`     | Every extension status (`ctx.ui.setStatus`), minus `items.statuses.hide`                                               | each shortened, first only |
-| `status:<key>` | One extension status, e.g. `status:answer-hint`                                                                        |                            |
-| `working`      | pi's working indicator: spinner and message, and also pi's retry and compaction notices                                | truncated                  |
-| `elapsed`      | Time since pi started working                                                                                          |                            |
-| `tokens`       | Output tokens this run (`1,284 tokens`)                                                                                | `1.3K tok`                 |
-| `tps`          | Tokens per second, with a sparkline                                                                                    | rate only                  |
-| `hints`        | Keys you can press in the current state, from your keybindings                                                         | fewer keys                 |
-| `mode`         | A state badge: `READY`, `INSERT`, `WORKING`, `ASK`, …                                                                  |                            |
-| `paste`        | `3 lines · 1 paste` while the input has several lines or a collapsed paste                                             | `3L`                       |
-| `scroll`       | `↓ scrolled · ctrl+end to follow` while the transcript is scrolled back                                                | shorter                    |
-| `text:…`       | Literal text, e.g. `text:esc to interrupt`                                                                             |                            |
+| Item           | Shows                                                                                                                  | Shorter forms                                                  |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `label`        | Text pushed over `composer:set-label`, else the session name                                                           | truncated                                                      |
+| `model`        | `Claude Opus 5.5`                                                                                                      | `Opus 5.5`, `opus`                                             |
+| `thinking`     | Thinking level, on reasoning models                                                                                    |                                                                |
+| `cost`         | Session cost, once it's above $0.001                                                                                   |                                                                |
+| `lines`        | Lines added/removed by edits (`+38/-12`)                                                                               |                                                                |
+| `usage`        | Anthropic 5h and 7d plan windows with reset times (`items.usage.showBelow` hides it until a window drops below that %) | `5h 62% 7d 81%`, `5h 62%`                                      |
+| `context`      | Context left: `show` is `bar` (an elastic meter), `percent`, or `tokens`                                               | `71% ctx`, `71%`                                               |
+| `branch`       | Git branch                                                                                                             | truncated                                                      |
+| `pr`           | Open PR for the branch (`#226`, a link), via `gh`                                                                      |                                                                |
+| `cwd`          | Working directory name                                                                                                 |                                                                |
+| `statuses`     | Every extension status (`ctx.ui.setStatus`), minus `items.statuses.hide`                                               | first status + count (`? ctrl+. to answer +1`), then truncated |
+| `status:<key>` | One extension status, e.g. `status:answer-hint`                                                                        |                                                                |
+| `working`      | pi's working indicator: spinner and message, and also pi's retry and compaction notices                                | truncated                                                      |
+| `elapsed`      | Time since pi started working                                                                                          |                                                                |
+| `tokens`       | Output tokens this run (`1,284 tokens`)                                                                                | `1.3K tok`                                                     |
+| `tps`          | Tokens per second, with a sparkline                                                                                    | rate only                                                      |
+| `hints`        | Keys you can press in the current state, from your keybindings (none while a dialog shows its own)                     | fewer keys                                                     |
+| `mode`         | A state badge: `READY`, `INSERT`, `WORKING`, `ASK`, …                                                                  |                                                                |
+| `paste`        | `3 lines · 1 paste` while the input has several lines or a collapsed paste                                             | `3L`                                                           |
+| `scroll`       | `↓ scrolled · ctrl+end to follow` while the transcript is scrolled back                                                | shorter                                                        |
+| `text:…`       | Literal text, e.g. `text:esc to interrupt`                                                                             |                                                                |
 
 Every item also takes `priority`, `color`, `icon` (`""` hides the default glyph), `prefix` and `suffix` (painted dim, e.g. `"on "`).
 
