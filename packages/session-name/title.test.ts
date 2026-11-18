@@ -40,7 +40,7 @@ describe('buildTitle', () => {
   });
 
   it('keeps control characters out of the terminal-title escape sequence', () => {
-    expect(buildTitle('Evil\x1b]0;pwned\x07Name\u202E', '/tmp/work', '{summary} — {dir}')).toBe(
+    expect(buildTitle('Evil\x1b]0;pwned\x07Name\u202E\u200E\u200F\u061C', '/tmp/work', '{summary} — {dir}')).toBe(
       'Evil ]0;pwned Name — work',
     );
   });

@@ -130,7 +130,7 @@ export function hasTask(text: string): boolean {
  */
 export function cleanName(text: string): string {
   return text
-    .replace(/[\p{Cc}\u202A-\u202E\u2066-\u2069]/gu, ' ')
+    .replace(/[\p{Cc}\p{Bidi_Control}]/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -338,7 +338,8 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
         .split(/\n/)[0]!
         .trim()
         .replace(/^#+\s*/, '')
-        .replace(/\*\*|__/g, '')
+        // Only an emphasis pair around the whole title; `foo__bar` is content.
+        .replace(/^(\*\*|__)(.+)\1$/, '$2')
         .replace(/^["'`]+|["'`]+$/g, '')
         .replace(/[.!?]+$/, '')
         .trim();

@@ -131,3 +131,11 @@ it('strips markdown and control characters from LLM titles', async () => {
   await settle();
   expect(h.setSessionName).toHaveBeenCalledWith('Critique of the ]0;x opening turn');
 });
+
+it('keeps double underscores that are part of the title', async () => {
+  const h = await harness('usable');
+  h.complete.mockResolvedValueOnce({ stopReason: 'stop', content: [{ type: 'text', text: 'Fix foo__bar parsing' }] });
+  h.fire('before_agent_start');
+  await settle();
+  expect(h.setSessionName).toHaveBeenCalledWith('Fix foo__bar parsing');
+});
