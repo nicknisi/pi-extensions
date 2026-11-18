@@ -1,0 +1,483 @@
+import type { Theme } from '@earendil-works/pi-coding-agent';
+import { visibleWidth } from '@earendil-works/pi-tui';
+import { makeTheme } from '../../test-utils/index.js';
+import { describe, expect, it } from 'vitest';
+import { makeMultiSelectViewProps as makeProps } from '../../test-fixtures.js';
+import type { QuestionData } from '../../tool/types.js';
+import { MultiSelectView, type MultiSelectViewProps } from './multi-select-view.js';
+
+const theme = makeTheme() as unknown as Theme;
+
+function makeView(q: QuestionData, props: MultiSelectViewProps): MultiSelectView {
+  const view = new MultiSelectView(theme, q);
+  view.setProps(props);
+  return view;
+}
+
+function question(over: Partial<QuestionData> = {}): QuestionData {
+  return {
+    question: over.question ?? 'areas?',
+    header: over.header ?? 'H',
+    // Empty descriptions skip the continuation-line render path so default fixture
+    // produces exactly one line per option (matches the row-count expectations below).
+    options: over.options ?? [
+      { label: 'FE', description: '' },
+      { label: 'BE', description: '' },
+      { label: 'DB', description: '' },
+    ],
+    multiSelect: over.multiSelect ?? true,
+  };
+}
+
+describe('MultiSelectView.render', () => {
+  it("renders one row per option + a 'Type something.' row + a trailing Next sentinel", () => {
+    const q = question();
+    const m = makeView(q, makeProps(q));
+    const lines = m.render(80);
+    expect(lines.length).toBe(5); // 3 options + Type something. + Next
+    expect(lines[0]).toContain('FE');
+    expect(lines[1]).toContain('BE');
+    expect(lines[2]).toContain('DB');
+    expect(lines[3]).toContain('Type something.');
+    expect(lines[4]).toContain('Next');
+  });
+
+  // Spec: a 1-space gap between the bracketed glyph (`[ ]` / `[✔]`) and the option label
+  // (CC parity — single space matches the CC sample `[✔] Logging`).
+  it('separates the checkbox from the label by exactly ONE space', () => {
+    const q = question();
+    const m = makeView(q, makeProps(q));
+    const lines = m.render(80);
+    // Strip any ANSI escapes from line 0 to match raw glyph positioning.
+    const raw = lines[0]!.replace(/\x1b\[[0-9;]*m/g, '');
+    // Active row 0 = `❯ 1. [ ] FE` (pointer 2 + "1." 2 + space 1 + "[ ]" 3 + space 1 + label).
+    expect(raw).toMatch(/\[[ ✔]\] FE/);
+  });
+
+  // Spec: when the multi-select pane is unfocused (notes input has focus), the `❯`
+  // active-row pointer must NOT render — otherwise the dialog shows a stale cursor on a
+  // pane the user isn't interacting with.
+  it('focused=false suppresses the active-row pointer (no doubled cursor)', () => {
+    const q = question();
+    const m = makeView(q, makeProps(q, { optionIndex: 1, focused: true }));
+
+    const focused = m.render(80);
+    const rawFocused = focused.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+    expect(rawFocused[1]!.startsWith('❯ ')).toBe(true); // active pointer on selected row
+
+    m.setProps(makeProps(q, { optionIndex: 1, focused: false }));
+    const blurred = m.render(80);
+    const rawBlurred = blurred.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+    // No row may begin with `❯ ` when the pane is blurred.
+    for (const l of rawBlurred) expect(l.startsWith('❯ ')).toBe(false);
+
+    m.setProps(makeProps(q, { optionIndex: 1, focused: true }));
+    const refocused = m.render(80);
+    const rawRefocused = refocused.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+    expect(rawRefocused[1]!.startsWith('❯ ')).toBe(true);
+  });
+
+  it('renders description on continuation line when present', () => {
+    const q = question({
+      options: [
+        { label: 'FE', description: 'front-end' },
+        { label: 'BE', description: '' },
+      ],
+    });
+    const m = makeView(q, makeProps(q));
+    const lines = m.render(80);
+    expect(lines.length).toBe(5); // FE row + 1 description + BE row + Type something. + Next
+    expect(lines[1]).toContain('front-end');
+    expect(lines[3]).toContain('Type something.');
+    expect(lines[4]).toContain('Next');
+  });
+
+  it('active option uses ACTIVE_POINTER and accent styling', () => {
+    const q = question();
+    const m = makeView(q, makeProps(q, { optionIndex: 1 }));
+    const lines = m.render(80);
+    expect(lines[1]).toContain('❯ '); // ACTIVE_POINTER on the active row
+    expect(lines[0]!.startsWith('❯ ')).toBe(false); // inactive rows do not start with active pointer
+  });
+
+  it('checked options render [✔]; unchecked render [ ]', () => {
+    const q = question();
+    const m = makeView(q, makeProps(q, { checkedIndices: new Set([0, 2]) }));
+    const lines = m.render(80);
+    expect(lines[0]).toContain('[✔]');
+    expect(lines[1]).toContain('[ ]');
+    expect(lines[2]).toContain('[✔]');
+  });
+
+  it("row 1 inactive unchecked renders as '  1. [ ] LABEL'", () => {
+    // optionIndex = 1 → row 0 is inactive; checkbox 0 unchecked.
+    const q = question();
+    const m = makeView(q, makeProps(q, { optionIndex: 1 }));
+    const raw = m.render(80)![0]!.replace(/\x1b\[[0-9;]*m/g, '');
+    expect(raw).toMatch(/^ {2}1\. \[ \] FE/);
+  });
+
+  it("row 2 active checked renders as '❯ 2. [✔] LABEL'", () => {
+    const q = question();
+    const m = makeView(q, makeProps(q, { optionIndex: 1, checkedIndices: new Set([1]) }));
+    const raw = m.render(80)![1]!.replace(/\x1b\[[0-9;]*m/g, '');
+    expect(raw).toMatch(/^❯ 2\. \[✔\] BE/);
+  });
+
+  it('description continuation indents to col 2 (CC parity, not prefixVisibleWidth)', () => {
+    const q = question({
+      options: [
+        {
+          label: 'FE',
+          description:
+            'this is an extremely long description that should wrap across multiple lines when rendered at narrow widths',
+        },
+        { label: 'BE', description: '' },
+      ],
+    });
+    const m = makeView(q, makeProps(q));
+    const lines = m.render(40);
+    // Line 0 = row, lines 1..N = wrapped description segments. Each continuation must start
+    // with EXACTLY 2 spaces (col 2 = past pointer slot), not 9 (full prefix column).
+    for (let i = 1; i < lines.length - 1; i++) {
+      const raw = lines[i]!.replace(/\x1b\[[0-9;]*m/g, '');
+      expect(raw.startsWith('  ')).toBe(true);
+      expect(raw.startsWith('   ')).toBe(false);
+    }
+  });
+
+  it('renders props.nextLabel verbatim on the trailing sentinel row', () => {
+    const q = question();
+    const m = makeView(q, makeProps(q, { nextLabel: 'Submit' }));
+    const lines = m.render(80);
+    expect(lines[lines.length - 1]).toContain('Submit');
+    expect(lines[lines.length - 1]).not.toContain('Next');
+  });
+
+  it('setProps mutates props visible to next render (active row moves)', () => {
+    const q = question();
+    const m = makeView(q, makeProps(q, { optionIndex: 0 }));
+    expect(m.render(80)[0]).toContain('❯ ');
+    m.setProps(makeProps(q, { optionIndex: 2 }));
+    const lines = m.render(80);
+    expect(lines[0]!.startsWith('❯ ')).toBe(false);
+    expect(lines[2]).toContain('❯ ');
+  });
+});
+
+describe('MultiSelectView.naturalHeight', () => {
+  const fixtures: Array<[string, QuestionData]> = [
+    ['no-desc 3 options', question()],
+    [
+      'with-1-line-desc',
+      question({
+        options: [
+          { label: 'FE', description: 'front-end' },
+          { label: 'BE', description: 'back-end' },
+          { label: 'DB', description: 'DB' },
+        ],
+      }),
+    ],
+    [
+      'with-multi-line-wrap-desc',
+      question({
+        options: [
+          {
+            label: 'FE',
+            description:
+              'this is an extremely long description that should wrap across multiple lines when rendered at narrow widths to verify line counting',
+          },
+          { label: 'BE', description: 'BE' },
+        ],
+      }),
+    ],
+    [
+      'long-label-truncates-not-wraps',
+      question({
+        options: [
+          { label: 'x'.repeat(200), description: 'long' },
+          { label: 'BE', description: 'BE' },
+        ],
+      }),
+    ],
+  ];
+
+  it('naturalHeight(w) === render(w).length across widths and fixtures', () => {
+    for (const [_label, q] of fixtures) {
+      const m = makeView(q, makeProps(q));
+      for (const w of [20, 40, 80, 120]) {
+        expect(m.naturalHeight(w)).toBe(m.render(w).length);
+      }
+    }
+  });
+
+  it('is props-independent (theme/question/width only)', () => {
+    const q = question({
+      options: [
+        { label: 'FE', description: 'front-end work' },
+        { label: 'BE', description: 'back-end' },
+        { label: 'DB', description: 'database tasks' },
+      ],
+    });
+    const a = makeView(q, makeProps(q, { optionIndex: 0 }));
+    const b = makeView(q, makeProps(q, { optionIndex: 2, checkedIndices: new Set([0, 1]) }));
+    for (const w of [20, 40, 80, 120]) {
+      expect(a.naturalHeight(w)).toBe(b.naturalHeight(w));
+    }
+  });
+});
+
+describe('MultiSelectView.focusedItemRowRange', () => {
+  it('returns correct range for active option with description', () => {
+    const q: QuestionData = {
+      question: 'pick?',
+      header: 'H',
+      options: [
+        { label: 'A', description: '' },
+        { label: 'B', description: 'a longer description that might wrap' },
+        { label: 'C', description: '' },
+      ],
+      multiSelect: true,
+    };
+    const view = makeView(q, {
+      rows: [
+        { checked: false, active: false },
+        { checked: false, active: true },
+        { checked: false, active: false },
+      ],
+      other: { active: false, checked: false, inputMode: false, inputBuffer: '', inputCursorOffset: undefined },
+      nextActive: false,
+      nextLabel: 'Next',
+    });
+    const [start, end] = view.focusedItemRowRange(80);
+    expect(start).toBe(1);
+    expect(end).toBeGreaterThan(start);
+  });
+
+  it('returns [0, 1] for first item active with no description', () => {
+    const q: QuestionData = {
+      question: 'pick?',
+      header: 'H',
+      options: [
+        { label: 'A', description: '' },
+        { label: 'B', description: '' },
+      ],
+      multiSelect: true,
+    };
+    const view = makeView(q, {
+      rows: [
+        { checked: false, active: true },
+        { checked: false, active: false },
+      ],
+      other: { active: false, checked: false, inputMode: false, inputBuffer: '', inputCursorOffset: undefined },
+      nextActive: false,
+      nextLabel: 'Next',
+    });
+    const [start, end] = view.focusedItemRowRange(80);
+    expect(start).toBe(0);
+    expect(end).toBe(1);
+  });
+
+  it('returns range for Next sentinel when nextActive', () => {
+    const q: QuestionData = {
+      question: 'pick?',
+      header: 'H',
+      options: [{ label: 'A', description: '' }],
+      multiSelect: true,
+    };
+    const view = makeView(q, {
+      rows: [{ checked: false, active: false }],
+      other: { active: false, checked: false, inputMode: false, inputBuffer: '', inputCursorOffset: undefined },
+      nextActive: true,
+      nextLabel: 'Next',
+    });
+    const [start, end] = view.focusedItemRowRange(80);
+    expect(start).toBe(2);
+    expect(end).toBe(3);
+  });
+
+  it('returns [0, 0] when no row is active', () => {
+    const q: QuestionData = {
+      question: 'pick?',
+      header: 'H',
+      options: [{ label: 'A', description: '' }],
+      multiSelect: true,
+    };
+    const view = makeView(q, {
+      rows: [{ checked: false, active: false }],
+      other: { active: false, checked: false, inputMode: false, inputBuffer: '', inputCursorOffset: undefined },
+      nextActive: false,
+      nextLabel: 'Next',
+    });
+    const [start, end] = view.focusedItemRowRange(80);
+    expect(start).toBe(0);
+    expect(end).toBe(0);
+  });
+
+  it('range matches actual rendered output position', () => {
+    const q: QuestionData = {
+      question: 'pick?',
+      header: 'H',
+      options: [
+        { label: 'A', description: '' },
+        { label: 'B', description: 'a description' },
+      ],
+      multiSelect: true,
+    };
+    const view = makeView(q, {
+      rows: [
+        { checked: false, active: false },
+        { checked: false, active: true },
+      ],
+      other: { active: false, checked: false, inputMode: false, inputBuffer: '', inputCursorOffset: undefined },
+      nextActive: false,
+      nextLabel: 'Next',
+    });
+    const [start, end] = view.focusedItemRowRange(80);
+    const rendered = view.render(80);
+    // Row at start should contain B
+    expect(rendered[start]).toContain('B');
+    // end is exclusive; last row of B's range is end-1
+    expect(end).toBeLessThanOrEqual(rendered.length);
+  });
+});
+
+describe("MultiSelectView — 'Type something.' row", () => {
+  const otherInactive = (q: QuestionData): MultiSelectViewProps => makeProps(q);
+  const otherActiveInput = (q: QuestionData, buffer: string): MultiSelectViewProps =>
+    makeProps(q, {
+      optionIndex: q.options.length,
+      inputMode: true,
+      inputBuffer: buffer,
+    });
+
+  it('renders an unchecked custom row when its draft is empty', () => {
+    const q = question();
+    const m = makeView(q, otherInactive(q));
+    const lines = m.render(80);
+    // 3 options → other is row index 3, numbered "4.".
+    const raw = lines[3]!.replace(/\x1b\[[0-9;]*m/g, '');
+    expect(raw).toMatch(/^ {2}4\. \[ \] Type something\./);
+    expect(lines[3]).not.toContain('[✔]');
+  });
+
+  it('keeps the custom row unchecked for whitespace-only input', () => {
+    const q = question();
+    const m = makeView(q, makeProps(q, { inputBuffer: ' ' }));
+    expect(m.render(80)[3]).not.toContain('[✔]');
+  });
+
+  it('keeps the draft visible on the other row while another option has focus', () => {
+    const q = question();
+    const m = makeView(q, makeProps(q, { optionIndex: 0, inputMode: false, inputBuffer: 'draft answer' }));
+    const otherLine = m.render(80)[3] ?? '';
+    expect(otherLine).toContain('draft answer');
+    expect(otherLine).toContain('[✔]');
+    expect(otherLine).not.toContain('Type something.');
+    expect(otherLine).not.toContain('\x1b_pi:c\x07');
+  });
+
+  it('renders the inline cursor (not a static label) when other.active && other.inputMode', () => {
+    const q = question();
+    const m = makeView(q, otherActiveInput(q, 'my answer'));
+    const lines = m.render(80);
+    // CURSOR_MARKER (hardware-cursor sentinel) is present on the other row only.
+    const cursorLines = lines.filter((l) => l.includes('\x1b_pi:c\x07'));
+    expect(cursorLines).toHaveLength(1);
+    expect(cursorLines[0]).toContain('my answer');
+  });
+
+  it('wraps long custom answers and reports their rendered height', () => {
+    const q = question();
+    const m = makeView(q, otherActiveInput(q, 'x'.repeat(200)));
+    for (const w of [20, 40, 80]) {
+      const lines = m.render(w);
+      expect(lines.length).toBeGreaterThan(5);
+      expect(m.naturalHeight(w)).toBe(lines.length);
+      for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(w);
+    }
+  });
+
+  it('renders explicit line breaks and expands the focused row range', () => {
+    const q = question();
+    const m = makeView(q, otherActiveInput(q, 'first\nsecond'));
+    const lines = m.render(80);
+    expect(lines.some((line) => line.includes('first'))).toBe(true);
+    expect(lines.some((line) => line.includes('second'))).toBe(true);
+    const [start, end] = m.focusedItemRowRange(80);
+    expect(end - start).toBe(2);
+  });
+
+  it('focusedItemRowRange covers the other row ([row, row+1]) then Next', () => {
+    const q: QuestionData = {
+      question: 'pick?',
+      header: 'H',
+      options: [
+        { label: 'A', description: '' },
+        { label: 'B', description: '' },
+      ],
+      multiSelect: true,
+    };
+    const otherProps: MultiSelectViewProps = {
+      rows: [
+        { checked: false, active: false },
+        { checked: false, active: false },
+      ],
+      other: { active: true, checked: true, inputMode: true, inputBuffer: 'x', inputCursorOffset: undefined },
+      nextActive: false,
+      nextLabel: 'Next',
+    };
+    const view = makeView(q, otherProps);
+    const [start, end] = view.focusedItemRowRange(80);
+    expect(start).toBe(2); // after 2 option rows
+    expect(end).toBe(3);
+  });
+
+  it('nextActive shifts to options.length + 1 (Next sits below the other row)', () => {
+    const q: QuestionData = {
+      question: 'pick?',
+      header: 'H',
+      options: [{ label: 'A', description: '' }],
+      multiSelect: true,
+    };
+    const view = makeView(q, {
+      rows: [{ checked: false, active: false }],
+      other: { active: false, checked: false, inputMode: false, inputBuffer: '', inputCursorOffset: undefined },
+      nextActive: true,
+      nextLabel: 'Next',
+    });
+    const [start, end] = view.focusedItemRowRange(80);
+    // option(0) + other(1) → Next is at row 2.
+    expect(start).toBe(2);
+    expect(end).toBe(3);
+  });
+
+  it("number column fits N+1 (the other row's number) without truncation", () => {
+    // 9 options → other is #10 → numberWidth must be 2 so "10." is not clipped.
+    const q = question({
+      options: Array.from({ length: 9 }, (_, i) => ({ label: `o${i + 1}`, description: '' })),
+    });
+    const m = makeView(q, makeProps(q));
+    const lines = m.render(80);
+    const raw = lines[9]!.replace(/\x1b\[[0-9;]*m/g, ''); // other row
+    expect(raw).toMatch(/10\. \[ \] Type something\./);
+  });
+});
+
+describe('MultiSelectView width safety', () => {
+  it('every emitted line satisfies visibleWidth(line) <= width', () => {
+    const q = question({
+      options: [
+        { label: 'x'.repeat(200), description: 'y'.repeat(200) },
+        { label: 'BE', description: 'back-end' },
+      ],
+    });
+    const m = makeView(q, makeProps(q));
+    for (const w of [20, 40, 80, 120]) {
+      const lines = m.render(w);
+      for (const line of lines) {
+        expect(visibleWidth(line)).toBeLessThanOrEqual(w);
+      }
+    }
+  });
+});

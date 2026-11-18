@@ -1,0 +1,99 @@
+{
+  "name": "@nicknisi/pi-ask-user-question",
+  "version": "0.0.0",
+  "description": "Structured ask_user_question dialog for pi, forked from @juicesharp/rpiv-ask-user-question, with an AFK timeout",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-package"
+  ],
+  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/ask-user-question#readme",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicknisi/pi-extensions.git",
+    "directory": "packages/ask-user-question"
+  },
+  "files": [
+    "dist",
+    "afk-timeout.ts",
+    "answer-channel.ts",
+    "ask-user-question.ts",
+    "rpc-fallback.ts",
+    "config.ts",
+    "events.ts",
+    "index.ts",
+    "presentation.ts",
+    "reconcile.ts",
+    "locales/",
+    "docs/",
+    "state/build-questionnaire.ts",
+    "state/external-editor.ts",
+    "state/i18n-bridge.ts",
+    "state/key-router.ts",
+    "state/questionnaire-session.ts",
+    "state/row-intent.ts",
+    "state/selectors/contract.ts",
+    "state/selectors/derivations.ts",
+    "state/selectors/focus.ts",
+    "state/selectors/projections.ts",
+    "state/state-reducer.ts",
+    "state/state.ts",
+    "tool/external-answer.ts",
+    "tool/format-answer.ts",
+    "tool/normalize-params.ts",
+    "tool/response-envelope.ts",
+    "tool/types.ts",
+    "tool/validate-questionnaire.ts",
+    "view/component-binding.ts",
+    "view/components/inline-input.ts",
+    "view/components/multi-select-view.ts",
+    "view/components/option-list-view.ts",
+    "view/components/preview/markdown-content-cache.ts",
+    "view/components/preview/preview-block-renderer.ts",
+    "view/components/preview/preview-box-renderer.ts",
+    "view/components/preview/preview-layout-decider.ts",
+    "view/components/preview/preview-pane.ts",
+    "view/components/submit-picker.ts",
+    "view/components/tab-bar.ts",
+    "view/components/wrapping-select.ts",
+    "view/dialog-builder.ts",
+    "view/dialog-copy.ts",
+    "view/props-adapter.ts",
+    "view/scroll-window.ts",
+    "view/stateful-view.ts",
+    "view/tab-components.ts",
+    "view/tab-content-strategy.ts",
+    "view/transcript.ts",
+    "!**/*.test.ts",
+    "!test-utils/",
+    "!test-fixtures.ts"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./events": {
+      "types": "./dist/events.d.ts",
+      "default": "./dist/events.js"
+    }
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@juicesharp/rpiv-i18n": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@juicesharp/rpiv-i18n": {
+      "optional": true
+    }
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

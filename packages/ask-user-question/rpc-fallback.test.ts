@@ -1,0 +1,379 @@
+import { createMockCtx, createMockPi, mockStdout } from './test-utils/index.js';
+import { describe, expect, it, vi } from 'vitest';
+import { BEL, registerAskUserQuestionTool } from './ask-user-question.js';
+import { hasDialogUI } from './rpc-fallback.js';
+
+type SelectFn = (title: string, options: string[]) => Promise<string | undefined>;
+type InputFn = (title: string, placeholder?: string) => Promise<string | undefined>;
+
+function register() {
+  const { pi, captured } = createMockPi();
+  registerAskUserQuestionTool(pi);
+  return captured.tools.get('ask_user_question')!;
+}
+
+function registerWithCapture() {
+  const { pi, captured } = createMockPi();
+  registerAskUserQuestionTool(pi);
+  return { tool: captured.tools.get('ask_user_question')!, captured };
+}
+
+/** Mock ctx shaped like a pi ≥0.79 RPC host: `mode: "rpc"` + dialog primitives. */
+function ctxRpc(opts: { select?: SelectFn; input?: InputFn } = {}) {
+  return createMockCtx({
+    hasUI: true,
+    mode: 'rpc',
+    ui: {
+      select: (opts.select ?? vi.fn(async () => undefined)) as never,
+      input: (opts.input ?? vi.fn(async () => '')) as never,
+    } as never,
+  });
+}
+
+const SINGLE = {
+  questions: [
+    {
+      question: 'Which?',
+      header: 'Pick',
+      options: [
+        { label: 'A', description: 'a' },
+        { label: 'B', description: 'b' },
+      ],
+    },
+  ],
+};
+
+const MULTI = {
+  questions: [
+    {
+      question: 'Pick colors?',
+      header: 'Colors',
+      multiSelect: true,
+      options: [
+        { label: 'red', description: 'r' },
+        { label: 'green', description: 'g' },
+        { label: 'blue', description: 'b' },
+      ],
+    },
+  ],
+};
+
+async function run(tool: ReturnType<typeof register>, params: unknown, ctx: unknown) {
+  return await tool.execute?.('tc', params as never, undefined as never, undefined as never, ctx as never);
+}
+
+describe('hasDialogUI', () => {
+  it('requires both select and input to be functions', () => {
+    expect(hasDialogUI({ select: async () => undefined, input: async () => '' })).toBe(true);
+    expect(hasDialogUI({ select: async () => undefined })).toBe(false);
+    expect(hasDialogUI({ input: async () => '' })).toBe(false);
+    expect(hasDialogUI(undefined)).toBe(false);
+  });
+});
+
+describe("ask_user_question.execute — RPC dialog walker (ctx.mode === 'rpc')", () => {
+  it('single-select uses ctx.ui.select and returns the chosen label in the envelope', async () => {
+    const tool = register();
+    const select = vi.fn(async (_t: string, options: string[]) => options[1]); // "2. B — b"
+    const ctx = ctxRpc({ select });
+    const r = await run(tool, SINGLE, ctx);
+    expect(select).toHaveBeenCalledOnce();
+    expect(r?.details).toMatchObject({ cancelled: false });
+    expect(r?.content[0]).toMatchObject({ text: expect.stringContaining('"Which?"="B"') });
+    expect(r?.content[0]).toMatchObject({ text: expect.stringMatching(/^User has answered your questions:/) });
+  });
+
+  it('does NOT call ctx.ui.custom in RPC mode', async () => {
+    const tool = register();
+    const custom = vi.fn(async () => ({ answers: [], cancelled: true }));
+    const ctx = createMockCtx({
+      hasUI: true,
+      mode: 'rpc',
+      ui: {
+        custom: custom as never,
+        select: vi.fn(async (_t: string, o: string[]) => o[0]) as never,
+        input: vi.fn(async () => '') as never,
+      } as never,
+    });
+    await run(tool, SINGLE, ctx);
+    expect(custom).not.toHaveBeenCalled();
+  });
+
+  it('emits blocked lifecycle events around the RPC dialog walker and clears them afterward', async () => {
+    const { tool, captured } = registerWithCapture();
+    const select = vi.fn(async (_t: string, options: string[]) => options[0]);
+    await run(tool, SINGLE, ctxRpc({ select }));
+    expect(captured.eventsEmitted.get('rpiv:ask-user:blocked')).toEqual([
+      { active: true, toolCallId: 'tc' },
+      { active: false, toolCallId: 'tc' },
+    ]);
+    expect(captured.eventsEmitted.get('herdr:blocked')).toEqual([
+      { active: true, label: 'Waiting for your answer' },
+      { active: false, label: undefined },
+    ]);
+  });
+
+  it('writes exactly one BEL after blocked=true and before the first RPC dialog', async () => {
+    const stdout = mockStdout(true);
+    try {
+      const mockEmit = vi.fn();
+      const { pi, captured } = createMockPi({
+        events: { emit: mockEmit, on: vi.fn(() => () => {}) },
+      });
+      registerAskUserQuestionTool(pi);
+      const tool = captured.tools.get('ask_user_question')!;
+      const select = vi.fn(async (_t: string, options: string[]) => options[0]);
+
+      await run(tool, SINGLE, ctxRpc({ select }));
+
+      expect(stdout.stdoutWrite).toHaveBeenCalledTimes(1);
+      expect(stdout.stdoutWrite).toHaveBeenCalledWith(BEL);
+      expect(mockEmit).toHaveBeenNthCalledWith(2, 'rpiv:ask-user:blocked', { active: true, toolCallId: 'tc' });
+      expect(mockEmit).toHaveBeenNthCalledWith(3, 'herdr:blocked', {
+        active: true,
+        label: 'Waiting for your answer',
+      });
+      expect(mockEmit).toHaveBeenNthCalledWith(4, 'rpiv:ask-user:blocked', { active: false, toolCallId: 'tc' });
+      expect(mockEmit).toHaveBeenNthCalledWith(5, 'herdr:blocked', { active: false, label: undefined });
+      expect(mockEmit.mock.invocationCallOrder[1]).toBeLessThan(stdout.stdoutWrite.mock.invocationCallOrder[0]!);
+      expect(mockEmit.mock.invocationCallOrder[2]).toBeLessThan(stdout.stdoutWrite.mock.invocationCallOrder[0]!);
+      expect(stdout.stdoutWrite.mock.invocationCallOrder[0]).toBeLessThan(select.mock.invocationCallOrder[0]!);
+    } finally {
+      stdout.restore();
+    }
+  });
+
+  it('does not write BEL when RPC stdout is not a TTY', async () => {
+    const stdout = mockStdout(false);
+    try {
+      const tool = register();
+      const select = vi.fn(async (_t: string, options: string[]) => options[0]);
+
+      await run(tool, SINGLE, ctxRpc({ select }));
+
+      expect(select).toHaveBeenCalledOnce();
+      expect(stdout.stdoutWrite).not.toHaveBeenCalled();
+    } finally {
+      stdout.restore();
+    }
+  });
+
+  it("appends the 'Type something.' sentinel row sourced from ROW_INTENT_META", async () => {
+    const tool = register();
+    let offered: string[] = [];
+    const select = vi.fn(async (_t: string, options: string[]) => {
+      offered = options;
+      return options[0];
+    });
+    await run(tool, SINGLE, ctxRpc({ select }));
+    expect(offered).toEqual(['1. A — a', '2. B — b', '3. Type something.']);
+  });
+
+  it("'Type something.' sentinel follows up with ctx.ui.input for custom text", async () => {
+    const tool = register();
+    const select = vi.fn(async (_t: string, options: string[]) => options[options.length - 1]);
+    const input = vi.fn(async () => 'typed it');
+    const r = await run(tool, SINGLE, ctxRpc({ select, input }));
+    expect(r?.details).toMatchObject({ cancelled: false });
+    expect(r?.content[0]).toMatchObject({ text: expect.stringContaining('"Which?"="typed it"') });
+  });
+
+  it('folds option previews into the select title and echoes the selected preview', async () => {
+    const tool = register();
+    const withPreview = {
+      questions: [
+        {
+          question: 'Which?',
+          header: 'Pick',
+          options: [
+            { label: 'A', description: 'a', preview: 'PREVIEW-A' },
+            { label: 'B', description: 'b' },
+          ],
+        },
+      ],
+    };
+    let title = '';
+    const select = vi.fn(async (t: string, options: string[]) => {
+      title = t;
+      return options[0];
+    });
+    const r = await run(tool, withPreview, ctxRpc({ select }));
+    expect(title).toContain('PREVIEW-A');
+    expect(r?.content[0]).toMatchObject({ text: expect.stringContaining('selected preview: PREVIEW-A') });
+  });
+
+  it('multi-select uses ctx.ui.input and parses comma-separated indices into labels', async () => {
+    const tool = register();
+    const input = vi.fn(async () => '1,3'); // red, blue
+    const r = await run(tool, MULTI, ctxRpc({ input }));
+    expect(input).toHaveBeenCalledOnce();
+    expect(r?.details).toMatchObject({ cancelled: false });
+    expect(r?.content[0]).toMatchObject({ text: expect.stringContaining('"Pick colors?"="red, blue"') });
+  });
+
+  it('multi-select preserves numeric selections and custom text separated by a semicolon', async () => {
+    const tool = register();
+    const input = vi.fn(async () => '1,3; another color');
+    const r = await run(tool, MULTI, ctxRpc({ input }));
+    expect(r?.details).toMatchObject({
+      answers: [{ kind: 'multi', selected: ['red', 'blue'], answer: 'another color' }],
+    });
+    expect(r?.content[0]).toMatchObject({
+      text: expect.stringContaining('"Pick colors?"="red, blue, another color"'),
+    });
+  });
+
+  it('multi-select treats non-index input as a typed custom answer, not a silent drop', async () => {
+    const tool = register();
+    const input = vi.fn(async () => 'red, something else entirely');
+    const r = await run(tool, MULTI, ctxRpc({ input }));
+    expect(r?.details).toMatchObject({ cancelled: false });
+    expect(r?.details).toMatchObject({
+      answers: [{ kind: 'multi', selected: [], answer: 'red, something else entirely' }],
+    });
+    expect(r?.content[0]).toMatchObject({
+      text: expect.stringContaining('"Pick colors?"="red, something else entirely"'),
+    });
+  });
+
+  it('multi-select empty input commits an empty selection (Next with nothing toggled)', async () => {
+    const tool = register();
+    const input = vi.fn(async () => '  ');
+    const r = await run(tool, MULTI, ctxRpc({ input }));
+    expect(r?.details).toMatchObject({ cancelled: false });
+    expect(r?.content[0]).toMatchObject({ text: expect.stringContaining('"Pick colors?"="(no input)"') });
+  });
+
+  it('dismiss (select resolves undefined) → decline envelope', async () => {
+    const tool = register();
+    const select = vi.fn(async () => undefined);
+    const r = await run(tool, SINGLE, ctxRpc({ select }));
+    expect(r?.details).toMatchObject({ cancelled: true });
+    expect(r?.content[0]).toMatchObject({ text: expect.stringContaining('declined') });
+  });
+
+  it('walks multiple questions sequentially, one dialog each', async () => {
+    const tool = register();
+    const params = { questions: [...SINGLE.questions, ...MULTI.questions] };
+    const select = vi.fn(async (_t: string, options: string[]) => options[0]); // "1. A — a"
+    const input = vi.fn(async () => '2'); // green
+    const r = await run(tool, params, ctxRpc({ select, input }));
+    expect(select).toHaveBeenCalledOnce();
+    expect(input).toHaveBeenCalledOnce();
+    expect(r?.content[0]).toMatchObject({ text: expect.stringContaining('"Which?"="A"') });
+    expect(r?.content[0]).toMatchObject({ text: expect.stringContaining('"Pick colors?"="green"') });
+  });
+});
+
+describe('ask_user_question.execute — RPC single-select replies', () => {
+  const answersOf = (r: Awaited<ReturnType<typeof run>>) =>
+    (r?.details as { answers: unknown[]; cancelled: boolean } | undefined) ?? { answers: [], cancelled: true };
+
+  it.each([
+    ['the offered line', '2. B — b', { kind: 'option', answer: 'B' }],
+    ['a bare index', '2', { kind: 'option', answer: 'B' }],
+    ['an exact option label', 'B', { kind: 'option', answer: 'B' }],
+    ['free text (#299)', 'B but change the title', { kind: 'custom', answer: 'B but change the title' }],
+    [
+      'free text starting with a digit (#299)',
+      '2 but change the title',
+      { kind: 'custom', answer: '2 but change the title' },
+    ],
+  ])("reads %s as the user's answer, never a dismissal", async (_name, reply, expected) => {
+    const tool = register();
+    const r = await run(tool, SINGLE, ctxRpc({ select: vi.fn(async () => reply) }));
+    expect(answersOf(r)).toMatchObject({ cancelled: false, answers: [expected] });
+  });
+
+  it('an empty reply is still a dismissal', async () => {
+    const tool = register();
+    const r = await run(tool, SINGLE, ctxRpc({ select: vi.fn(async () => '   ') }));
+    expect(answersOf(r).cancelled).toBe(true);
+  });
+
+  it("cancelling the 'Type something.' input returns to the options instead of cancelling (#142)", async () => {
+    const tool = register();
+    const replies = ['3. Type something.', '1. A — a'];
+    const select = vi.fn(async (_t: string, options: string[]) =>
+      replies.shift() === '1. A — a' ? options[0] : options.at(-1),
+    );
+    const input = vi.fn(async () => undefined);
+    const r = await run(tool, SINGLE, ctxRpc({ select, input }));
+    expect(select).toHaveBeenCalledTimes(2);
+    expect(input).toHaveBeenCalledOnce();
+    expect(answersOf(r)).toMatchObject({ cancelled: false, answers: [{ kind: 'option', answer: 'A' }] });
+  });
+
+  it("a blank 'Type something.' reply returns to the options instead of recording an empty answer (#301)", async () => {
+    const tool = register();
+    const replies = ['3. Type something.', '1. A — a'];
+    const select = vi.fn(async (_t: string, options: string[]) =>
+      replies.shift() === '1. A — a' ? options[0] : options.at(-1),
+    );
+    const input = vi.fn(async () => '   ');
+    const r = await run(tool, SINGLE, ctxRpc({ select, input }));
+    expect(select).toHaveBeenCalledTimes(2);
+    expect(answersOf(r)).toMatchObject({ cancelled: false, answers: [{ kind: 'option', answer: 'A' }] });
+  });
+
+  it("keeps earlier answers when a later question's follow-up is cancelled (#142)", async () => {
+    const tool = register();
+    const params = { questions: [SINGLE.questions[0], { ...SINGLE.questions[0], question: 'And?', header: 'Next' }] };
+    const replies = ['1. A — a', '3. Type something.', '2. B — b'];
+    const select = vi.fn(async () => replies.shift());
+    const r = await run(tool, params, ctxRpc({ select, input: vi.fn(async () => undefined) }));
+    expect(answersOf(r)).toMatchObject({
+      cancelled: false,
+      answers: [
+        { question: 'Which?', answer: 'A' },
+        { question: 'And?', answer: 'B' },
+      ],
+    });
+  });
+
+  it("shows the option list in the 'Type something.' input so the user can refer to it (#194)", async () => {
+    const tool = register();
+    const select = vi.fn(async (_t: string, options: string[]) => options.at(-1));
+    const input = vi.fn(async (_title: string) => 'neither');
+    await run(tool, SINGLE, ctxRpc({ select, input }));
+    const title = input.mock.calls[0]?.[0] as string;
+    expect(title).toContain('1. A — a');
+    expect(title).toContain('2. B — b');
+    expect(title).toContain('Type your answer:');
+  });
+});
+
+describe('ask_user_question.execute — dialog walker as custom()-undefined backstop', () => {
+  // RPC builds that predate ctx.mode: the mode guard misses, custom() resolves
+  // undefined, and the walker must still run off the capability signal.
+  it('falls back to the dialog walker when ctx.mode is unset and custom() resolves undefined', async () => {
+    const tool = register();
+    const custom = vi.fn(async () => undefined);
+    const select = vi.fn(async (_t: string, options: string[]) => options[1]);
+    const ctx = createMockCtx({
+      hasUI: true,
+      ui: { custom: custom as never, select: select as never, input: vi.fn(async () => '') as never } as never,
+    });
+    const r = await run(tool, SINGLE, ctx);
+    expect(custom).toHaveBeenCalledOnce();
+    expect(select).toHaveBeenCalledOnce();
+    expect(r?.content[0]).toMatchObject({ text: expect.stringContaining('"Which?"="B"') });
+  });
+
+  it('stays on the custom() path when ctx.mode is unset and custom() renders (TUI)', async () => {
+    const tool = register();
+    const custom = vi.fn(async () => ({
+      cancelled: false,
+      answers: [{ questionIndex: 0, question: 'Which?', kind: 'option', answer: 'A' }],
+    }));
+    const select = vi.fn(async () => 'should-not-be-called');
+    const ctx = createMockCtx({
+      hasUI: true,
+      ui: { custom: custom as never, select: select as never } as never,
+    });
+    const r = await run(tool, SINGLE, ctx);
+    expect(custom).toHaveBeenCalledOnce();
+    expect(select).not.toHaveBeenCalled();
+    expect(r?.content[0]).toMatchObject({ text: expect.stringContaining('"Which?"="A"') });
+  });
+});

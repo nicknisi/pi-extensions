@@ -1,0 +1,63 @@
+/**
+ * rpiv-ask-user-question — Pi extension. Registers the `ask_user_question`
+ * tool: a structured option selector with an automatically appended
+ * `Type something.` custom-answer row.
+ *
+ * Sentinel labels and TUI chrome strings localize at render time via the i18n
+ * bridge. Strings are registered with rpiv-i18n here, once, at module init —
+ * but only when the SDK is actually installed. If `@juicesharp/rpiv-i18n` is
+ * missing (standalone install of just this package), the dynamic-load shim
+ * no-ops and the bridge's `t(key, fallback)` returns the inline English literal
+ * at every call site. The extension stays online either way.
+ *
+ * Adding a locale: drop `locales/<code>.json` next to en.json (mirroring the
+ * key set). No edit needed here — `registerLocalesFromDir` iterates
+ * `SUPPORTED_LOCALES` from the SDK. See `@juicesharp/rpiv-i18n` README →
+ * "Contributing translations" for the full convention.
+ */
+
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { registerAskUserQuestionTool } from './ask-user-question.js';
+import { registerAskUserQuestionReconciler } from './reconcile.js';
+import { I18N_NAMESPACE, isMissingModule } from './state/i18n-bridge.js';
+
+type I18nLoader = {
+  registerLocalesFromDir: (namespace: string, packageUrl: string, options?: { label?: string }) => void;
+};
+
+// A variable specifier keeps this optional peer out of the type graph: it ships raw .ts, which this repo's build can't compile.
+const I18N_SDK: string = '@juicesharp/rpiv-i18n';
+// Dynamic import keeps `@juicesharp/rpiv-i18n` a soft optional peer: when the
+// SDK is installed alongside this package the strings register and
+// `/languages` flips them live; when it isn't, the import rejects here, we
+// no-op, and the bridge's English-fallback shim keeps the extension online.
+//
+// The `/loader` subpath is used instead of the SDK entry so the i18n-ui +
+// pi-tui modules are not pulled into our load graph just to register strings.
+try {
+  const sdk = (await import(`${I18N_SDK}/loader`)) as I18nLoader;
+  sdk.registerLocalesFromDir(I18N_NAMESPACE, import.meta.url, { label: 'rpiv-ask-user-question' });
+} catch (error) {
+  // SDK absent — extension still loads with English-only UI. Fork: report it when installed but broken.
+  if (!isMissingModule(error)) console.warn(`ask-user-question: ${I18N_SDK}/loader failed to load — ${String(error)}`);
+}
+
+export {
+  ASK_USER_ANSWER_EVENT,
+  ASK_USER_ANSWER_RESULT_EVENT,
+  ASK_USER_BLOCKED_EVENT,
+  ASK_USER_PROMPT_EVENT,
+  type AskUserAnswerEntry,
+  type AskUserAnswerEventPayload,
+  type AskUserAnswerRejectCode,
+  type AskUserAnswerResultEventPayload,
+  type AskUserBlockedEventPayload,
+  type AskUserPromptEventPayload,
+  type AskUserPromptOption,
+  type AskUserPromptQuestion,
+} from './events.js';
+
+export default function (pi: ExtensionAPI) {
+  registerAskUserQuestionTool(pi);
+  registerAskUserQuestionReconciler(pi);
+}
