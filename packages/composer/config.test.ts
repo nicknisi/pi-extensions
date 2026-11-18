@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULTS, loadFrom, spinnerFrames } from './config.js';
 import { countDiffLines } from './data.js';
+import { streamedChars } from './index.js';
 import { fitRow, type Piece } from './layout.js';
 
 describe('loadFrom', () => {
@@ -118,5 +119,19 @@ describe('countDiffLines', () => {
       '\n',
     );
     expect(countDiffLines(diff)).toEqual({ added: 3, removed: 2 });
+  });
+});
+
+describe('streamedChars', () => {
+  it('counts text, thinking and tool arguments without serializing the message', () => {
+    expect(streamedChars('abcd')).toBe(4);
+    expect(
+      streamedChars([
+        { type: 'thinking', thinking: 'hmm' },
+        { type: 'text', text: 'hello' },
+        { type: 'toolCall', arguments: { a: 1 } },
+      ]),
+    ).toBe(3 + 5 + 7);
+    expect(streamedChars(undefined)).toBe(0);
   });
 });

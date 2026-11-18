@@ -32,6 +32,19 @@ import { applyColor, parseLabelData } from './utils.js';
 import { randomVerb, shimmerFrame } from './verbs.js';
 
 const ABOVE_WIDGET = 'composer-above';
+
+/** Characters streamed so far in an assistant message (text, thinking, tool-call arguments). */
+export function streamedChars(content: unknown): number {
+  if (typeof content === 'string') return content.length;
+  if (!Array.isArray(content)) return 0;
+  let n = 0;
+  for (const part of content as Array<Record<string, unknown>>) {
+    if (typeof part.text === 'string') n += part.text.length;
+    if (typeof part.thinking === 'string') n += part.thinking.length;
+    if (part.arguments !== undefined) n += JSON.stringify(part.arguments).length;
+  }
+  return n;
+}
 const CONTEXT_COLORS = new Set(['success', 'accent', 'warning', 'error', 'dim']);
 
 export default function composer(pi: ExtensionAPI) {
@@ -291,7 +304,7 @@ export default function composer(pi: ExtensionAPI) {
     const message = event.message as { role?: string; content?: unknown; usage?: { output?: number } };
     if (message.role !== 'assistant') return;
     // Provider usage when it has arrived, else ~4 characters per token of what has streamed.
-    const streamed = JSON.stringify(message.content ?? '').length;
+    const streamed = streamedChars(message.content);
     const estimate = message.usage?.output || Math.ceil(streamed / 4);
     noteTokens(rt, rt.tokensDone + estimate);
   });
