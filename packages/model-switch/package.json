@@ -21,7 +21,8 @@
     "cycle.ts",
     "section-picker.ts",
     "README.md",
-    "model-switch.example.json"
+    "model-switch.example.json",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {

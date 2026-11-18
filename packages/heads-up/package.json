@@ -20,7 +20,8 @@
     "card.ts",
     "config.ts",
     "parse.ts",
-    "prompt.ts"
+    "prompt.ts",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {

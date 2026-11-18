@@ -24,7 +24,8 @@
     "policy.ts",
     "format.ts",
     "discovery.ts",
-    "routing.ts"
+    "routing.ts",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {
@@ -44,7 +45,7 @@
     "koffi": "^3.1.4"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-coding-agent": ">=1.5.0",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },

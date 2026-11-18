@@ -18,7 +18,8 @@
     "dist",
     "index.ts",
     "dynamic-skills.ts",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {

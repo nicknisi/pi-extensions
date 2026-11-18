@@ -17,7 +17,8 @@
   "files": [
     "dist",
     "index.ts",
-    "session-name.example.json"
+    "session-name.example.json",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {

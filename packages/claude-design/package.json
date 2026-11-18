@@ -22,7 +22,8 @@
     "dist",
     "index.ts",
     "auth.ts",
-    "skills"
+    "skills",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {

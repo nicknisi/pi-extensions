@@ -22,7 +22,8 @@
     "view.ts",
     "ultracode.ts",
     "examples",
-    "skills"
+    "skills",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {

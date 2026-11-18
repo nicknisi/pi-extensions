@@ -246,7 +246,11 @@ describe('heads-up', () => {
       timestamp: new Date().toISOString(),
       data: '**Recoverable migrations**\n\nRoll back partial schema changes.',
     };
-    const component = renderer(entry, { expanded: false }, theme as unknown as Theme)!;
+    const component = renderer(
+      entry,
+      { expanded: false, keyText: () => '', keyHint: () => '' },
+      theme as unknown as Theme,
+    )!;
     const lines = component.render(30);
     expect(lines.every((line) => visibleWidth(line) <= 30)).toBe(true);
     const text = stripVTControlCharacters(lines.join('\n'));
@@ -256,7 +260,13 @@ describe('heads-up', () => {
     expect(text).not.toContain('alt+h');
     component.invalidate();
     expect(stripVTControlCharacters(component.render(80).join('\n'))).toContain('Roll back partial schema changes.');
-    expect(renderer({ ...entry, data: undefined }, { expanded: false }, theme as unknown as Theme)).toBeUndefined();
+    expect(
+      renderer(
+        { ...entry, data: undefined },
+        { expanded: false, keyText: () => '', keyHint: () => '' },
+        theme as unknown as Theme,
+      ),
+    ).toBeUndefined();
   });
 
   it.each(['unconfigured', 'missing', 'lookup fails'])('falls back to the session model when %s', async (reason) => {

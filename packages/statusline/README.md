@@ -12,7 +12,7 @@ pi install /Users/nicknisi/Developer/pi-extensions/packages/statusline
 
 - **Custom footer** — installed via `ctx.ui.setFooter(...)` on `session_start`. Single line, segments separated by `│`:
   - Model icon + name (nerd font icon chosen by name: opus/sonnet/haiku get distinct glyphs, everything else a generic robot icon). Appends the thinking level (e.g. `high`) when `ctx.model.reasoning` is true, read live from `pi.getThinkingLevel()`.
-  - Session cost (`$X.XX`), summed from `AssistantMessage.usage.cost.total` across the current branch. Hidden until cost > $0.001.
+  - Session cost (`$X.XX`), summed from `AssistantMessage.usage.cost.total` and `usage` entries (such as prompt-cache warming) across the current branch. Hidden until cost > $0.001.
   - Lines changed (`+N/-M`), summed from `linesAdded`/`linesRemoved` in toolResult `details` (i.e. the edit tool). Hidden when zero.
   - Anthropic usage limits (Anthropic models only): remaining-% bars for the 5-hour and 7-day OAuth usage windows, with time-until-reset (`↻3h20m`).
   - Remaining context: a bar that stretches to fill available terminal width (clamped 5–20 cols), plus `N% ctx (tokens used)`. With Checkpoint loaded, its thresholds control the bar color without changing the fill, width, or labels.

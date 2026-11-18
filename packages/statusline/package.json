@@ -17,7 +17,8 @@
   "files": [
     "dist",
     "index.ts",
-    "config.ts"
+    "config.ts",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {

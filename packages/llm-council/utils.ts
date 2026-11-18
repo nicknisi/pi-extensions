@@ -1,5 +1,4 @@
 import type { Theme, ThemeColor } from '@earendil-works/pi-coding-agent';
-import { getKeybindings } from '@earendil-works/pi-tui';
 
 export function isHexColor(color: string): boolean {
   return typeof color === 'string' && color.startsWith('#');
@@ -29,8 +28,4 @@ export function formatElapsed(startedAt: number | undefined, endedAt?: number): 
   if (!startedAt) return '';
   const ms = (endedAt ?? Date.now()) - startedAt;
   return `(${(ms / 1000).toFixed(1)}s)`;
-}
-
-export function getExpandToggleKey(): string {
-  return getKeybindings().getKeys('app.tools.expand')[0] ?? 'ctrl+o';
 }

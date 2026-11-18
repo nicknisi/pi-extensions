@@ -20,7 +20,8 @@
     "config.ts",
     "utils.ts",
     "README.md",
-    "composer.example.json"
+    "composer.example.json",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {

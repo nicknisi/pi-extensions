@@ -17,7 +17,8 @@
   "files": [
     "dist",
     "index.ts",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {

@@ -20,7 +20,8 @@
     "config.ts",
     "fast.ts",
     "README.md",
-    "fast.example.json"
+    "fast.example.json",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {

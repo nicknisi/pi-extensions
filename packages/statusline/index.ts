@@ -471,6 +471,8 @@ export default function (pi: ExtensionAPI) {
             lastTotalsAt = now;
             totals = { cost: 0, added: 0, removed: 0 };
             for (const entry of branchEntries) {
+              // Cache warms (on by default since pi 1.5.1) are billed as usage entries, not messages.
+              if (entry.type === 'usage') totals.cost += entry.usage.cost.total;
               if (entry.type !== 'message') continue;
               if (entry.message.role === 'assistant') {
                 const m = entry.message as AssistantMessage;
