@@ -1,296 +1,233 @@
 # @nicknisi/pi-composer
 
-Replaces pi's input editor with a configurable boxed input rendered inside pi's
-TUI. All native editor features — cursor movement, history, autocomplete,
-paste — work normally inside the box. It also implements paste-again-to-expand:
-when a collapsed `[paste #N ...]` marker is present in the editor, pasting the
-same content again expands it inline so you can see and edit the actual text.
+The whole bottom of pi's screen as one configurable system: the input box, the footer, the row above the box, and how pi's working message and spinner look. Pick a style, then override any part of it.
 
-Evolved from the earlier single-file `box-editor.ts`: rendering is now
-config-driven and the paste-expand behavior was merged in from the former
-standalone `paste-expand.ts` so the two features don't fight over
-`setEditorComponent` (last call wins).
-
-## What it adds
-
-- **Custom editor component** via `ctx.ui.setEditorComponent` (no tools, no
-  keybindings, no custom entry types).
-- **`/composer` command**: reloads `composer.json` without restarting pi
-  and previews the working animation for ~3 seconds.
-- **Events hooked**: `session_start` (installs the editor component, reads
-  the session name), `session_info_changed` (tracks renames for the inlay),
-  `agent_start` / `agent_settled` (drive the working-state animations), and
-  `session_shutdown` (removes it and tears down focus tracking and animation
-  timers). TUI mode only; all handlers no-op when `ctx.mode !== "tui"`.
-- **Paste-again-to-expand**: overrides the editor's `handlePaste` to detect
-  when an incoming paste matches an already-collapsed paste's stored content;
-  if the marker `[paste #N ...]` is still in the buffer, the marker is replaced
-  with the real content and the paste registry is renumbered to stay dense.
-- **History recall puts the cursor at the end**: pi-tui places the cursor at
-  the _start_ of a message recalled with Up, so typing prepends to your own
-  sentence. Composer overrides `navigateHistory` to move the cursor to the end
-  after a successful Up recall. Down, draft restoration, and boundary no-ops
-  (Up at the oldest entry) are untouched.
-- **Extension API** over `pi.events`: other extensions can push their own text
-  into the border inlay — see [Extension API](#extension-api).
-
-## Features
-
-- **Session-name inlay**: when the session has a name, it is inlaid in the
-  border (default right end of the top rule). Position, surround glyphs, max
-  width, and which border are all configurable:
-
-  ```text
-  sessionNamePosition "right", sessionNameFormat "─ {name} ─" (defaults):
-  ╭──────────────── refactor auth ─╮
-
-  sessionNamePosition "left", sessionNameFormat "[ {name} ]":
-  ╭[ refactor auth ]───────────────╮
-  ```
-
-- **Rounded or square box**: `╭╮│╰╯` (default, preserves the original look) or `┌┐│└┘`
-- **Configurable prefix glyph** on the first body line (default `❯`); continuation lines get a space so content aligns
-- **Theme-aware colors**: border and prefix accept any theme colour token or hex value
-- **Boxed / unboxed**: full box with side borders, or top/bottom horizontal rules only
-- **Menu outside box**: slash-menu lines render below the box, with configurable gap and indent
-- **Scroll indicators**: pi's stock `↑ N more` / `↓ N more` indicators are detected in the stock borders and re-embedded in the replacement borders
-- **Responsive**: below a minimum width (see caveats) the extension defers to pi's stock editor rendering
-- **Focus indicator**: border switches colour when the tmux pane holding this session has terminal focus (requires tmux `focus-events on`)
-- **Spinner prefix**: while pi is working, the prefix glyph animates as a spinner — pick from built-in presets or define your own frames (configurable speed and colour, including `"rainbow"`)
-- **Border glow**: while pi is working, the border either _pulses_ (breathes between the border colour and a glow colour) or _shimmers_ (a highlight sweeps along the top/bottom rules)
-
-## Extension API
-
-Other extensions can replace the border-inlay text over pi's shared event bus
-(`pi.events`), without importing anything from this package:
-
-```ts
-// Push a label (any non-empty string):
-pi.events.emit('composer:set-label', { text: `⏱ ${elapsed}` });
-
-// Clear it (falls back to the session name):
-pi.events.emit('composer:set-label', {});
+```jsonc
+// ~/.pi/agent/configs/composer.json
+{ "style": "toad" }
 ```
 
-The pushed text takes precedence over the session name and goes through the
-same formatting pipeline — `sessionNameFormat`, `sessionNameColor`, position,
-border, and truncation all apply. The override is cleared on every session
-start so a stale label never leaks across sessions.
-
-Because extension load order is not guaranteed, composer emits
-`composer:label-request` on every `session_start`; producers should respond to
-it (and to whatever changes their own state) with `composer:set-label`:
-
-```ts
-pi.events.on('composer:label-request', () => {
-  pi.events.emit('composer:set-label', { text: currentLabel() });
-});
-```
+Composer 1.0 replaces three packages: the 0.x composer (input box), `@nicknisi/pi-statusline` (footer) and `@nicknisi/pi-spinner` (working verbs). See [Migrating from 0.x](#migrating-from-0x).
 
 ## Install
 
 ```sh
-pi install /path/to/pi-extensions/packages/composer
+pi install npm:@nicknisi/pi-composer
 ```
 
-## Usage
+## Styles
 
-Once installed, the editor component is installed automatically at session
-start. Editing, history, autocomplete, and paste behave as usual inside the
-box. Run `/composer` after editing the config to reload it in place and
-preview the spinner/glow without sending a prompt.
+| Style               | Look                                                                                                                                                                                                                                                                       |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `classic` (default) | Rounded box, label on the top border, one footer row: model, thinking, cost, lines changed, 5h/7d usage, statuses, context bar, branch and PR. The 0.x composer + statusline look.                                                                                         |
+| `toad`              | After [Toad](https://willmcgugan.github.io/announcing-toad/): a tall padded box with a placeholder, a rainbow sweep on the top border while pi works, `π Morse coding gravity... 1,284 tokens` above the box, breadcrumb chips (`◆ Claude Opus 5.5 ‹ high`) as the footer. |
+| `keycaps`           | After the Codex composer: a shaded slab instead of a box, the keys you can press right now on the left (they change with the state), context pinned on the right, toasts for collapsed pastes.                                                                             |
+| `starship`          | After Starship and Powerlevel10k: an info line above the input (`pi-extensions on ⎇ main via ◆ Opus high`), a bare `❯` that spins while pi works, context and cost as a right prompt that hides when your text reaches it. No footer.                                      |
+| `sidepanel`         | After btop: a titled box, with meters (context, usage, tokens/s graph, cost, lines) in a panel beside it on panes 100+ columns wide. Narrower panes fold the panel into one footer row.                                                                                    |
 
-Paste-again-to-expand works automatically too: pi collapses large pastes
-(>10 lines or >1000 chars) into `[paste #N +X lines]` markers; paste the same
-content a second time while the marker is present and it expands inline. The
-comparison replicates pi-tui's paste cleanup (CSI-u Ctrl+letter decoding,
-CRLF→LF, tabs→4 spaces, non-printable stripping) and also tolerates a single
-leading space that pi prepends to path-like pastes.
-
-Layout (boxed):
-
-```
-╭──────────────────────────╮
-│ ❯ <content>               │
-│   <content continued>     │
-╰──────────────────────────╯
-<autocomplete menu>
-```
+Try one without editing anything: `/composer style toad`. That lasts for the session, shows the style as shipped (your overrides are paused), and `/composer style` goes back. `/composer preview` steps through every state (typing, paste, working, tool, prompt, near-full, scrolled) so you can judge a style without running an agent.
 
 ## Configuration
 
-Config is read at extension load from
-`~/.pi/agent/configs/composer.json`; run `/composer` to reload it without
-restarting pi (it also previews the working animation). The path follows pi's
-agent dir, so it moves with `PI_CODING_AGENT_DIR` if you set it. A missing
-file means all defaults; invalid JSON is reported (at startup via a warning,
-on `/composer` via an error) and the previous/default config is kept. Copy
-`composer.example.json` from this package as a starting point.
+One file, `~/.pi/agent/configs/composer.json`. Every key is optional. Values resolve as **built-in defaults ← the style ← your overrides**; objects merge key by key, lists (slots, spinner frames) replace. Run `/composer` after editing: it reloads, reports problems, and shows whether usage data is reachable.
 
-```json
+```jsonc
 {
-  "boxedView": true,
-  "boxPadX": 1,
-  "menuGap": 0,
-  "extraMenuIndent": 1,
-  "borderColor": "border",
-  "prefix": "❯",
-  "prefixColor": "accent",
-  "corners": "rounded",
-  "focusIndicator": true,
-  "focusedBorderColor": "accent",
-  "sessionName": true,
-  "sessionNameColor": "muted",
-  "sessionNamePosition": "right",
-  "sessionNameFormat": "─ {name} ─",
-  "sessionNameMaxWidth": 0,
-  "sessionNameBorder": "top",
-  "spinner": true,
-  "spinnerStyle": "dots",
-  "spinnerColor": "accent",
-  "glow": true,
-  "glowStyle": "pulse",
-  "glowColor": "accent",
-  "glowPeriodMs": 2000
+  "style": "classic",
+
+  // The symbol before your input, and what happens to it while pi works.
+  "prompt": {
+    "symbol": "❯",
+    "color": "accent",
+    "whenBusy": "spinner", // "spinner": the symbol becomes the spinner. "symbol": it stays.
+    "states": {
+      // per-state overrides, see States below
+      "nearFull": { "color": "error" },
+      "typing": { "symbol": "›" },
+    },
+  },
+
+  "spinner": {
+    "frames": "dots", // a preset name, or your own list: ["◐", "◓", "◑", "◒"]
+    "intervalMs": 80, // 0 = the preset's own speed
+    "color": "accent",
+  },
+
+  "box": {
+    "border": "rounded", // rounded | square | heavy | rule | slab | none
+    "color": "border",
+    "focusColor": "accent", // border colour while this tmux pane has focus; null turns it off
+    "background": "userMessageBg", // slab only: background theme token
+    "padX": 1, // spaces inside the box, left and right
+    "padY": 0, // blank rows inside the box, top and bottom
+    "placeholder": null, // dim text in an empty input, e.g. "Ask pi anything"
+    "inlay": "plain", // border inlays as " text " (plain) or "┤text├" (bracket)
+    "busyEffect": "pulse", // off | pulse | shimmer | rainbow, while pi works
+    "effectColor": "accent",
+    "effectPeriodMs": 2000,
+    "states": { "nearFull": { "color": "context" } },
+    "menuGap": 0, // blank rows between the box and the autocomplete menu
+    "menuIndent": 1,
+  },
+
+  // The working message (folded in from pi-spinner).
+  "working": {
+    "messages": "verbs", // "verbs": a random fun verb per turn. "default": pi's own. Or your own list.
+    "shimmer": true, // a highlight band sweeping across the message
+    "shimmerPeriodMs": 2000,
+    "bandWidth": 6,
+    "baseColor": "muted",
+    "highlightColor": "text",
+  },
+
+  // What goes where. Each slot is a list of items; a nested list is a group.
+  "slots": {
+    "above": ["working"],
+    "topLeft": [],
+    "topRight": ["label"],
+    "bottomLeft": [],
+    "bottomRight": [],
+    "rightPrompt": [],
+    "footerLeft": [["model", "thinking"], "cost", "lines", "usage", "statuses", "context"],
+    "footerRight": [["branch", "pr"]],
+    "panel": [],
+    "panelTop": [],
+    "panelBottom": [],
+  },
+
+  // Per-item options.
+  "items": {
+    "context": { "show": "bar", "barWidth": 20, "label": "ctx" },
+    "statuses": { "hide": ["mcp"] },
+    "branch": { "priority": 99, "icon": "⎇", "prefix": "on ", "color": "success" },
+  },
+
+  "icons": "nerd", // nerd | unicode | ascii (default glyphs; items.<name>.icon overrides)
+  "separator": " │ ", // between items
+  "groupSeparator": " ", // between items in a group
+  "toasts": false, // short-lived messages over the footer (e.g. "pasted 42 lines")
+  "panel": { "width": 34, "minWidth": 100 },
 }
 ```
 
-| Option                | Type                    | Default        | Description                                                                                                                   |
-| --------------------- | ----------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `boxedView`           | `boolean`               | `true`         | `true` = full box with side borders. `false` = top/bottom horizontal rules only.                                              |
-| `boxPadX`             | `number`                | `1`            | Horizontal padding inside the box (and around the prefix).                                                                    |
-| `menuGap`             | `number`                | `0`            | Blank lines between the bottom border and the slash-menu.                                                                     |
-| `extraMenuIndent`     | `number`                | `1`            | Extra indent (spaces) for slash-menu lines.                                                                                   |
-| `borderColor`         | `string`                | `"border"`     | Theme colour token **or** hex colour (`"#ff6600"`) for the box border.                                                        |
-| `prefix`              | `string`                | `"❯"`          | Prefix glyph shown on the first body line.                                                                                    |
-| `prefixColor`         | `string`                | `"accent"`     | Theme colour token **or** hex colour for the prefix.                                                                          |
-| `corners`             | `"rounded" \| "square"` | `"rounded"`    | `rounded` = `╭╮│╰╯`, `square` = `┌┐│└┘`. Any other value falls back to `rounded`.                                             |
-| `focusIndicator`      | `boolean`               | `true`         | Track terminal focus (DECSET 1004) and restyle the border when this pane is focused. Requires `focus-events on` in tmux.      |
-| `focusedBorderColor`  | `string`                | `"accent"`     | Border colour while the pane is focused; `borderColor` is used when unfocused.                                                |
-| `sessionName`         | `boolean`               | `true`         | Inlay the session name in the border when the session has one (set via `/name`, `--name`, or the session-name extension).     |
-| `sessionNameColor`    | `string`                | `"muted"`      | Theme colour token **or** hex colour for the session name inlay.                                                              |
-| `sessionNamePosition` | `"left" \| "right"`     | `"right"`      | Which end of the border the name sits at. `left` shares that end with the scroll indicator when the input overflows.          |
-| `sessionNameFormat`   | `string`                | `"─ {name} ─"` | Surround template; must contain `{name}`. The surrounding glyphs render in the border colour, the name in `sessionNameColor`. |
-| `sessionNameMaxWidth` | `number`                | `0`            | Cell cap for the name before truncating with `…`; `0` = fit within the rule, keeping 8 cells of plain border.                 |
-| `sessionNameBorder`   | `"top" \| "bottom"`     | `"top"`        | Which border (top or bottom rule) carries the name.                                                                           |
-| `spinner`             | `boolean`               | `true`         | Animate the prefix as a spinner while pi is working (between `agent_start` and `agent_settled`).                              |
-| `spinnerStyle`        | `string`                | `"dots"`       | Built-in spinner preset — see [Spinner presets](#spinner-presets). Unknown names fall back to `dots`.                         |
-| `spinnerFrames`       | `string[]`              | —              | Custom spinner frames; overrides `spinnerStyle`. Any cell width — the prefix slot is sized to the widest frame.               |
-| `spinnerIntervalMs`   | `number`                | per preset     | Milliseconds per spinner frame. Defaults to the active preset's tuned interval.                                               |
-| `spinnerColor`        | `string`                | `"accent"`     | Theme colour token, hex colour, or `"rainbow"` (hue rotates while spinning).                                                  |
-| `glow`                | `boolean`               | `true`         | Animate the border while pi is working.                                                                                       |
-| `glowStyle`           | `"pulse" \| "shimmer"`  | `"pulse"`      | `pulse` breathes the whole border toward `glowColor`; `shimmer` sweeps a highlight along the top/bottom rules.                |
-| `glowColor`           | `string`                | `"accent"`     | Theme colour token, hex colour, or `"rainbow"` the glow animates toward.                                                      |
-| `glowPeriodMs`        | `number`                | `2000`         | Milliseconds per glow cycle (one full pulse breath or one shimmer sweep).                                                     |
-| `rainbowPeriodMs`     | `number`                | `1200`         | Milliseconds per full hue rotation when a colour is set to `"rainbow"`.                                                       |
+Problems are reported, never fatal. An unknown key, slot, item or state warns with a suggestion (`unknown item "brnch" (did you mean "branch"?)`), and a bad value falls back to the style's value.
+
+### Slots
+
+| Slot                               | Where                                                                                                                                                              |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `above`                            | A row above the box. It's a pi `aboveEditor` widget, so it stays on screen while a dialog replaces the input.                                                      |
+| `topLeft`, `topRight`              | Inlays on the box's top border (or a row above the input for `slab` and `none`).                                                                                   |
+| `bottomLeft`, `bottomRight`        | Inlays on the bottom border.                                                                                                                                       |
+| `rightPrompt`                      | Right-aligned on the first input line, like zsh's `RPROMPT`. Hidden when your text gets within two cells of it.                                                    |
+| `footerLeft`, `footerRight`        | The footer row. With both empty there is no footer row.                                                                                                            |
+| `panel`, `panelTop`, `panelBottom` | A panel beside the box (one item per row, plus its titles) when the pane is at least `panel.minWidth` wide. Narrower panes show these items in the footer instead. |
+
+A row with nothing to say takes no space: no working message while idle, no cost before any spend, no branch outside git. A row whose only remaining items are `text:` literals is hidden too, so `["working", "text:esc to interrupt"]` only shows while pi works.
+
+### Items
+
+| Item           | Shows                                                                                                                  | Shorter forms              |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| `label`        | Text pushed over `composer:set-label`, else the session name                                                           | truncated                  |
+| `model`        | `Claude Opus 5.5`                                                                                                      | `Opus 5.5`, `opus`         |
+| `thinking`     | Thinking level, on reasoning models                                                                                    |                            |
+| `cost`         | Session cost, once it's above $0.001                                                                                   |                            |
+| `lines`        | Lines added/removed by edits (`+38/-12`)                                                                               |                            |
+| `usage`        | Anthropic 5h and 7d plan windows with reset times (`items.usage.showBelow` hides it until a window drops below that %) | `5h 62% 7d 81%`, `5h 62%`  |
+| `context`      | Context left: `show` is `bar` (an elastic meter), `percent`, or `tokens`                                               | `71% ctx`, `71%`           |
+| `branch`       | Git branch                                                                                                             | truncated                  |
+| `pr`           | Open PR for the branch (`#226`, a link), via `gh`                                                                      |                            |
+| `cwd`          | Working directory name                                                                                                 |                            |
+| `statuses`     | Every extension status (`ctx.ui.setStatus`), minus `items.statuses.hide`                                               | each shortened, first only |
+| `status:<key>` | One extension status, e.g. `status:answer-hint`                                                                        |                            |
+| `working`      | pi's working indicator: spinner and message, and also pi's retry and compaction notices                                | truncated                  |
+| `elapsed`      | Time since pi started working                                                                                          |                            |
+| `tokens`       | Output tokens this run (`1,284 tokens`)                                                                                | `1.3K tok`                 |
+| `tps`          | Tokens per second, with a sparkline                                                                                    | rate only                  |
+| `hints`        | Keys you can press in the current state, from your keybindings                                                         | fewer keys                 |
+| `mode`         | A state badge: `READY`, `INSERT`, `WORKING`, `ASK`, …                                                                  |                            |
+| `paste`        | `3 lines · 1 paste` while the input has several lines or a collapsed paste                                             | `3L`                       |
+| `scroll`       | `↓ scrolled · ctrl+end to follow` while the transcript is scrolled back                                                | shorter                    |
+| `text:…`       | Literal text, e.g. `text:esc to interrupt`                                                                             |                            |
+
+Every item also takes `priority`, `color`, `icon` (`""` hides the default glyph), `prefix` and `suffix` (painted dim, e.g. `"on "`).
+
+### When a row is too narrow
+
+One rule for every row: **the lowest-priority item gives way first.** It switches to its shorter forms one at a time, then truncates (if it can) or disappears, before the next item is touched. Once the row fits, higher-priority items get their fuller forms back if there's room, and elastic items (the context bar) take whatever width is left. Default priorities, highest first: `working` 95, `scroll` 92, `mode` 90, `context` 88, `elapsed` 85, `model` 80, `paste` 78, `thinking` 70, `label` 65, `pr` 55, `branch` 50, `tokens` 48, `statuses` 45, `cwd` 45, `hints` 40, `tps` 35, `cost` 30, `lines` 25, `usage` 20, `text:` 5. Change any of them with `items.<name>.priority`.
+
+### States
+
+`prompt.states` and `box.states` take overrides per state. Several states can apply at once (typing while context is nearly full); they apply in this order, later winning:
+
+`idle` → `typing` → `paste` → `scrolled` → `nearFull` → `working` → `tool` → `prompt`
+
+`nearFull` means Checkpoint published `warning` or `error` for the context meter, or (without Checkpoint) less than 15% context left. `prompt` means pi is waiting on a dialog (`ui_prompt_start`).
+
+### Colours
+
+Any theme token (`accent`, `border`, `muted`, `dim`, `success`, `warning`, `error`, `thinkingMax`, `syntaxKeyword`, …) or a `#rrggbb` hex value. `"context"` means the current context colour (Checkpoint's policy colour when it publishes one), which is how `box.states.nearFull.color: "context"` turns the border amber, then red.
 
 ### Spinner presets
 
-Each preset has a tuned default interval; set `spinnerIntervalMs` to override.
+`dots`, `disc`, `moon`, `star`, `orbit`, `corners`, `triangle`, `line`, `pulse`, `scanner`, `mini-scanner`. Or give `spinner.frames` your own list. There's only ever one spinner on screen: with `prompt.whenBusy: "spinner"` the prompt symbol spins and the `working` item shows just the message; with `"symbol"` the `working` item carries the spinner.
 
-| Preset         | Frames                       | Interval | Notes                                                                                              |
-| -------------- | ---------------------------- | -------- | -------------------------------------------------------------------------------------------------- |
-| `dots`         | `⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏`        | 80ms     | Classic braille dots (default).                                                                    |
-| `disc`         | `⣾ ⣽ ⣻ ⢿ ⡿ ⣟ ⣯ ⣷`            | 90ms     | Dense braille disc with an orbiting gap.                                                           |
-| `moon`         | `🌑 🌒 🌓 🌔 🌕 🌖 🌗 🌘`    | 90ms     | Moon phases. Emoji — widens the prefix slot to 2 cells.                                            |
-| `star`         | `✶ ✸ ✹ ✺ ✹ ✸`                | 90ms     | Twinkling star — flares and dims.                                                                  |
-| `orbit`        | `◜ ◠ ◝ ◞ ◡ ◟`                | 80ms     | A dot orbiting a circle.                                                                           |
-| `corners`      | `▖ ▘ ▝ ▗`                    | 120ms    | A quarter-block bouncing around the cell's corners.                                                |
-| `triangle`     | `◢ ◣ ◤ ◥`                    | 120ms    | A spinning filled triangle.                                                                        |
-| `scanner`      | `●····· … ·····● …` (bounce) | 60ms     | KITT scanner — comet with a fading tail. **6 cells wide**, so the idle prefix slot is 6 cells too. |
-| `mini-scanner` | `●·· ·●· ··● ·●·`            | 120ms    | Scanner's little sibling — 3 cells, no tail.                                                       |
+## Extension API
 
-Define your own with `spinnerFrames` (any array of non-empty strings; it takes
-precedence over `spinnerStyle`):
+Over pi's shared event bus (`pi.events`), so nothing needs to import composer.
 
-```json
-{ "spinnerFrames": ["◐", "◓", "◑", "◒"], "spinnerIntervalMs": 100 }
+```ts
+// Show text in the `label` item (wins over the session name). Empty or absent text clears it.
+pi.events.emit('composer:set-label', { text: `⏱ ${elapsed}` });
+
+// Composer asks on every session start; answer so load order doesn't matter.
+pi.events.on('composer:label-request', () => pi.events.emit('composer:set-label', { text: currentLabel() }));
 ```
 
-The prefix slot is sized to the widest frame of the active spinner (idle `❯`
-included), so wide frames permanently indent the input — the layout never
-shifts when the agent starts or stops.
+Composer also emits `composer:context-bar` (`true` when any slot shows `context`, `false` on shutdown) and answers `composer:request-context-bar` with it. Checkpoint uses this to hide its own context widget, and colours composer's meter through `self-compact:context-color`.
 
-### Colour tokens
+## Other behaviour
 
-Any valid theme colour token works. See your active theme in
-`~/.pi/agent/themes/` or via `/settings → Theme` for available tokens
-(`border`, `accent`, `text`, `muted`, `success`, `error`,
-`customMessageLabel`, …). Hex values must be 6-digit `#rrggbb`; invalid values
-fall back to the uncoloured text. Hex takes precedence over theme tokens in
-`applyColor`.
+- **Paste again to expand**: pi collapses large pastes (more than 10 lines or 1000 characters) into `[paste #N +X lines]`. Paste the same content again while the marker is in the input and it expands inline.
+- **History recall puts the cursor at the end**: pi places the cursor at the start of a message recalled with Up. Composer moves it to the end, so you can keep typing.
+- **Focus indicator**: `box.focusColor` colours the border while this tmux pane has terminal focus (needs tmux `focus-events on`).
+- **Idle means idle**: composer runs no timers unless something is animating (busy spinner, busy effect, shimmer, a pending toast).
 
-`spinnerColor` and `glowColor` additionally accept `"rainbow"`: a truecolor
-hue rotation completing one full spectrum lap per `rainbowPeriodMs`. A rainbow
-`glowColor` makes the pulse breathe toward a continuously rotating hue (and
-the shimmer highlight cycle colours).
+## Migrating from 0.x
 
-The pulse anchors on `borderColor` (not the focus-adjusted border), so the
-default `border`→`accent` pulse is visible even while the pane is focused and
-the resting border is already `accent`. If you set `glowColor` equal to
-`borderColor`, the pulse has nothing to breathe toward and is invisible —
-pick two colours that differ.
+Composer 1.0 reads a new nested config. A `composer.json` with 0.x keys gets one error naming them, and those keys are ignored.
 
-No environment variables are used.
+| 0.x key                                                              | 1.0                                                                                              |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `boxedView: false`                                                   | `box.border: "rule"`                                                                             |
+| `corners`                                                            | `box.border` (`rounded`, `square`, `heavy`)                                                      |
+| `boxPadX`                                                            | `box.padX`                                                                                       |
+| `borderColor`, `focusedBorderColor`, `focusIndicator: false`         | `box.color`, `box.focusColor`, `box.focusColor: null`                                            |
+| `prefix`, `prefixColor`                                              | `prompt.symbol`, `prompt.color`                                                                  |
+| `spinner: false`                                                     | `prompt.whenBusy: "symbol"`                                                                      |
+| `spinnerStyle`, `spinnerFrames`, `spinnerIntervalMs`, `spinnerColor` | `spinner.frames` (preset name or list), `spinner.intervalMs`, `spinner.color`                    |
+| `glow: false`, `glowStyle`, `glowColor`, `glowPeriodMs`              | `box.busyEffect` (`off`, `pulse`, `shimmer`, `rainbow`), `box.effectColor`, `box.effectPeriodMs` |
+| `rainbowPeriodMs`                                                    | `box.effectPeriodMs` with `busyEffect: "rainbow"`                                                |
+| `sessionName: false`                                                 | remove `label` from its slot                                                                     |
+| `sessionNamePosition`, `sessionNameBorder`                           | move `label` to `topLeft`, `topRight`, `bottomLeft` or `bottomRight`                             |
+| `sessionNameColor`                                                   | `items.label.color`                                                                              |
+| `sessionNameFormat`, `sessionNameMaxWidth`                           | `box.inlay`; labels truncate to fit                                                              |
+| `menuGap`, `extraMenuIndent`                                         | `box.menuGap`, `box.menuIndent`                                                                  |
+| statusline.json `hiddenStatuses`                                     | `items.statuses.hide`                                                                            |
+| spinner.json `shimmer`, `baseColor`, …                               | `working.*` (see the spinner package README)                                                     |
+
+Remove `@nicknisi/pi-statusline` and `@nicknisi/pi-spinner` from your pi packages; their last releases are stubs that only print a notice. Statusline's tmux status files are written by fleet's pi hook.
 
 ## Dependencies
 
-Peer dependencies (`*`):
-
-- `@earendil-works/pi-coding-agent` — `ExtensionAPI`, `ExtensionContext`,
-  `CustomEditor`, `KeybindingsManager`, `Theme`, `ThemeColor` types; the
-  `session_start` / `session_shutdown` events; `ctx.ui.setEditorComponent`.
-- `@earendil-works/pi-tui` — `TUI` and `EditorTheme` types, `isViewportTUI`
-  for focus-reporting ownership, `visibleWidth` for width arithmetic over
-  ANSI-styled strings, and `tui.requestRender` for focus updates.
-
-No npm runtime dependencies; `node:child_process` / `node:fs` / `node:os` /
-`node:path` only.
+Peer dependencies: `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, `@earendil-works/pi-ai` (types). External commands, all optional and async: `gh` (PR lookup), `curl` and macOS `security` (Anthropic usage), `tmux` (focus).
 
 ## Caveats
 
-- **pi-tui internals**: the paste-expand and history-cursor features reach into
-  `Editor` privates at runtime (`state`, `pastes`, `pasteCounter`,
-  `historyIndex`, `pushUndoSnapshot`, `cancelAutocomplete`,
-  `exitHistoryBrowsing`, `setCursorCol`, `moveToLineEnd`) and override the
-  TS-private `handlePaste` and `navigateHistory` (compile-time private,
-  runtime-accessible). It
-  also hard-codes pi's paste-marker format (`[paste #N +X lines]` /
-  `[paste #N X chars]`) and replicates pi-tui's paste cleanup and registry
-  renumbering. Any change to pi-tui's paste handling or marker format can
-  break this.
-- **Stock-render parsing**: the boxed renderer calls `super.render()` and then
-  re-wraps its output, detecting pi's solid `─` borders and `↑/↓ N more` scroll
-  indicators by string matching. If pi-tui changes how the stock editor renders
-  borders or scroll indicators, the box layout will misdetect sections.
-- **Narrow terminals**: if `width < 5 + BOX_PAD_X * padMultiplier`
-  (`padMultiplier` is 3 boxed, 1 unboxed) or the stock render produces fewer
-  than 2 lines, the component falls back to pi's stock rendering.
-- **Focus tracking (DECSET 1004)**: fullscreen pi owns focus reporting;
-  composer reasserts it during setup but only disables it in other TUI modes.
-  Composer observes raw stdin because fullscreen pi consumes CSI I / CSI O in
-  its viewport listener before extension input listeners run. When composer
-  owns reporting, shutdown and process-exit hooks disable it so the shell does
-  not inherit `[I`/`[O`. A signal that bypasses the exit hook can still leave
-  focus reporting enabled.
-- **tmux**: the focus indicator only changes state if tmux has
-  `focus-events on` (and the outer terminal passes focus events through).
-  Outside tmux it works only if the terminal itself emits CSI I / CSI O.
-- **Config validation is shallow**: bad JSON is reported and numeric/enum
-  fields are range-checked, but wildly wrong types for unchecked string fields
-  (e.g. a number for `prefix`) may throw at render time.
-- **Reload doesn't rebuild the editor**: `/composer` mutates the live config
-  that render code reads, which covers every documented key. A key that only
-  takes effect at component construction would need a restart (none currently
-  do).
-- **setEditorComponent conflicts**: any other extension calling
-  `setEditorComponent` after this one will replace the editor (last call wins).
-- **Pulse needs truecolor**: the pulse glow interpolates RGB between
-  `borderColor` and `glowColor`. Both endpoints must resolve to RGB —
-  hex values always do; theme tokens only if the theme emits truecolor
-  (`38;2;r;g;b`) sequences. If either endpoint can't be resolved, the border
-  falls back to a steady `glowColor` while working. Shimmer has no such
-  requirement.
-- **Animation cost**: while pi is working, a single timer requests a TUI
-  re-render every `spinnerIntervalMs` (or 80ms for glow-only). Idle sessions
-  have no timer running.
+- **pi internals**: paste-expand and history-cursor reach into pi-tui `Editor` privates (`state`, `pastes`, `pasteCounter`, `historyIndex`, …) and override the TS-private `handlePaste` and `navigateHistory`. The box is drawn by re-wrapping pi's stock editor render, detecting its `─` rules and `↑/↓ N more` hints by string matching. A pi-tui change to either can break them.
+- **One editor**: pi's `setEditorComponent`, `setFooter` and working indicator are last-call-wins. Another extension that replaces any of them after composer takes that piece over.
+- **Narrow panes**: if the input would be narrower than 4 cells, composer falls back to pi's stock editor for that frame.
+- **Usage** is shown only for Anthropic models and needs an Anthropic OAuth token (pi's `auth.json`, or Claude Code's keychain entry on macOS). `/composer` reports why it's missing.
+- **Colour effects** (`pulse`, shimmer) need theme tokens that resolve to truecolor; otherwise they fall back to a steady colour. `rainbow` always uses truecolor.
+- **Glyphs**: `icons: "nerd"` needs a Nerd Font; `tps` and the meters use block characters.

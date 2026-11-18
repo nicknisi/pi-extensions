@@ -8,7 +8,7 @@ Packages are private (not on npm). Install from a local checkout:
 
 ```bash
 git clone <this-repo> ~/Developer/pi-extensions
-pi install ~/Developer/pi-extensions/packages/statusline   # absolute
+pi install ~/Developer/pi-extensions/packages/composer     # absolute
 pi install ../pi-extensions/packages/btw                   # relative to the settings file
 ```
 
@@ -40,17 +40,15 @@ Local paths are added to pi's settings without copying — edits in the repo are
 
 ### UI & appearance
 
-| Package                                      | What it does                                                                                                 | Adds                                        |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------- |
-| [compact-tools](packages/compact-tools/)     | Two-line tool displays with original rendering on Ctrl+O or fullscreen click                                 | compact tool display                        |
-| [composer](packages/composer/)               | Config-driven boxed input editor; paste-again-to-expand for collapsed paste markers; tmux focus-aware border | custom editor component                     |
-| [header](packages/header/)                   | Animated dashboard header (GIF-compiled truecolor frames or ASCII art) with session info, on fresh sessions  | `/nicknisi-header`, custom header           |
-| [mg](packages/mg/)                           | Severance-style "100% File Completion" animation starring a pixelated Michael Grinich, with macOS audio      | `/mg [name]`                                |
-| [pin-last-prompt](packages/pin-last-prompt/) | Sticky bar pinning the owning user prompt while scrolled back in fullscreen (pi ≥ 0.84)                      | scrollback overlay bar                      |
-| [recap](packages/recap/)                     | LLM "where was I" card injected into the transcript after idle minutes                                       | `/recap`, `/recap-idle`, `recap` entry type |
-| [spinner](packages/spinner/)                 | ~1000 rotating joke/meme phrases for the working spinner                                                     | —                                           |
-| [statusline](packages/statusline/)           | Footer: model, cost, context bar, lines changed, usage limits, git PR link; writes tmux status files         | custom footer, `~/.cache/pi-status/`        |
-| [turn-timer](packages/turn-timer/)           | Dim per-turn elapsed-time row below each response                                                            | `turn-duration` entry type                  |
+| Package                                      | What it does                                                                                                | Adds                                        |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| [compact-tools](packages/compact-tools/)     | Two-line tool displays with original rendering on Ctrl+O or fullscreen click                                | compact tool display                        |
+| [composer](packages/composer/)               | The whole bottom of the screen: input box, footer, working message; styles plus composable slots            | custom editor, footer, `/composer`          |
+| [header](packages/header/)                   | Animated dashboard header (GIF-compiled truecolor frames or ASCII art) with session info, on fresh sessions | `/nicknisi-header`, custom header           |
+| [mg](packages/mg/)                           | Severance-style "100% File Completion" animation starring a pixelated Michael Grinich, with macOS audio     | `/mg [name]`                                |
+| [pin-last-prompt](packages/pin-last-prompt/) | Sticky bar pinning the owning user prompt while scrolled back in fullscreen (pi ≥ 0.84)                     | scrollback overlay bar                      |
+| [recap](packages/recap/)                     | LLM "where was I" card injected into the transcript after idle minutes                                      | `/recap`, `/recap-idle`, `recap` entry type |
+| [turn-timer](packages/turn-timer/)           | Dim per-turn elapsed-time row below each response                                                           | `turn-duration` entry type                  |
 
 ### Behavior & plumbing
 
@@ -95,11 +93,11 @@ Each package publishes its TypeScript sources _and_ compiled JS, and they are us
 | `pi.extensions` | `./index.ts`                            | pi, which transpiles extensions through jiti       |
 | `exports`       | `./dist/index.js` + `./dist/index.d.ts` | everyone else — bundlers, and anything `tsc`-built |
 
-The split exists because Node refuses to strip types inside `node_modules` (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), so a `tsc`-built consumer importing raw `.ts` from a package crashes at runtime. Keeping `pi.extensions` on the sources means local path installs (`pi install ../pi-extensions/packages/statusline`) still need no build step, which is the point of the rapid-testing loop.
+The split exists because Node refuses to strip types inside `node_modules` (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), so a `tsc`-built consumer importing raw `.ts` from a package crashes at runtime. Keeping `pi.extensions` on the sources means local path installs (`pi install ../pi-extensions/packages/composer`) still need no build step, which is the point of the rapid-testing loop.
 
 Consequences worth knowing:
 
-- **`dist/` is git-ignored**, so `pnpm build` runs in CI before publish (see `release.yml`) and from the root `prepare` script after `pnpm install`. That hook is load-bearing for local path installs: six packages depend on `@nicknisi/pi-shared`, which now resolves through its own `exports` into `dist/`, so a fresh clone with no build would fail to load them in pi. If you ever delete `dist/` by hand, run `pnpm build` — a no-op `pnpm install` will not re-run `prepare`.
+- **`dist/` is git-ignored**, so `pnpm build` runs in CI before publish (see `release.yml`) and from the root `prepare` script after `pnpm install`. That hook is load-bearing for local path installs: several packages depend on `@nicknisi/pi-shared`, which now resolves through its own `exports` into `dist/`, so a fresh clone with no build would fail to load them in pi. If you ever delete `dist/` by hand, run `pnpm build` — a no-op `pnpm install` will not re-run `prepare`.
 - **Relative imports use `.js`, never `.ts`** (`import { x } from './config.js'`), the normal NodeNext convention — `allowImportingTsExtensions` is deliberately off so the typecheck catches any regression.
 - **`paths` in the root tsconfig** maps `@nicknisi/pi-shared` to its source, so a fresh clone typechecks without building first. The build turns that off (`paths: {}`) and resolves siblings through their real `exports` instead, which is what proves the declaration output is actually usable.
 
@@ -109,4 +107,8 @@ Cross-package helpers go in `packages/shared`, consumed as `"@nicknisi/pi-shared
 
 - Runtime configs live outside the repo: `~/.pi/agent/configs/<name>.json` for most packages. Example configs ship with the packages that need them.
 - Several extensions lean on pi internals (component tree shapes, editor privates, fullscreen renderer state) — each README's caveats section calls these out; a pi upgrade can break them.
-- macOS-centric: statusline's tmux integration, and btw's fork-to-window all assume macOS/tmux/ghostty.
+- macOS-centric: composer's usage lookup (keychain) and focus indicator, and btw's fork-to-window, assume macOS/tmux/ghostty.
+
+### Retired
+
+- `statusline` and `spinner` were folded into [composer](packages/composer/) 1.0. Their last releases are stubs that print a notice; remove them from your pi packages.

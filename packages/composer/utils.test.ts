@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { paneHasFocusedClient, parseFocusInput, parseLabelData, splitFormat, truncateCells } from './utils.js';
+import { paneHasFocusedClient, parseFocusInput, parseLabelData, truncateCells } from './utils.js';
 
 describe('parseLabelData', () => {
   it('returns the text when it is a non-empty string', () => {
@@ -40,21 +40,6 @@ describe('parseFocusInput', () => {
     const first = parseFocusInput('', '\x1b[');
     expect(first).toEqual({ focused: undefined, carry: '\x1b[' });
     expect(parseFocusInput(first.carry, 'O')).toEqual({ focused: false, carry: '' });
-  });
-});
-
-describe('splitFormat', () => {
-  it('splits the template around {name}', () => {
-    expect(splitFormat('─ {name} ─')).toEqual(['─ ', ' ─']);
-    expect(splitFormat('[ {name} ]')).toEqual(['[ ', ' ]']);
-  });
-
-  it('handles a bare {name} template', () => {
-    expect(splitFormat('{name}')).toEqual(['', '']);
-  });
-
-  it('degrades to the bare name when {name} is missing', () => {
-    expect(splitFormat('no placeholder')).toEqual(['', '']);
   });
 });
 
