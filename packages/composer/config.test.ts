@@ -1,8 +1,8 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { DEFAULTS, loadFrom, spinnerFrames } from './config.js';
+import { DEFAULTS, load, loadFrom, spinnerFrames } from './config.js';
 import { cacheDirIsPrivate, countDiffLines, parseUsage } from './data.js';
 import { randomVerb, VERBS } from './verbs.js';
 import { streamedChars } from './index.js';
@@ -226,6 +226,25 @@ describe('cacheDirIsPrivate', () => {
       expect(cacheDirIsPrivate(join(base, 'missing'))).toBe(false);
     } finally {
       rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('load', () => {
+  it('a broken composer.json is reported and flagged, but a session style never reads it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'composer-load-'));
+    try {
+      const file = join(dir, 'composer.json');
+      writeFileSync(file, '{ not json');
+      const fromFile = load(undefined, file);
+      expect(fromFile.unreadable).toBe(true);
+      expect(fromFile.errors[0]).toMatch(/could not read/);
+      const session = load('toad', file);
+      expect(session.unreadable).toBeUndefined();
+      expect(session.errors).toEqual([]);
+      expect(session.config.style).toBe('toad');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

@@ -81,14 +81,19 @@ export function cacheDirIsPrivate(dir: string): boolean {
   try {
     const st = lstatSync(dir);
     if (!st.isDirectory() || st.isSymbolicLink()) return false;
-    if (typeof process.getuid === 'function' && st.uid !== process.getuid()) return false;
+    // No uid to compare (Windows): ownership can't be verified, so the disk cache isn't used.
+    if (typeof process.getuid !== 'function' || st.uid !== process.getuid()) return false;
     return (st.mode & 0o022) === 0;
   } catch {
     return false;
   }
 }
 
+/** The last good fetch, so usage works even where the disk cache can't be used. */
+let lastFetch: { at: number; data: UsageData } | undefined;
+
 function readUsageCache(allowStale: boolean): UsageData | undefined {
+  if (lastFetch && (allowStale || (Date.now() - lastFetch.at) / 1000 < USAGE_CACHE_TTL_S)) return lastFetch.data;
   if (!cacheDirIsPrivate(usageCacheDir())) return undefined;
   try {
     const file = usageCacheFile();
@@ -119,16 +124,10 @@ function refreshUsage(): void {
       });
       const body = await res.text();
       if (res.status !== 200) return failUsage(`usage API answered HTTP ${res.status}`);
-      if (!parseUsage(JSON.parse(body))) return failUsage('usage API response was missing a 5h or 7d window');
-      mkdirSync(usageCacheDir(), { recursive: true, mode: 0o700 });
-      if (!cacheDirIsPrivate(usageCacheDir())) return failUsage(`usage cache dir ${usageCacheDir()} is not private`);
-      // Exclusive-create a temp file, then rename over the target: atomic, and
-      // neither step follows a link planted at either name.
-      const tmp = `${usageCacheFile()}.${process.pid}.tmp`;
-      rmSync(tmp, { force: true });
-      writeFileSync(tmp, body, { mode: 0o600, flag: 'wx' });
-      renameSync(tmp, usageCacheFile());
-      usageHealth = 'ok';
+      const data = parseUsage(JSON.parse(body));
+      if (!data) return failUsage('usage API response was missing a 5h or 7d window');
+      lastFetch = { at: Date.now(), data };
+      usageHealth = writeUsageCache(body);
       usageRetryAt = 0;
       memo = undefined;
       onDataUpdated?.();
@@ -138,6 +137,25 @@ function refreshUsage(): void {
       usageInFlight = false;
     }
   })();
+}
+
+/**
+ * Persist a fetch so a restart doesn't refetch. Only into a private cache dir,
+ * via an exclusive temp file renamed over the target, so no step follows a
+ * link planted at either name. Returns the usage health line.
+ */
+function writeUsageCache(body: string): string {
+  try {
+    mkdirSync(usageCacheDir(), { recursive: true, mode: 0o700 });
+    if (!cacheDirIsPrivate(usageCacheDir())) return `ok (not cached: ${usageCacheDir()} is not private)`;
+    const tmp = `${usageCacheFile()}.${process.pid}.tmp`;
+    rmSync(tmp, { force: true });
+    writeFileSync(tmp, body, { mode: 0o600, flag: 'wx' });
+    renameSync(tmp, usageCacheFile());
+    return 'ok';
+  } catch (error) {
+    return `ok (not cached: ${error instanceof Error ? error.message : String(error)})`;
+  }
 }
 
 // Renders run up to ~12×/s while animating; look at the cache file at most every 5s.

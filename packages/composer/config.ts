@@ -518,6 +518,8 @@ export function loadFrom(raw: unknown, styleOverride?: StyleName): LoadResult {
 }
 
 export function load(styleOverride?: StyleName, path = CONFIG_PATH): LoadResult {
+  // A session style is the preset as shipped; composer.json isn't read for it.
+  if (styleOverride) return loadFrom(undefined, styleOverride);
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(path, 'utf8'));
