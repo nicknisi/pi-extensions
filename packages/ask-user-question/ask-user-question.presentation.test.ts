@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { initTheme } from '@earendil-works/pi-coding-agent';
 import { getKeybindings } from '@earendil-works/pi-tui';
 import { createMockCtx, createMockPi, useTempAgentDir } from './test-utils/index.js';
@@ -290,7 +291,7 @@ describe('inline presentation', () => {
 });
 
 describe('terminal status message', () => {
-  const localesDir = join(dirname(new URL(import.meta.url).pathname), 'locales');
+  const localesDir = fileURLToPath(new URL('./locales', import.meta.url));
   const locale = (file: string) => JSON.parse(readFileSync(join(localesDir, file), 'utf8')) as Record<string, string>;
 
   it.each(['inline', 'overlay'] as const)(

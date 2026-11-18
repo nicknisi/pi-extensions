@@ -1,6 +1,6 @@
 import { CURSOR_MARKER, getKeybindings } from '@earendil-works/pi-tui';
-import { createMockPi } from './test-utils/index.js';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createMockPi, useTempAgentDir } from './test-utils/index.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { registerAskUserQuestionTool } from './ask-user-question.js';
 import type { QuestionAnswer, QuestionnaireResult } from './tool/types.js';
 
@@ -84,7 +84,8 @@ const mixedParams = {
   ],
 };
 
-beforeEach(() => {});
+// Fork: mount with default config, not whatever is in the developer's ~/.pi/agent/configs.
+useTempAgentDir();
 afterEach(() => {
   vi.restoreAllMocks();
 });

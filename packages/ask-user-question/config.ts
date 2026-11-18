@@ -99,7 +99,8 @@ function isValidCollapseKeySpec(spec: string): boolean {
 }
 
 export function resolveCollapseKey(config: Pick<AskUserQuestionConfig, 'collapseKey'>): CollapseKeySpec {
-  const raw = config.collapseKey?.trim().toLowerCase();
+  // Fork: a non-string value (e.g. `123`) falls back to the default instead of throwing.
+  const raw = typeof config.collapseKey === 'string' ? config.collapseKey.trim().toLowerCase() : undefined;
   if (raw === undefined || raw === '') return DEFAULT_COLLAPSE_KEY;
   if (raw === COLLAPSE_KEY_OFF) return COLLAPSE_KEY_OFF;
   return isValidCollapseKeySpec(raw) ? raw : DEFAULT_COLLAPSE_KEY;
@@ -109,7 +110,7 @@ export function resolveCollapseKey(config: Pick<AskUserQuestionConfig, 'collapse
 const NOTES_KEY_RESERVED = new Set(['space', 'enter', 'return', 'tab', 'escape', 'esc', 'up', 'down', 'left', 'right']);
 
 export function resolveNotesKey(config: Pick<AskUserQuestionConfig, 'notesKey'>): string {
-  const raw = config.notesKey?.trim();
+  const raw = typeof config.notesKey === 'string' ? config.notesKey.trim() : undefined;
   if (!raw) return DEFAULT_NOTES_KEY;
   if ([...raw].length === 1) return raw;
   const spec = raw.toLowerCase();

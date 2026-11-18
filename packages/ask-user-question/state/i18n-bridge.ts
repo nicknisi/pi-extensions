@@ -38,15 +38,28 @@ type I18nSDK = { scope: (namespace: string) => ScopeFn };
 // before evaluating any importer.
 // A variable specifier keeps this optional peer out of the type graph: it ships raw .ts, which this repo's build can't compile.
 const I18N_SDK: string = '@juicesharp/rpiv-i18n';
+/** True when the optional SDK simply isn't installed (the normal case), as opposed to installed but broken. */
+function isMissingModule(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return (
+    code === 'ERR_MODULE_NOT_FOUND' ||
+    code === 'MODULE_NOT_FOUND' ||
+    /Cannot find (module|package)|Could not resolve/.test(String(error))
+  );
+}
 let scopeImpl: ScopeFn;
 try {
   const sdk = (await import(I18N_SDK)) as I18nSDK;
   scopeImpl = sdk.scope(I18N_NAMESPACE);
-} catch {
+} catch (error) {
+  // Fork: absent is silent (English UI); installed-but-broken is reported.
+  if (!isMissingModule(error))
+    console.warn(`ask-user-question: ${I18N_SDK} failed to load, using English — ${String(error)}`);
   scopeImpl = (_key, fallback) => fallback;
 }
 
 export const t: ScopeFn = scopeImpl;
+export { isMissingModule };
 
 export function displayLabel(kind: SentinelKind): string {
   return t(`sentinel.${kind}`, ROW_INTENT_META[kind].label);

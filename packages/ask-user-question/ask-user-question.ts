@@ -279,7 +279,10 @@ function makeSessionFactory(config: {
             projectTrusted: ctx.isProjectTrusted(),
           }).getExternalEditorCommand();
           if (!editorCommand) throw new Error('No external editor command is configured');
-          return await editWithExternalEditor(tui, editorCommand, value);
+          // Fork: an answer may have closed the dialog while the imports loaded; don't take the terminal then.
+          if (open.settled) return undefined;
+          const edited = await editWithExternalEditor(tui, editorCommand, value);
+          return open.settled ? undefined : edited;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           ctx.ui.notify(`${t('editor.failed', 'External editor failed')}: ${message}`, 'error');
@@ -426,12 +429,14 @@ async function runTuiPath(pi: ExtensionAPI, ctx: ExtensionContext, typed: Questi
     // Pi's editor slot (#253); the overlay only while another questionnaire holds the slot,
     // or stacked when another overlay is already on screen (see below).
     presentation = resolvePresentation();
+    open.inline = !presentation.overlay;
     emitTerminalAttention();
     let result = await mount(presentation);
     if (result === YIELD_TO_OVERLAY) {
       // Another overlay was on screen: stack on top of it instead (see mustYieldInlineSlot).
       presentation.release?.();
       presentation = STACKED_OVERLAY_PRESENTATION;
+      open.inline = false;
       result = await mount(presentation);
     }
 
@@ -522,7 +527,7 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
     renderResult: (result, { expanded }, theme, context) =>
       renderAskResult(result, context?.args, theme, { expanded, isError: context?.isError ?? false }),
 
-    async execute(toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
       // Line-terminator normalization runs once here, ahead of validation, so
       // every downstream consumer — validator, TUI, RPC walker, envelope, prompt
       // event — sees the same clean text (#192).
@@ -555,14 +560,27 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
         // Fork: an untouched questionnaire closes after QUESTION_TIMEOUT_MS. It settles like an inbound
         // answer, so it closes the dialog whether or not it is mounted yet.
         // shortcut: no timeout once the RPC walker takes over (open.host === 'rpc'); add one if RPC hosts need it.
-        const stopTimer = startAfkTimer(() => {
+        let stopTimer = () => {};
+        const onTimeout = (): void => {
+          // Closing the inline dialog makes Pi focus its main editor even while an overlay questionnaire
+          // is on screen, stranding the one the user may be answering. Wait for the others to close.
+          if (open.inline && answers.openCount() > 1) {
+            stopTimer = startAfkTimer(onTimeout);
+            return;
+          }
           if (open.host === 'tui') open.settle({ answers: [], cancelled: false, timedOut: true });
-        });
-        open.onInteraction = stopTimer;
+        };
+        stopTimer = startAfkTimer(onTimeout);
+        open.onInteraction = () => stopTimer();
+        // Fork: an aborted tool call (Esc) closes the dialog as a cancel instead of leaving it mounted.
+        const onAbort = () => open.settle({ answers: [], cancelled: true });
+        signal?.addEventListener('abort', onAbort, { once: true });
+        if (signal?.aborted) onAbort();
         try {
           return await runTuiPath(pi, ctx, typed, open);
         } finally {
           stopTimer();
+          signal?.removeEventListener('abort', onAbort);
         }
       } finally {
         answers.close(open);

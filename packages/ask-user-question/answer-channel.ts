@@ -27,6 +27,8 @@ export class OpenQuestionnaire {
   });
   /** Fork: called on every key the dialog receives; the AFK timer stops on the first. */
   onInteraction: () => void = () => {};
+  /** Fork: true while this questionnaire holds Pi's inline editor slot (not an overlay). */
+  inline = false;
 
   constructor(
     readonly toolCallId: string,
@@ -57,6 +59,8 @@ export class OpenQuestionnaire {
 export interface AnswerChannel {
   open(toolCallId: string, questions: readonly QuestionData[], host: AnswerHost): OpenQuestionnaire;
   close(questionnaire: OpenQuestionnaire): void;
+  /** Fork: how many questionnaires are open right now. */
+  openCount(): number;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -107,5 +111,6 @@ export function registerAnswerChannel(pi: ExtensionAPI): AnswerChannel {
     close(questionnaire) {
       if (open.get(questionnaire.toolCallId) === questionnaire) open.delete(questionnaire.toolCallId);
     },
+    openCount: () => open.size,
   };
 }

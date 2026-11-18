@@ -36,6 +36,11 @@ describe('formatKeySpecForDisplay', () => {
 });
 
 describe('resolveCollapseKey', () => {
+  it('falls back to the defaults for non-string key values instead of throwing', () => {
+    expect(resolveCollapseKey({ collapseKey: 123 as never })).toBe(DEFAULT_COLLAPSE_KEY);
+    expect(resolveNotesKey({ notesKey: false as never })).toBe(DEFAULT_NOTES_KEY);
+  });
+
   it('returns the default when config has no collapseKey', () => {
     expect(resolveCollapseKey({})).toBe(DEFAULT_COLLAPSE_KEY);
     expect(resolveCollapseKey({ collapseKey: undefined })).toBe(DEFAULT_COLLAPSE_KEY);

@@ -10,11 +10,15 @@ A fork of [`@juicesharp/rpiv-ask-user-question`](https://github.com/juicesharp/r
 
 The result's `details` are `{ answers: [], cancelled: false, timedOut: true }`, and the transcript shows `⏱ no answer within 5 minutes, agent moved on`. The idea and wording come from [fitchmultz/pi-ask-question](https://github.com/fitchmultz/pi-ask-question). The timeout is fixed at 5 minutes and only applies in the terminal UI; questions shown through an RPC host's own dialogs wait indefinitely, as upstream does.
 
+When two questionnaires are open at once (one inline, one as an overlay), the inline one doesn't time out until the others close: closing it makes Pi focus its main editor, which would strand the overlay you may be answering. Aborting the tool call (Esc) also closes the dialog, as a cancel.
+
 **Other differences from upstream:**
 
 - Config lives at `~/.pi/agent/configs/ask-user-question.json` instead of `~/.config/rpiv-ask-user-question/config.json` (same keys). See [docs/configuration.md](docs/configuration.md).
 - The two `@juicesharp/rpiv-config` helpers it used are vendored into `config.ts`, because that package ships raw `.ts` that this repo's build can't compile.
 - `@juicesharp/rpiv-i18n` stays an optional peer: if it's installed, the dialog is translated as upstream. Its specifier is held in a variable so the typecheck doesn't follow it, and the 3 upstream tests that switch locales were dropped.
+- Fixes for upstream bugs found in review: keys typed while the dialog is collapsed no longer edit a hidden typed answer; Undo can't bring another tab's note into the global note; moving past a blank multi-select question leaves it unanswered instead of answering "(no input)"; and `Ctrl+G` won't open the external editor for a dialog that an answer already closed. Regression tests are in `fork-fixes.test.ts`.
+- Translations need `@juicesharp/rpiv-i18n` resolvable from this package's folder (for a local-checkout install, install it in the checkout). A missing SDK is silent; one that is installed but fails to load prints a warning.
 - Code follows this repo's conventions (oxfmt, `.js` import specifiers, strict tsconfig with `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`). Behavior changes are marked with `Fork:` comments.
 - Upstream's test helpers (`@juicesharp/rpiv-test-utils`, not on npm) are copied into `test-utils/`, minus their global `HOME` swap. Tests that write config use a temp `PI_CODING_AGENT_DIR` instead.
 

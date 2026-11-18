@@ -23,7 +23,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 const PACKAGE_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const BRIDGE = resolve(PACKAGE_DIR, 'state/i18n-bridge.ts');
@@ -90,16 +90,17 @@ describe('i18n soft-peer shim — runtime fallback contract', () => {
     await expect(import(MISSING_SDK_SPECIFIER)).rejects.toThrow();
   });
 
-  it('try/catch around await import() falls through to the alternative branch', async () => {
-    type ScopeFn = (key: string, fallback: string) => string;
-    let scopeImpl: ScopeFn;
-    try {
-      const sdk = (await import(MISSING_SDK_SPECIFIER)) as { scope: (n: string) => ScopeFn };
-      scopeImpl = sdk.scope('test');
-    } catch {
-      scopeImpl = (_key, fallback) => fallback;
-    }
-    expect(scopeImpl('any.key', 'literal fallback')).toBe('literal fallback');
-    expect(scopeImpl('sentinel.next', 'Next')).toBe('Next');
+  it('the real bridge loads and falls back to English when the SDK is not installed', async () => {
+    // Fork: this repo doesn't install @juicesharp/rpiv-i18n, so this exercises the production path.
+    vi.doUnmock(SDK_SPECIFIER);
+    vi.resetModules();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { t, isMissingModule } = await import('./i18n-bridge.js');
+    await import('../index.js');
+    expect(t('any.key', 'literal fallback')).toBe('literal fallback');
+    expect(t('sentinel.next', 'Next')).toBe('Next');
+    expect(warn).not.toHaveBeenCalled(); // absent is the normal case: no noise
+    expect(isMissingModule(Object.assign(new Error('x'), { code: 'ERR_MODULE_NOT_FOUND' }))).toBe(true);
+    expect(isMissingModule(new SyntaxError('Unexpected token'))).toBe(false);
   });
 });

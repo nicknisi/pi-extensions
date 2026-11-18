@@ -80,6 +80,9 @@ export class QuestionnaireSession {
   private readonly notesKey: string;
   private readonly canReopenWhileHidden: boolean;
   private inputEditorOpen = false;
+  /** Fork: the tab whose text each editor last loaded; a different tab starts with empty undo history. */
+  private inlineOwnerTab = -1;
+  private notesOwnerTab = -1;
 
   /**
    * Overlay handle captured by `ctx.ui.custom`'s `onHandle` callback. Lets the session
@@ -185,6 +188,7 @@ export class QuestionnaireSession {
     switch (effect.kind) {
       case 'set_input_buffer':
         this.inlineInput.setText(effect.value);
+        this.inlineOwnerTab = this.isolateUndo(this.inlineInput, this.inlineOwnerTab);
         return;
       case 'clear_input_buffer':
         this.inlineInput.setText('');
@@ -194,6 +198,7 @@ export class QuestionnaireSession {
         return;
       case 'set_notes_value':
         this.notesInput.setText(effect.value);
+        this.notesOwnerTab = this.isolateUndo(this.notesInput, this.notesOwnerTab);
         return;
       case 'set_notes_focused':
         this.notesInput.focused = effect.focused;
@@ -213,6 +218,18 @@ export class QuestionnaireSession {
         this.done(effect.result);
         return;
     }
+  }
+
+  /**
+   * Fork: Pi's Editor keeps one undo stack across setText calls, so Undo in a tab's editor could
+   * restore another tab's note or draft. Clear it when the editor changes tabs; keep it within a tab.
+   * shortcut: reaches Pi's private `undoStack` (no public reset in pi-tui 1.5.2); harmless no-op if renamed.
+   */
+  private isolateUndo(editor: Editor, ownerTab: number): number {
+    if (ownerTab !== this.state.currentTab) {
+      (editor as unknown as { undoStack?: { clear?: () => void } }).undoStack?.clear?.();
+    }
+    return this.state.currentTab;
   }
 
   /** Opens Pi's configured external editor; on success commits the replacement buffer, on reported failure retains the draft. */
@@ -238,7 +255,8 @@ export class QuestionnaireSession {
    * text/cursor state without a reducer round-trip.
    */
   private handleIgnoreInline(data: string): void {
-    if (!this.state.inputMode) return;
+    // Fork: while collapsed the router ignores keys, and they must not edit the hidden draft.
+    if (!this.state.inputMode || this.state.collapsed) return;
     this.inlineInput.handleInput(data);
     this.viewAdapter.apply(this.state);
   }

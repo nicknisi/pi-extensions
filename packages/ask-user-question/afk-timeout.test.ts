@@ -1,12 +1,7 @@
-import { createEventBus, initTheme } from '@earendil-works/pi-coding-agent';
-import { getKeybindings } from '@earendil-works/pi-tui';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { QUESTION_TIMEOUT_MS, startAfkTimer, TIMEOUT_MESSAGE } from './afk-timeout.js';
 import { ASK_USER_ANSWER_EVENT } from './events.js';
-import { registerAskUserQuestionTool } from './ask-user-question.js';
-import type { QuestionnaireSessionComponent } from './state/questionnaire-session.js';
-import { createMockCtx, createMockPi } from './test-utils/index.js';
-import type { QuestionnaireResult } from './tool/types.js';
+import { askTool } from './test-utils/dialog.js';
 
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
@@ -29,49 +24,9 @@ describe('startAfkTimer', () => {
   });
 });
 
-type Factory = (
-  tui: unknown,
-  theme: unknown,
-  keybindings: unknown,
-  done: (result: QuestionnaireResult) => void,
-) => QuestionnaireSessionComponent;
-
-const question = {
-  questions: [{ question: 'Which layout?', header: 'Layout', options: [{ label: 'Inline' }, { label: 'Overlay' }] }],
-};
-
-/** Run the real tool with a mounted dialog that stays open until something settles it. */
 function openDialog() {
-  initTheme('dark');
-  const bus = createEventBus();
-  const { pi, captured } = createMockPi({ events: bus } as never);
-  registerAskUserQuestionTool(pi);
-  let component: QuestionnaireSessionComponent | undefined;
-  let markMounted: () => void = () => {};
-  const mounted = new Promise<void>((resolve) => (markMounted = resolve));
-  const custom = vi.fn(
-    (factory: Factory) =>
-      new Promise<QuestionnaireResult>((resolve) => {
-        const theme = { fg: (_c: string, s: string) => s, bg: (_c: string, s: string) => s, bold: (s: string) => s };
-        component = factory(
-          { requestRender() {}, terminal: { columns: 100, rows: 24 } },
-          theme,
-          getKeybindings(),
-          resolve,
-        );
-        markMounted();
-      }),
-  );
-  const ctx = createMockCtx({ hasUI: true, ui: { custom } as never });
-  const result = captured.tools.get('ask_user_question')!.execute!(
-    'tc',
-    question as never,
-    undefined,
-    undefined,
-    ctx as never,
-  );
-  const press = (data: string) => component!.handleInput(data);
-  return { result, mounted, press, bus };
+  const { call, bus } = askTool();
+  return { ...call(), bus };
 }
 
 describe('ask_user_question AFK timeout', () => {
@@ -103,5 +58,32 @@ describe('ask_user_question AFK timeout', () => {
     expect(r.details).toMatchObject({ answers: [{ answer: 'Inline' }] });
     await vi.advanceTimersByTimeAsync(QUESTION_TIMEOUT_MS);
     expect(r.details).not.toHaveProperty('timedOut');
+  });
+
+  it('keeps an inline dialog open while an overlay questionnaire is still open', async () => {
+    const { call } = askTool();
+    const a = call('a');
+    await a.mounted;
+    const b = call('b');
+    await b.mounted;
+    expect([a.isOverlay(), b.isOverlay()]).toEqual([false, true]);
+    b.press('\x1b[B'); // the user is answering B
+    await vi.advanceTimersByTimeAsync(QUESTION_TIMEOUT_MS * 2);
+    // Closing inline A now would move Pi's focus to its main editor and strand B.
+    expect(a.isSettled()).toBe(false);
+    b.press('\r');
+    expect((await b.result).details).toMatchObject({ answers: [{ answer: 'Overlay' }] });
+    await vi.advanceTimersByTimeAsync(QUESTION_TIMEOUT_MS);
+    expect((await a.result).details).toMatchObject({ timedOut: true });
+  });
+
+  it('closes the dialog as a cancel when the tool call is aborted', async () => {
+    const { call } = askTool();
+    const controller = new AbortController();
+    const q = call('tc', controller.signal);
+    await q.mounted;
+    q.press('\x1b[B'); // touched, so the timer is not what closes it
+    controller.abort();
+    expect((await q.result).details).toMatchObject({ answers: [], cancelled: true });
   });
 });

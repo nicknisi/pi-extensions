@@ -19,7 +19,7 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { registerAskUserQuestionTool } from './ask-user-question.js';
 import { registerAskUserQuestionReconciler } from './reconcile.js';
-import { I18N_NAMESPACE } from './state/i18n-bridge.js';
+import { I18N_NAMESPACE, isMissingModule } from './state/i18n-bridge.js';
 
 type I18nLoader = {
   registerLocalesFromDir: (namespace: string, packageUrl: string, options?: { label?: string }) => void;
@@ -37,8 +37,9 @@ const I18N_SDK: string = '@juicesharp/rpiv-i18n';
 try {
   const sdk = (await import(`${I18N_SDK}/loader`)) as I18nLoader;
   sdk.registerLocalesFromDir(I18N_NAMESPACE, import.meta.url, { label: 'rpiv-ask-user-question' });
-} catch {
-  // SDK absent — extension still loads with English-only UI.
+} catch (error) {
+  // SDK absent — extension still loads with English-only UI. Fork: report it when installed but broken.
+  if (!isMissingModule(error)) console.warn(`ask-user-question: ${I18N_SDK}/loader failed to load — ${String(error)}`);
 }
 
 export {

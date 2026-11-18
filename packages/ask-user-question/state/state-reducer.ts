@@ -258,14 +258,21 @@ const multiConfirmHandler: Handler<'multi_confirm'> = (state, action, ctx) => {
   if (!q) return { state, effects: [] };
   const pendingNotes = state.notesByTab.get(state.currentTab);
   const answers = new Map(state.answers);
-  answers.set(state.currentTab, {
-    questionIndex: state.currentTab,
-    question: q.question,
-    kind: 'multi',
-    answer: action.answer,
-    selected: action.selected,
-    ...(pendingNotes && pendingNotes.length > 0 ? { notes: pendingNotes } : {}),
-  });
+  // Fork: advancing past a blank multi-select leaves it unanswered (the model then sees it listed as
+  // unanswered, not as "(no input)"). A lone question submitted blank keeps upstream's behavior.
+  const blank = action.selected.length === 0 && !action.answer;
+  if (blank && action.autoAdvanceTab !== undefined) {
+    answers.delete(state.currentTab);
+  } else {
+    answers.set(state.currentTab, {
+      questionIndex: state.currentTab,
+      question: q.question,
+      kind: 'multi',
+      answer: action.answer,
+      selected: action.selected,
+      ...(pendingNotes && pendingNotes.length > 0 ? { notes: pendingNotes } : {}),
+    });
+  }
   const synced: QuestionnaireState = {
     ...state,
     answers,
