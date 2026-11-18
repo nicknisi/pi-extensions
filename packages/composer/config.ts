@@ -3,7 +3,7 @@
  *
  * Resolution: built-in defaults ← the chosen style preset ← your overrides.
  * Objects merge key by key; arrays (slot lists, spinner frames) replace.
- * Every key is optional: `{ "style": "toad" }` is a complete config.
+ * Every key is optional: `{ "style": "slab" }` is a complete config.
  */
 
 import { readFileSync } from 'node:fs';
@@ -25,9 +25,6 @@ export const SLOTS = [
   'rightPrompt',
   'footerLeft',
   'footerRight',
-  'panel',
-  'panelTop',
-  'panelBottom',
 ] as const;
 export type SlotName = (typeof SLOTS)[number];
 
@@ -138,7 +135,6 @@ export interface ComposerConfig {
     padX: number;
     padY: number;
     placeholder: string | null;
-    inlay: 'plain' | 'bracket';
     busyEffect: BusyEffect;
     effectColor: string;
     effectPeriodMs: number;
@@ -156,16 +152,15 @@ export interface ComposerConfig {
   };
   slots: Record<SlotName, SlotEntry[]>;
   items: Partial<Record<ItemName, ItemOptions>>;
-  panel: { width: number; minWidth: number };
   icons: 'nerd' | 'unicode' | 'ascii';
   separator: string;
   groupSeparator: string;
   toasts: boolean;
 }
 
-/** The shape every style starts from. Equal to the `classic` look. */
+/** The shape every style starts from: the `box` style and the standard status row. */
 export const DEFAULTS: ComposerConfig = {
-  style: 'classic',
+  style: 'box',
   prompt: { symbol: '❯', color: 'accent', whenBusy: 'spinner', states: {} },
   spinner: { frames: 'dots', intervalMs: 0, color: 'accent' },
   box: {
@@ -176,7 +171,6 @@ export const DEFAULTS: ComposerConfig = {
     padX: 1,
     padY: 0,
     placeholder: null,
-    inlay: 'plain',
     busyEffect: 'pulse',
     effectColor: 'accent',
     effectPeriodMs: 2000,
@@ -201,12 +195,8 @@ export const DEFAULTS: ComposerConfig = {
     rightPrompt: [],
     footerLeft: [['model', 'thinking'], 'cost', 'lines', 'usage', 'statuses', 'context'],
     footerRight: [['branch', 'pr']],
-    panel: [],
-    panelTop: [],
-    panelBottom: [],
   },
   items: {},
-  panel: { width: 34, minWidth: 100 },
   icons: 'nerd',
   separator: ' │ ',
   groupSeparator: ' ',
@@ -266,7 +256,6 @@ function suggest(key: string, known: readonly string[]): string {
 const ENUMS: Record<string, readonly string[]> = {
   'prompt.whenBusy': ['spinner', 'symbol'],
   'box.border': BORDERS,
-  'box.inlay': ['plain', 'bracket'],
   'box.busyEffect': EFFECTS,
   icons: ['nerd', 'unicode', 'ascii'],
 };
@@ -276,17 +265,9 @@ const MIN_VALUE: Record<string, number> = {
   'box.effectPeriodMs': 1,
   'working.shimmerPeriodMs': 1,
   'working.bandWidth': 1,
-  'panel.width': 10,
 };
 // Cell counts must be whole numbers or rows stop adding up to the pane width.
-const INTEGER_KEYS = new Set([
-  'box.padX',
-  'box.padY',
-  'box.menuGap',
-  'box.menuIndent',
-  'panel.width',
-  'panel.minWidth',
-]);
+const INTEGER_KEYS = new Set(['box.padX', 'box.padY', 'box.menuGap', 'box.menuIndent']);
 
 type FieldType = 'string' | 'number' | 'strings' | readonly string[];
 const ITEM_OPTION_TYPES: Record<string, FieldType> = {
@@ -466,7 +447,7 @@ function merge(base: Json, over: Json): Json {
 
 /** Defaults ← style preset ← user overrides. */
 export function resolveConfig(user: Json, styleOverride?: StyleName): ComposerConfig {
-  const style = styleOverride ?? (user.style as StyleName | undefined) ?? 'classic';
+  const style = styleOverride ?? (user.style as StyleName | undefined) ?? 'box';
   const preset = STYLES[style] as unknown as Json;
   const withStyle = merge(DEFAULTS as unknown as Json, { ...preset, style });
   // A session style preview shows the preset as shipped, without your overrides.

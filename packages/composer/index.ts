@@ -9,7 +9,6 @@
  *   topLeft …    inlays on the box's borders
  *   rightPrompt  right-aligned on the first input line
  *   footerLeft … the footer row
- *   panel …      a side panel beside the box on wide panes
  *
  * Event contracts on pi.events:
  *   composer:set-label { text }      another extension sets the label item (empty clears)
@@ -402,7 +401,7 @@ export default function composer(pi: ExtensionAPI) {
   const styleNames = Object.keys(STYLES) as StyleName[];
 
   pi.registerCommand('composer', {
-    description: 'Reload composer.json, try a style (/composer style toad), or preview every state',
+    description: 'Reload composer.json, try a style (/composer style slab), or preview every state',
     getArgumentCompletions: (prefix: string): AutocompleteItem[] => {
       const options = ['style', 'preview', ...styleNames.map((s) => `style ${s}`)];
       return options.filter((o) => o.startsWith(prefix)).map((o) => ({ value: o, label: o }));

@@ -31,7 +31,7 @@ describe('every style, state and width', () => {
 
 const text = (lines: string[]) => lines.map((l) => l.trimEnd()).join('\n');
 
-describe('classic', () => {
+describe('box (the default)', () => {
   const cfg = loadFrom({}).config;
 
   it('matches the 0.x box and statusline footer at 120 columns', () => {
@@ -59,50 +59,70 @@ describe('classic', () => {
   });
 });
 
-describe('styles', () => {
-  it('toad: heavy padded box, placeholder, live tokens above', () => {
-    const cfg = loadFrom({ style: 'toad' }).config;
-    const idle = renderAll(cfg, SCENARIOS.idle, 80);
-    expect(idle.editor[0]).toMatch(/^┏━+┓$/);
-    expect(idle.editor[1]).toMatch(/^┃ +┃$/);
-    expect(idle.editor[2]).toContain('Ask pi anything');
-    expect(idle.footer[0]).toContain(' ‹ ');
-    const working = renderAll(cfg, SCENARIOS.working, 80);
-    expect(working.above[0]).toContain('1,284 tokens');
+describe('slab', () => {
+  const cfg = loadFrom({ style: 'slab' }).config;
+
+  it('is a shaded slab with the same status row as box', () => {
+    const slab = renderAll(cfg, SCENARIOS.idle, 120);
+    const box = renderAll(loadFrom({}).config, SCENARIOS.idle, 120);
+    expect(slab.editor[1]).toMatch(/^ › /);
+    expect(slab.editor.some((l) => /[╭╮╰╯│]/.test(l))).toBe(false);
+    expect(slab.footer).toEqual(box.footer);
   });
 
-  it('keycaps: key hints follow the state, context pinned right', () => {
-    const cfg = loadFrom({ style: 'keycaps' }).config;
-    expect(renderAll(cfg, SCENARIOS.idle, 120).footer[0]).toMatch(/ \/ +commands.*71% context left $/);
-    expect(renderAll(cfg, SCENARIOS.working, 120).footer[0]).toContain('interrupt');
-    // A dialog shows its own keys, so composer adds none.
-    expect(renderAll(cfg, SCENARIOS.prompt, 120).footer[0]).not.toContain('interrupt');
-    // The literal "esc to interrupt" only shows alongside a real working message.
+  it('shows the working line with elapsed time, and its "esc to interrupt" only while working', () => {
+    expect(renderAll(cfg, SCENARIOS.working, 120).above[0]).toMatch(/Morse coding gravity.* │ 12s │ esc to interrupt/);
     expect(renderAll(cfg, SCENARIOS.idle, 120).above).toEqual([]);
   });
+});
 
-  it('starship: info line above, right prompt hides once the text reaches it', () => {
-    const cfg = loadFrom({ style: 'starship' }).config;
-    const idle = renderAll(cfg, SCENARIOS.idle, 120);
-    expect(idle.above[0]).toMatch(/pi-extensions on ⎇ feat\/artifact-reply-any-comment via ◆ Claude Opus 5.5 high/);
-    expect(idle.editor.at(-1)).toMatch(/^❯ .*71%$/);
+describe('every slot works in every style', () => {
+  const SLOT_NAMES = [
+    'above',
+    'topLeft',
+    'topRight',
+    'bottomLeft',
+    'bottomRight',
+    'rightPrompt',
+    'footerLeft',
+    'footerRight',
+  ];
+  for (const style of styles)
+    it(style, () => {
+      const slots = Object.fromEntries(SLOT_NAMES.map((n) => [n, [`text:<${n}>`, 'cwd']]));
+      const cfg = loadFrom({ style, slots }).config;
+      const frame = renderAll(cfg, SCENARIOS.idle, 160);
+      const screen = [...frame.above, ...frame.editor, ...frame.footer].join('\n');
+      for (const n of SLOT_NAMES) expect(screen, n).toContain(`<${n}>`);
+    });
+});
+
+describe('generic options (no style needed)', () => {
+  it('heavy padded box with a placeholder', () => {
+    const cfg = loadFrom({ box: { border: 'heavy', padY: 1, placeholder: 'Ask pi anything' } }).config;
+    const idle = renderAll(cfg, SCENARIOS.idle, 80);
+    expect(idle.editor[0]).toMatch(/^┏━.*━┓$/);
+    expect(idle.editor[1]).toMatch(/^┃ +┃$/);
+    expect(idle.editor[2]).toContain('Ask pi anything');
+  });
+
+  it('a right prompt hides once the text reaches it', () => {
+    const cfg = loadFrom({
+      box: { border: 'none', padX: 0 },
+      slots: { topRight: [], rightPrompt: ['context'] },
+      items: { context: { show: 'percent', label: '', icon: '' } },
+    }).config;
+    expect(renderAll(cfg, SCENARIOS.idle, 120).editor.at(-1)).toMatch(/^❯ .*71%$/);
     // 73 typed characters: the right prompt still fits at 80, not at 76.
     expect(renderAll(cfg, SCENARIOS.typing, 80).editor[0]).toMatch(/columns +71%$/);
     expect(renderAll(cfg, SCENARIOS.typing, 76).editor[0]).not.toContain('71%');
-    expect(idle.footer).toEqual([]);
   });
 
-  it('sidepanel: panel beside the box when wide, folded into the footer when narrow', () => {
-    const cfg = loadFrom({ style: 'sidepanel' }).config;
-    const wide = renderAll(cfg, SCENARIOS.idle, 120);
-    expect(wide.editor[0]).toMatch(/╮ ╭─ ◆ Claude Opus 5.5 high ─+╮$/);
-    // btop-style brackets are opt-in, for the box and the panel alike.
-    const bracket = loadFrom({ style: 'sidepanel', box: { inlay: 'bracket' } }).config;
-    expect(renderAll(bracket, SCENARIOS.idle, 120).editor[0]).toMatch(/^╭─┤.*├─+╮ ╭─┤◆ Claude Opus 5.5 high├─+╮$/);
-    expect(wide.footer).toEqual([]);
-    const narrow = renderAll(cfg, SCENARIOS.idle, 80);
-    expect(narrow.editor[0]!.endsWith('╮')).toBe(true);
-    expect(narrow.footer[0]).toContain('71%');
+  it('key hints follow the state, and a dialog adds none of its own', () => {
+    const cfg = loadFrom({ slots: { footerLeft: ['hints'], footerRight: ['context'] } }).config;
+    expect(renderAll(cfg, SCENARIOS.idle, 120).footer[0]).toMatch(/ \/ commands · @ files · ! shell/);
+    expect(renderAll(cfg, SCENARIOS.working, 120).footer[0]).toContain('interrupt');
+    expect(renderAll(cfg, SCENARIOS.prompt, 120).footer[0]).not.toContain('interrupt');
   });
 });
 
@@ -147,7 +167,7 @@ describe('/composer preview', () => {
 
 describe('robustness', () => {
   it('a slab background the theme does not know draws without a background instead of throwing', () => {
-    const cfg = loadFrom({ style: 'keycaps', box: { background: 'nope' } }).config;
+    const cfg = loadFrom({ style: 'slab', box: { background: 'nope' } }).config;
     const throwing = {
       ...plainTheme,
       bg: (token: string, text: string) => {
@@ -156,10 +176,5 @@ describe('robustness', () => {
       },
     } as unknown as typeof plainTheme;
     expect(() => renderAll(cfg, SCENARIOS.idle, 80, throwing)).not.toThrow();
-  });
-
-  it('panel titles fall back to the footer even with an empty panel slot', () => {
-    const cfg = loadFrom({ slots: { footerLeft: [], footerRight: [], panel: [], panelTop: ['context'] } }).config;
-    expect(renderAll(cfg, SCENARIOS.idle, 120).footer[0]).toContain('71%');
   });
 });

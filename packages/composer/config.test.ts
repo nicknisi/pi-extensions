@@ -9,26 +9,26 @@ import { streamedChars } from './index.js';
 import { fitRow, type Piece } from './layout.js';
 
 describe('loadFrom', () => {
-  it('an empty config is classic', () => {
+  it('an empty config is the box style', () => {
     const { config, errors, warnings } = loadFrom({});
-    expect(config.style).toBe('classic');
+    expect(config.style).toBe('box');
     expect(config.slots).toEqual(DEFAULTS.slots);
     expect(errors).toEqual([]);
     expect(warnings).toEqual([]);
   });
 
   it('style alone is a complete config', () => {
-    const { config } = loadFrom({ style: 'toad' });
-    expect(config.box.border).toBe('heavy');
-    expect(config.slots.above).toEqual(['working', 'tokens']);
+    const { config } = loadFrom({ style: 'slab' });
+    expect(config.box.border).toBe('slab');
+    expect(config.slots.above).toEqual(['working', 'elapsed', 'text:esc to interrupt']);
   });
 
   it('user overrides win over the style, slot lists replace', () => {
-    const { config } = loadFrom({ style: 'toad', box: { padY: 0 }, slots: { above: ['elapsed'] } });
-    expect(config.box.padY).toBe(0);
-    expect(config.box.border).toBe('heavy');
+    const { config } = loadFrom({ style: 'slab', box: { padY: 1 }, slots: { above: ['elapsed'] } });
+    expect(config.box.padY).toBe(1);
+    expect(config.box.border).toBe('slab');
     expect(config.slots.above).toEqual(['elapsed']);
-    expect(config.slots.footerLeft).toEqual(loadFrom({ style: 'toad' }).config.slots.footerLeft);
+    expect(config.slots.footerLeft).toEqual(loadFrom({ style: 'slab' }).config.slots.footerLeft);
   });
 
   it('pre-1.0 keys are a hard error and are ignored', () => {
@@ -36,12 +36,12 @@ describe('loadFrom', () => {
       boxedView: false,
       glowStyle: 'shimmer',
       spinner: true,
-      style: 'keycaps',
+      style: 'slab',
     });
     expect(errors[0]).toMatch(/pre-1.0 keys that are now ignored: boxedView, glowStyle, spinner/);
     expect(warnings).toEqual([]);
     expect(errors[0]).toMatch(/Migrating from 0.x/);
-    expect(config.style).toBe('keycaps');
+    expect(config.style).toBe('slab');
   });
 
   it('unknown keys, slots, items and states warn with a suggestion', () => {
@@ -67,7 +67,7 @@ describe('loadFrom', () => {
   it('a bad value falls back to the style value', () => {
     const { config, warnings } = loadFrom({ box: { padX: -1 }, style: 'nope' });
     expect(config.box.padX).toBe(1);
-    expect(config.style).toBe('classic');
+    expect(config.style).toBe('box');
     expect(warnings).toHaveLength(2);
   });
 
@@ -204,7 +204,7 @@ describe('prototype keys', () => {
     expect(run).not.toThrow();
     const { config, warnings } = run();
     expect(warnings.some((w) => w.includes('items.branch.constructor'))).toBe(true);
-    expect(config.style).toBe('classic');
+    expect(config.style).toBe('box');
     expect(config.items.branch).toEqual({});
   });
 });
@@ -253,10 +253,10 @@ describe('load', () => {
       const fromFile = load(undefined, file);
       expect(fromFile.unreadable).toBe(true);
       expect(fromFile.errors[0]).toMatch(/could not read/);
-      const session = load('toad', file);
+      const session = load('slab', file);
       expect(session.unreadable).toBeUndefined();
       expect(session.errors).toEqual([]);
-      expect(session.config.style).toBe('toad');
+      expect(session.config.style).toBe('slab');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

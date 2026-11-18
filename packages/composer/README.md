@@ -4,7 +4,7 @@ The whole bottom of pi's screen as one configurable system: the input box, the f
 
 ```jsonc
 // ~/.pi/agent/configs/composer.json
-{ "style": "toad" }
+{ "style": "slab" }
 ```
 
 Composer 1.0 replaces three packages: the 0.x composer (input box), `@nicknisi/pi-statusline` (footer) and `@nicknisi/pi-spinner` (working verbs). See [Migrating from 0.x](#migrating-from-0x).
@@ -17,15 +17,12 @@ pi install npm:@nicknisi/pi-composer
 
 ## Styles
 
-| Style               | Look                                                                                                                                                                                                                                                                       |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `classic` (default) | Rounded box, label on the top border, one footer row: model, thinking, cost, lines changed, 5h/7d usage, statuses, context bar, branch and PR. The 0.x composer + statusline look.                                                                                         |
-| `toad`              | After [Toad](https://willmcgugan.github.io/announcing-toad/): a tall padded box with a placeholder, a rainbow sweep on the top border while pi works, `π Morse coding gravity... 1,284 tokens` above the box, breadcrumb chips (`◆ Claude Opus 5.5 ‹ high`) as the footer. |
-| `keycaps`           | After the Codex composer: a shaded slab instead of a box, the keys you can press right now on the left (they change with the state), context pinned on the right, toasts for collapsed pastes.                                                                             |
-| `starship`          | After Starship and Powerlevel10k: an info line above the input (`pi-extensions on ⎇ main via ◆ Opus high`), a bare `❯` that spins while pi works, context and cost as a right prompt that hides when your text reaches it. No footer.                                      |
-| `sidepanel`         | After btop: a box with labels in its borders, with meters (context, usage, tokens/s graph, cost, lines) in a panel beside it on panes 100+ columns wide. Narrower panes fold the panel into one footer row.                                                                |
+| Style           | Look                                                                                                                                                                                                  |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `box` (default) | A rounded box with the session label on its top border, the working line above it, and one status row below: model, thinking, cost, lines changed, 5h/7d usage, statuses, context bar, branch and PR. |
+| `slab`          | The same status row, with a shaded slab instead of a box (after the Codex composer), `›` as the prompt symbol, and `│ 12s │ esc to interrupt` on the working line.                                    |
 
-Try one without editing anything: `/composer style toad`. That lasts for the session, shows the style as shipped (your overrides are paused), and `/composer style` goes back. `/composer preview` steps through every state (typing, paste, working, tool, prompt, near-full, scrolled) so you can judge a style without running an agent.
+Both styles show the same information in the same format; they differ only in the input's chrome. Try one without editing anything: `/composer style slab`. That lasts for the session, shows the style as shipped (your overrides are paused), and `/composer style` goes back. `/composer preview` steps through every state (typing, paste, working, tool, prompt, near-full, scrolled) so you can judge a style without running an agent.
 
 ## Configuration
 
@@ -33,7 +30,7 @@ One file, `~/.pi/agent/configs/composer.json`. Every key is optional. Values res
 
 ```jsonc
 {
-  "style": "classic",
+  "style": "box",
 
   // The symbol before your input, and what happens to it while pi works.
   "prompt": {
@@ -61,7 +58,6 @@ One file, `~/.pi/agent/configs/composer.json`. Every key is optional. Values res
     "padX": 1, // spaces inside the box, left and right
     "padY": 0, // blank rows inside the box, top and bottom
     "placeholder": null, // dim text in an empty input, e.g. "Ask pi anything"
-    "inlay": "plain", // border inlays as " text " (plain) or "┤text├" (bracket)
     "busyEffect": "pulse", // off | pulse | shimmer | rainbow, while pi works
     "effectColor": "accent",
     "effectPeriodMs": 2000,
@@ -90,9 +86,6 @@ One file, `~/.pi/agent/configs/composer.json`. Every key is optional. Values res
     "rightPrompt": [],
     "footerLeft": [["model", "thinking"], "cost", "lines", "usage", "statuses", "context"],
     "footerRight": [["branch", "pr"]],
-    "panel": [],
-    "panelTop": [],
-    "panelBottom": [],
   },
 
   // Per-item options.
@@ -106,7 +99,6 @@ One file, `~/.pi/agent/configs/composer.json`. Every key is optional. Values res
   "separator": " │ ", // between items
   "groupSeparator": " ", // between items in a group
   "toasts": false, // short-lived messages over the footer (e.g. "pasted 42 lines")
-  "panel": { "width": 34, "minWidth": 100 },
 }
 ```
 
@@ -114,14 +106,13 @@ Problems are reported, never fatal. An unknown key, slot, item or state warns wi
 
 ### Slots
 
-| Slot                               | Where                                                                                                                                                              |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `above`                            | A row above the box. It's a pi `aboveEditor` widget, so it stays on screen while a dialog replaces the input.                                                      |
-| `topLeft`, `topRight`              | Inlays on the box's top border (or a row above the input for `slab` and `none`).                                                                                   |
-| `bottomLeft`, `bottomRight`        | Inlays on the bottom border.                                                                                                                                       |
-| `rightPrompt`                      | Right-aligned on the first input line, like zsh's `RPROMPT`. Hidden when your text gets within two cells of it.                                                    |
-| `footerLeft`, `footerRight`        | The footer row. With both empty there is no footer row.                                                                                                            |
-| `panel`, `panelTop`, `panelBottom` | A panel beside the box (one item per row, plus its titles) when the pane is at least `panel.minWidth` wide. Narrower panes show these items in the footer instead. |
+| Slot                        | Where                                                                                                           |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `above`                     | A row above the box. It's a pi `aboveEditor` widget, so it stays on screen while a dialog replaces the input.   |
+| `topLeft`, `topRight`       | Inlays on the box's top border (or a row above the input for `slab` and `none`).                                |
+| `bottomLeft`, `bottomRight` | Inlays on the bottom border.                                                                                    |
+| `rightPrompt`               | Right-aligned on the first input line, like zsh's `RPROMPT`. Hidden when your text gets within two cells of it. |
+| `footerLeft`, `footerRight` | The footer row. With both empty there is no footer row.                                                         |
 
 A row with nothing to say takes no space: no working message while idle, no cost before any spend, no branch outside git. A row whose only remaining items are `text:` literals is hidden too, so `["working", "text:esc to interrupt"]` only shows while pi works.
 
@@ -212,7 +203,7 @@ Composer 1.0 reads a new nested config. A `composer.json` with 0.x keys gets one
 | `sessionName: false`                                                 | remove `label` from its slot                                                                     |
 | `sessionNamePosition`, `sessionNameBorder`                           | move `label` to `topLeft`, `topRight`, `bottomLeft` or `bottomRight`                             |
 | `sessionNameColor`                                                   | `items.label.color`                                                                              |
-| `sessionNameFormat`, `sessionNameMaxWidth`                           | `box.inlay`; labels truncate to fit                                                              |
+| `sessionNameFormat`, `sessionNameMaxWidth`                           | labels are cut into the border as `text` and truncate to fit                                     |
 | `menuGap`, `extraMenuIndent`                                         | `box.menuGap`, `box.menuIndent`                                                                  |
 | statusline.json `hiddenStatuses`                                     | `items.statuses.hide`                                                                            |
 | spinner.json `shimmer`, `baseColor`, …                               | `working.*` (see the spinner package README)                                                     |
