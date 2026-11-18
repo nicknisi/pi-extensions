@@ -437,6 +437,9 @@ function watchBackground(
 ): void {
   backgroundRuns.set(runId, label);
   refreshBackgroundWidget();
+  // The run's cancel signal (a fleet/radar cancel, or HOST_EXIT on quit/reload/session switch).
+  // Captured now: the registry entry is gone by the time `done` settles.
+  const stopSignal = cancellables.get(runId)?.signal;
   // Deliberately no AbortSignal here: pi may abort tool signals after execute returns, which
   // would kill the background child. Swallow late failures — sendMessage throws once the
   // session is ending, and an unhandled rejection is worse than a lost notification.
@@ -444,7 +447,10 @@ function watchBackground(
     .then((result) => {
       backgroundRuns.delete(runId);
       refreshBackgroundWidget();
-      const { message, options } = backgroundNotice(runId, label, result, resumed);
+      const { message, options } = backgroundNotice(runId, label, result, {
+        resumed,
+        stopped: stopSignal?.aborted === true,
+      });
       pi.sendMessage(message, options);
     })
     .catch((err) => {

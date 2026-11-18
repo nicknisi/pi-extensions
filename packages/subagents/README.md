@@ -58,7 +58,7 @@ Live progress shows in a widget above the editor; when the child settles, the re
 
 When a background child finishes, its answer (capped at 4,000 characters, the same as a foreground result) or its error and partial output land in the transcript as a `subagents:background` message, and that message wakes the parent: an idle session starts a turn, and a busy one gets it at the next tool boundary (Pi's `steer` delivery). The model doesn't need to poll `fleet`. Several children finishing together queue up and are handled in order.
 
-A run that was resumed after the session reopened (see **Durable runs**) posts the same notice but doesn't start a turn, because the call that launched it is gone; the model sees it with your next prompt. This matches resumed workflows. A stopped run (cancelled, or interrupted because the session quit or switched) also posts its notice without starting a turn.
+A run that was resumed after the session reopened (see **Durable runs**) posts the same notice but doesn't start a turn, because the call that launched it is gone; the model sees it with your next prompt. This matches resumed workflows. A run you or the model stopped (a cancel from `fleet` or the radar, or an interruption because the session quit, reloaded or switched) also posts its notice without starting a turn. A child that times out or exceeds a budget still wakes the parent, since that's a failure the model should hear about.
 
 ### Thinking level
 
