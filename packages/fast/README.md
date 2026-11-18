@@ -10,8 +10,10 @@ Fast mode trades higher usage cost for faster output. It does not change the sel
 - **Footer status:** `fast` while Fast mode is enabled and the selected model is eligible, `fast (cooldown)` while a rate limit has dropped it to standard speed. Disable it with `showStatus`.
 - **Provider request hooks:**
   - Anthropic: adds `speed: "fast"` to Messages API payloads. For the research-preview models (Opus 5 and Opus 4.8) it also appends the `fast-mode-2026-02-01` beta to the payload's `betas`, keeping every beta pi computed.
+  - OpenAI Codex: adds `service_tier: "priority"` to OAuth-backed Codex Responses payloads.
+- **Fast-mode pricing:** Anthropic replies sent at Fast speed are recorded at 2x the standard cost, since pi prices every reply at the standard rate.
 - **Rate-limit fallback:** a Fast-mode `429`/`529` switches the session to standard speed for 60 seconds, so pi's automatic retry resends at standard speed.
-  - OpenAI Codex: adds `service_tier: "fast"` to OAuth-backed Codex Responses payloads.
+- **Plan fallback:** if the provider says Fast mode isn't available for a model on your plan or workspace (Codex gates GPT-6.2 Sol this way), that model uses standard speed for the rest of the session and Pi tells you to send the message again.
 - **Subagents and workflows:** children spawned by `dispatch`, `workflow`, and other `@nicknisi/pi-shared` runtime users follow this session's Fast mode live and share its rate-limit cooldown.
 - **Config:** a global default plus an optional trusted project override.
 
@@ -52,14 +54,16 @@ Arguments are intentionally not accepted. Use `/fast`, not `/fast on` or `/fast 
 
 Support is intentionally explicit so the extension does not send premium-tier fields to models whose APIs reject or ignore them.
 
-| Provider       | Required Pi API          | Supported model IDs                                                                                                           | Injected request setting |
-| -------------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
-| `anthropic`    | `anthropic-messages`     | `claude-opus-5-5`, `claude-opus-5`, `claude-opus-4-8`                                                                         | `speed: "fast"`          |
-| `openai-codex` | `openai-codex-responses` | `gpt-5.4`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-6-astra`, `gpt-6-luna`, `gpt-6-sol`, `gpt-6.1-sol` | `service_tier: "fast"`   |
+| Provider       | Required Pi API          | Supported model IDs                                                                                                                                                 | Injected request setting   |
+| -------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| `anthropic`    | `anthropic-messages`     | `claude-fable-5-2`, `claude-mythos-5-2`, `claude-opus-5-5`, `claude-opus-5`, `claude-opus-4-8`                                                                      | `speed: "fast"`            |
+| `openai-codex` | `openai-codex-responses` | `gpt-5.4`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-6-astra`, `gpt-6-luna`, `gpt-6-sol`, `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6.2-astra`, `gpt-6.2-sol` | `service_tier: "priority"` |
 
 OpenAI Codex eligibility also requires ChatGPT OAuth (`/login` in Pi). API-key-backed `openai` models use a different provider and are not modified by this extension.
 
-Anthropic Fast mode on Claude Opus 5.5 is generally available on the first-party Claude API: no beta header or access request, with a default Fast-mode rate limit in the Start, Build, and Scale usage tiers. On Opus 5 and Opus 4.8 it is a research preview that must be enabled for the account; without access, the API answers Fast requests with `429`. It is not available on Amazon Bedrock, Google Cloud, or Claude Platform on AWS.
+The Codex backend rejects `service_tier: "fast"` with `400 Unsupported service_tier: fast`. `priority` is what Codex CLI sends, and OpenAI's API documents the two values as equivalent. GPT-5.5 is excluded because Codex retired it for ChatGPT sign-in on 14 October 2026.
+
+Anthropic Fast mode on Claude Fable 5.2, Claude Mythos 5.2, and Claude Opus 5.5 is generally available on the first-party Claude API: no beta header or access request, with a default Fast-mode rate limit. On Opus 5 it is a research preview, and on Opus 4.8 it is deprecated (removed 30 November 2026); both need the beta and account access, and without access the API answers Fast requests with `429`. It is not available on Amazon Bedrock, Google Cloud, or Claude Platform on AWS.
 
 Claude Opus 4.6 and 4.7 are deliberately excluded. Anthropic no longer offers Fast mode on those models: 4.6 silently runs at standard speed, while 4.7 rejects `speed: "fast"`.
 
@@ -119,7 +123,8 @@ For Anthropic, pi puts its betas in the payload's `betas` array, and the SDK tur
 - **Higher cost or credit use.** Fast mode is a premium service tier. Review the linked provider pricing before enabling it by default.
 - **Anthropic prompt caches are speed-specific.** Switching between standard and Fast mode causes a prompt-cache miss because the two speeds do not share cached prefixes.
 - **Anthropic capacity is separate.** Fast mode has dedicated rate limits and may return `429` or `529`. The extension then uses standard speed for 60 seconds (failed requests don't expose `retry-after`) and relies on pi's automatic retry (`retry.enabled`, on by default) to resend the failed request.
-- **Codex credit multipliers vary by model.** OpenAI currently documents 2.5× ChatGPT credit use for GPT-5.5/5.6 and 2× for GPT-5.4. API Priority/Fast processing has separate token pricing.
+- **Anthropic Fast costs 2x.** Every supported model is billed at twice its standard rate, with prompt-caching multipliers on top. The extension doubles the recorded cost of Fast replies so footers and cost totals match.
+- **Codex credit multipliers vary by model.** See OpenAI's Codex Fast pricing for the current rate per model. Codex replies keep pi's standard cost estimate: the backend reports `service_tier: "default"` even for priority requests, so Fast use there is not reflected in recorded cost.
 - **Faster output is not lower time-to-first-token.** Anthropic describes the gain as output tokens per second; OpenAI's Codex documentation describes a supported-model speed increase.
 - **Model support changes.** The allowlists match the provider documentation and Pi catalog at release time. A newly released model remains ineligible until this package is updated deliberately.
 
@@ -139,7 +144,7 @@ Provider documentation:
 ## Caveats
 
 - Provider payload fields and beta headers are provider-specific wire contracts. Pi exposes the interception hooks, but a provider can change its accepted values independently of Pi.
-- The extension relies on `before_provider_request` replacing the entire payload when it returns a value, on pi sending Anthropic betas through the payload's `betas` array, and on `message_end` carrying the provider error for failed requests.
+- The extension relies on `before_provider_request` replacing the entire payload when it returns a value, on pi sending Anthropic betas through the payload's `betas` array, and on `message_end` carrying the provider error for failed requests and accepting a replacement message (used to record the Fast cost).
 - `/fast` is session-local and is not persisted. Set `enabled` in config for a persistent default.
 - Children follow the most recently started session in the process. With one pi session per process (the normal CLI case) that's always the right one; an SDK host running several sessions in one process shares a single child hook.
 - The footer confirms that the extension considers Fast mode active; it does not inspect the provider response's reported tier/speed. Provider-side downgrade, missing preview entitlement, capacity errors, and billing remain authoritative.

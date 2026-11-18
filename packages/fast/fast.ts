@@ -2,13 +2,21 @@ import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 
 export const ANTHROPIC_FAST_BETA = 'fast-mode-2026-02-01';
 export const ANTHROPIC_FAST_SPEED = 'fast';
-export const OPENAI_FAST_SERVICE_TIER = 'fast';
+// The Codex backend rejects `fast` ("Unsupported service_tier: fast"); Codex CLI sends
+// `priority`, which the public API also treats as Fast mode.
+export const OPENAI_FAST_SERVICE_TIER = 'priority';
 
 const ANTHROPIC_PROVIDER_ID = 'anthropic';
 const ANTHROPIC_API_ID = 'anthropic-messages';
-// Opus 5.5 Fast mode is generally available; the older models are a research
-// preview that still needs the beta flag.
-const ANTHROPIC_SUPPORTED_MODELS = new Set(['claude-opus-5-5', 'claude-opus-5', 'claude-opus-4-8']);
+// Fast mode is generally available on Fable 5.2, Mythos 5.2 and Opus 5.5; the
+// older Opus models are a research preview that still needs the beta flag.
+const ANTHROPIC_SUPPORTED_MODELS = new Set([
+  'claude-fable-5-2',
+  'claude-mythos-5-2',
+  'claude-opus-5-5',
+  'claude-opus-5',
+  'claude-opus-4-8',
+]);
 const ANTHROPIC_BETA_MODELS = new Set(['claude-opus-5', 'claude-opus-4-8']);
 /** Standard-speed cooldown after a Fast-mode 429/529. */
 export const DEFAULT_COOLDOWN_MS = 60_000;
@@ -17,7 +25,6 @@ const OPENAI_PROVIDER_ID = 'openai-codex';
 const OPENAI_API_ID = 'openai-codex-responses';
 const OPENAI_SUPPORTED_MODELS = new Set([
   'gpt-5.4',
-  'gpt-5.5',
   'gpt-5.6-luna',
   'gpt-5.6-sol',
   'gpt-5.6-terra',
@@ -25,6 +32,9 @@ const OPENAI_SUPPORTED_MODELS = new Set([
   'gpt-6-luna',
   'gpt-6-sol',
   'gpt-6.1-sol',
+  'gpt-6.1-terra',
+  'gpt-6.2-astra',
+  'gpt-6.2-sol',
 ]);
 
 type SelectedModel = NonNullable<ExtensionContext['model']>;
@@ -40,6 +50,8 @@ export interface FastState {
   lastInjectedModel?: string;
   /** Epoch ms until which requests run at standard speed after a Fast-mode rate limit. */
   cooldownUntil?: number;
+  /** provider/model keys whose account or workspace refused Fast mode this session. */
+  unavailable?: Set<string>;
 }
 
 export interface FastEligibility {
@@ -82,7 +94,8 @@ export function getFastEligibility(model: ExtensionContext['model'], openAiUsing
       return {
         eligible: false,
         modelKey: key,
-        reason: 'Anthropic Fast mode currently supports Claude Opus 5.5, Claude Opus 5, and Claude Opus 4.8',
+        reason:
+          'Anthropic Fast mode currently supports Claude Fable 5.2, Claude Mythos 5.2, Claude Opus 5.5, Claude Opus 5, and Claude Opus 4.8',
       };
     }
 
@@ -102,7 +115,7 @@ export function getFastEligibility(model: ExtensionContext['model'], openAiUsing
       return {
         eligible: false,
         modelKey: key,
-        reason: 'Codex Fast mode currently supports GPT-5.4 through GPT-5.6 and GPT-6',
+        reason: 'Codex Fast mode currently supports GPT-5.4, GPT-5.6, and GPT-6 through GPT-6.2',
       };
     }
 
@@ -134,10 +147,43 @@ export function isCoolingDown(state: FastState, now = Date.now()): boolean {
  * retry-after header is not exposed on failed requests, so the cooldown is fixed.
  * Returns the cooldown end, or undefined when the error is something else.
  */
+/**
+ * Record a model whose plan or workspace refuses Fast mode, e.g. Codex's
+ * "Fast mode isn't available for the selected model in your workspace".
+ * Returns true when the error was that refusal.
+ */
+export function noteFastUnavailable(state: FastState, errorMessage: string, modelKey: string): boolean {
+  if (!/mode isn't available for the selected model/i.test(errorMessage)) return false;
+  (state.unavailable ??= new Set()).add(modelKey);
+  return true;
+}
+
+export function isFastUnavailable(state: FastState, modelKey: string): boolean {
+  return state.unavailable?.has(modelKey) ?? false;
+}
+
 export function noteFastError(state: FastState, errorMessage: string, now = Date.now()): number | undefined {
   if (!/^(429|529)\b|rate_limit_error|overloaded_error/i.test(errorMessage.trim())) return undefined;
   state.cooldownUntil = now + DEFAULT_COOLDOWN_MS;
   return state.cooldownUntil;
+}
+
+type Cost = { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+
+/**
+ * Anthropic bills Fast mode at 2x standard rates (cache multipliers apply on
+ * top), but pi-ai prices every response at the standard rate.
+ */
+export function withFastCost<T extends { usage: { cost: Cost } }>(message: T): T {
+  const { input, output, cacheRead, cacheWrite, total } = message.usage.cost;
+  const cost = {
+    input: input * 2,
+    output: output * 2,
+    cacheRead: cacheRead * 2,
+    cacheWrite: cacheWrite * 2,
+    total: total * 2,
+  };
+  return { ...message, usage: { ...message.usage, cost: { ...message.usage.cost, ...cost } } };
 }
 
 export function injectFastPayload(
@@ -148,7 +194,7 @@ export function injectFastPayload(
   now = Date.now(),
 ): PayloadRecord | undefined {
   if (!isFastEnabled(state) || !eligibility.eligible || !eligibility.provider) return undefined;
-  if (isCoolingDown(state, now)) return undefined;
+  if (isCoolingDown(state, now) || isFastUnavailable(state, eligibility.modelKey)) return undefined;
   if (!isPayloadRecord(payload) || payload.model !== model.id) return undefined;
 
   if (eligibility.provider === 'anthropic') {
