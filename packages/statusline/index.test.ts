@@ -24,7 +24,7 @@ vi.mock('./config.js', () => ({
 
 afterEach(() => vi.unstubAllEnvs());
 
-function setup() {
+function setup(branch: unknown[] = []) {
   vi.stubEnv('TMUX', '');
   const events = createEventBus();
   const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>();
@@ -41,7 +41,7 @@ function setup() {
     mode: 'tui',
     hasUI: true,
     model: { id: 'test', name: 'Test model', provider: 'test', reasoning: false },
-    sessionManager: { getBranch: () => [] },
+    sessionManager: { getBranch: () => branch },
     getContextUsage: () => ({ tokens: 139000, percent: 13, contextWindow: 1048576 }),
     ui: {
       notify: vi.fn(),
@@ -81,6 +81,19 @@ function setup() {
     },
   };
 }
+
+describe('session cost', () => {
+  it('includes cache-warm usage entries', async () => {
+    const usage = (total: number) => ({ cost: { total } });
+    const h = setup([
+      { type: 'message', message: { role: 'assistant', usage: usage(0.5) } },
+      { type: 'usage', kind: 'cache_warm', usage: usage(0.25) },
+    ]);
+    await h.fire('session_start');
+    expect(h.render().text).toContain('$0.75');
+    h.dispose();
+  });
+});
 
 describe('self-compact context colors', () => {
   it('preserves the existing remaining-context meter and fallback colors', async () => {
