@@ -318,10 +318,12 @@ function body(name: string, o: ItemOptions, env: ItemEnv): Body | null {
     }
     case 'hints': {
       if (hintsFor(env.states, rt).length === 0) return null;
+      // Plain text, as in the Codex footer: the key in muted, what it does in dim.
       const hints = hintsFor(env.states, rt).map(
-        ([key, what]) => `${env.theme.bg('selectedBg', ` ${key} `)} ${dim(env, what)}`,
+        ([key, what]) => `${paint(env, o.color ?? 'muted', key)} ${dim(env, what)}`,
       );
-      return { forms: [hints.join('  '), hints.slice(0, 2).join('  '), hints.slice(0, 1).join('')] };
+      const sep = dim(env, ' · ');
+      return { forms: [hints.join(sep), hints.slice(0, 2).join(sep), hints.slice(0, 1).join('')] };
     }
     case 'mode': {
       const top = env.states[env.states.length - 1] ?? 'idle';

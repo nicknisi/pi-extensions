@@ -1,6 +1,6 @@
 /**
  * Pure rendering for every row composer owns: the box (or slab / bare
- * prompt), the side panel, the footer, and the row above the box. Takes the
+ * prompt), the footer, and the row above the box. Takes the
  * resolved config and runtime state; the editor and footer components just
  * call in here, which keeps every style testable without a live TUI.
  */
@@ -14,9 +14,9 @@ import { activeStates, resolveColor, stateLook, type Runtime } from './state.js'
 import { applyColor, mixRgb, plainText, resolveRgb, rgbColor, type Rgb } from './utils.js';
 
 const FRAMES = {
-  rounded: { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│', lb: '┤', rb: '├' },
-  square: { tl: '┌', tr: '┐', bl: '└', br: '┘', h: '─', v: '│', lb: '┤', rb: '├' },
-  heavy: { tl: '┏', tr: '┓', bl: '┗', br: '┛', h: '━', v: '┃', lb: '┫', rb: '┣' },
+  rounded: { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' },
+  square: { tl: '┌', tr: '┐', bl: '└', br: '┘', h: '─', v: '│' },
+  heavy: { tl: '┏', tr: '┓', bl: '┗', br: '┛', h: '━', v: '┃' },
 } as const;
 
 export interface Ctx {
@@ -157,16 +157,10 @@ export interface EditorGeometry {
   boxWidth: number;
   contentWidth: number;
   promptWidth: number;
-  panel: boolean;
-}
-
-export function panelVisible(cfg: ComposerConfig, width: number): boolean {
-  return cfg.slots.panel.length > 0 && width >= cfg.panel.minWidth;
 }
 
 export function geometry(cfg: ComposerConfig, width: number): EditorGeometry {
-  const panel = panelVisible(cfg, width);
-  const boxWidth = panel ? width - cfg.panel.width - 1 : width;
+  const boxWidth = width;
   const pw = promptWidth(cfg);
   const { border, padX } = cfg.box;
   const framed = border in FRAMES;
@@ -174,7 +168,7 @@ export function geometry(cfg: ComposerConfig, width: number): EditorGeometry {
   const rightPad = framed || border === 'slab' ? padX : 0;
   // The prompt symbol always gets at least one space before the text.
   const lead = padX + (pw > 0 ? pw + Math.max(1, padX) : 0);
-  return { boxWidth, contentWidth: boxWidth - sides - lead - rightPad, promptWidth: pw, panel };
+  return { boxWidth, contentWidth: boxWidth - sides - lead - rightPad, promptWidth: pw };
 }
 
 /**
@@ -223,8 +217,6 @@ export function renderEditor(c: Ctx, width: number, stock: string[]): string[] |
   });
   const blank =
     pad + (g.promptWidth > 0 ? ' '.repeat(g.promptWidth + Math.max(1, box.padX)) : '') + ' '.repeat(g.contentWidth);
-  const panelRows = g.panel ? Math.min(3, slot(c, e, c.cfg.slots.panel).length) : 0;
-  while (text.length < panelRows) text.push(blank);
   const body = [...Array(box.padY).fill(blank), ...text, ...Array(box.padY).fill(blank)];
 
   const top = (inner: number, scroll: string | null) =>
@@ -274,11 +266,6 @@ export function renderEditor(c: Ctx, width: number, stock: string[]): string[] |
   }
   lines = lines.map((l) => exact(l, g.boxWidth));
 
-  if (g.panel) {
-    const panel = renderPanel(c, e, paint, c.cfg.panel.width, lines.length);
-    lines = lines.map((l, i) => `${l} ${panel[i] ?? ''}`);
-  }
-
   const gap = Array<string>(box.menuGap).fill('');
   const indent = ' '.repeat(box.menuIndent);
   const menu = split.menu.map((m) => exact(indent + m, width));
@@ -316,9 +303,7 @@ function rule(
   isTop: boolean,
 ): string {
   const h = c.cfg.box.border === 'heavy' ? '━' : '─';
-  const brackets = c.cfg.box.inlay === 'bracket';
-  const f = FRAMES[c.cfg.box.border as keyof typeof FRAMES] ?? FRAMES.rounded;
-  const wrap = (s: string) => (!s ? '' : brackets ? paint.border(f.lb) + s + paint.border(f.rb) : ` ${s} `);
+  const wrap = (s: string) => (s ? ` ${s} ` : '');
   const fitted = fitRow(left, right, Math.max(0, inner - 6), fitOpts(c));
   const l = wrap(fitted.left);
   const r = wrap(fitted.right);
@@ -338,50 +323,12 @@ function slabRow(c: Ctx, line: string): string {
   return open + line.replace(/\x1b\[0m/g, `\x1b[0m${open}`).replace(/\x1b\[49m/g, open) + '\x1b[49m';
 }
 
-// ─── Side panel ───────────────────────────────────────────────────────────
-
-function renderPanel(c: Ctx, e: ItemEnv, paint: Painter, width: number, height: number): string[] {
-  const inner = width - 2;
-  const items = slot(c, e, c.cfg.slots.panel);
-  const rows = Math.max(0, height - 2);
-  // Keep the highest-priority items, in list order.
-  const keep = new Set([...items].sort((a, b) => b.priority - a.priority).slice(0, rows));
-  const shown = items.filter((p) => keep.has(p));
-  const body = Array.from({ length: rows }, (_, i) => {
-    const p = shown[i];
-    let s = '';
-    if (p) {
-      const full = p.forms[0] ?? '';
-      const room = inner - 2;
-      s = p.grow && visibleWidth(full) < room ? p.grow(room - visibleWidth(full)) : full;
-      if (visibleWidth(s) > room) s = p.forms.find((x) => visibleWidth(x) <= room) ?? '';
-    }
-    return paint.border('│') + ' ' + exact(s, inner - 2) + ' ' + paint.border('│');
-  });
-  const title = (entries: SlotEntry[], isTop: boolean) => {
-    const f = fitRow(slot(c, e, entries), [], inner - 4, fitOpts(c));
-    const t = f.width ? paint.border('┤') + f.left + paint.border('├') : '';
-    const fill = Math.max(0, inner - 1 - visibleWidth(t));
-    return isTop
-      ? paint.border('─') + t + paint.border('─'.repeat(fill))
-      : paint.border('─'.repeat(fill)) + t + paint.border('─');
-  };
-  return [
-    paint.border('╭') + title(c.cfg.slots.panelTop, true) + paint.border('╮'),
-    ...body,
-    paint.border('╰') + title(c.cfg.slots.panelBottom, false) + paint.border('╯'),
-  ].map((l) => exact(l, width));
-}
-
 // ─── Footer and the row above ─────────────────────────────────────────────
 
 export function renderFooter(c: Ctx, width: number): string[] {
   const e = env(c);
   let left = slot(c, e, c.cfg.slots.footerLeft);
   const right = slot(c, e, c.cfg.slots.footerRight);
-  // Panel items fall back to the footer when the pane is too narrow for the panel.
-  if (!panelVisible(c.cfg, width))
-    left = [...left, ...slot(c, e, [...c.cfg.slots.panelTop, ...c.cfg.slots.panel, ...c.cfg.slots.panelBottom])];
   const toast = c.cfg.toasts && c.rt.toast && c.rt.toast.until > c.rt.now() ? c.rt.toast.text : undefined;
   if (toast) left = [{ forms: [toast], priority: 1000, group: -1 }];
   if (!left.length && !right.length) return [];

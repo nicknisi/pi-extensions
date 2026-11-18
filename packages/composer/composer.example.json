@@ -1,6 +1,6 @@
 {
   "$comment": "Copy to ~/.pi/agent/configs/composer.json. Every key is optional; \"style\" alone is a complete config.",
-  "style": "classic",
+  "style": "box",
   "prompt": {
     "symbol": "❯",
     "whenBusy": "spinner"

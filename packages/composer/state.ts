@@ -1,6 +1,6 @@
 /**
- * One state model for the whole bottom of the screen. The editor, footer,
- * above-row and side panel all read from here instead of each tracking
+ * One state model for the whole bottom of the screen. The editor, footer
+ * and above-row all read from here instead of each tracking
  * "is pi working" on its own.
  */
 
