@@ -1,27 +1,17 @@
 {
-  "_comment": "Copy to ~/.pi/agent/configs/composer.json to customize. All keys optional.",
-  "boxedView": true,
-  "boxPadX": 1,
-  "menuGap": 0,
-  "extraMenuIndent": 1,
-  "borderColor": "border",
-  "prefix": "❯",
-  "prefixColor": "accent",
-  "corners": "rounded",
-  "focusIndicator": true,
-  "focusedBorderColor": "accent",
-  "sessionName": true,
-  "sessionNameColor": "muted",
-  "sessionNamePosition": "right",
-  "sessionNameFormat": "─ {name} ─",
-  "sessionNameMaxWidth": 0,
-  "sessionNameBorder": "top",
-  "spinner": true,
-  "spinnerStyle": "dots",
-  "spinnerColor": "accent",
-  "glow": true,
-  "glowStyle": "pulse",
-  "glowColor": "accent",
-  "glowPeriodMs": 2000,
-  "rainbowPeriodMs": 1200
+  "$comment": "Copy to ~/.pi/agent/configs/composer.json. Every key is optional; \"style\" alone is a complete config.",
+  "style": "classic",
+  "prompt": {
+    "symbol": "❯",
+    "whenBusy": "spinner"
+  },
+  "spinner": {
+    "frames": "dots",
+    "color": "accent"
+  },
+  "items": {
+    "statuses": {
+      "hide": ["mcp"]
+    }
+  }
 }

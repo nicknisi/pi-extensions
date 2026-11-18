@@ -1,687 +1,452 @@
 /**
- * Chat Input Extension
+ * Composer: the whole bottom of pi's screen as one configurable system.
  *
- * Replaces pi's input editor with a configurable boxed input. All native
- * editor features — cursor movement, history, autocomplete, paste — work
- * normally inside the box. Also implements paste-again-to-expand: when a
- * collapsed `[paste #N ...]` marker is present, pasting the same content
- * again expands it inline so you can see and edit the actual text.
+ * Owns the input box, the footer, the row above the box, and how pi's
+ * working indicator and message look. A style is a preset of slots and
+ * options; ~/.pi/agent/configs/composer.json overrides any of it.
  *
- * Evolved from the earlier `box-editor.ts`: the rendering is now
- * config-driven (~/.pi/agent/configs/composer.json) and supports a
- * prefix glyph, boxed/unboxed modes, configurable padding, menu gap,
- * rounded vs square corners, a configurable session-name inlay in the border
- * (shown only when the session has a name — or another extension has pushed
- * label text over the `pi.events` bus; see the README's Extension API), and
- * working-state animations (spinner prefix and border glow while the agent
- * works). The rounded ╭╮│╰╯ corners remain the default to preserve the
- * original look. Paste-expand behavior was merged in from the former
- * standalone `paste-expand.ts` so the two features don't fight over
- * `setEditorComponent` (last-call-wins).
+ *   above        row above the box (an aboveEditor widget, so it stays during dialogs)
+ *   topLeft …    inlays on the box's borders
+ *   rightPrompt  right-aligned on the first input line
+ *   footerLeft … the footer row
+ *   panel …      a side panel beside the box on wide panes
  *
- * Layout (boxed):
- *   ╭──────────────────────────╮
- *   │ ❯ <content>               │
- *   │   <content continued>     │
- *   ╰──────────────────────────╯
- *   <autocomplete menu>
- *
- * The prefix (default ❯, any cell width) is shown only on the first body line;
- * subsequent lines are indented by the prefix's width so content aligns.
- * Autocomplete lines render below the box, indented by `extraMenuIndent`.
+ * Event contracts on pi.events:
+ *   composer:set-label { text }      another extension sets the label item (empty clears)
+ *   composer:label-request           emitted on session start so producers re-push
+ *   composer:context-bar <boolean>   whether a context meter is on screen (checkpoint hides its own)
+ *   composer:request-context-bar     ask composer to re-announce the above
+ *   self-compact:context-color       consumed: checkpoint's colour for the context meter
  */
 
-// ─── Paste-again-to-expand ────────────────────────────────────────────────
-// Pi collapses large pastes (>10 lines or >1000 chars) into a `[paste #N ...]`
-// marker. Pasting the same content again while the marker is present expands
-// it inline. Reaches into pi-tui Editor internals (state, pastes registry)
-// that are TS-private but runtime-accessible; may need updating if pi-tui
-// changes its paste-marker format or registry bookkeeping.
+import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent';
+import type { AutocompleteItem } from '@earendil-works/pi-tui';
+import { load, spinnerFrames, STATES, type ComposerConfig, type LoadResult, type StateName } from './config.js';
+import { setDataListener, usageHealth } from './data.js';
+import { Composer } from './editor.js';
+import { disableFocusTracking, enableFocusTracking, paneFocused } from './focus.js';
+import { promptWidth, renderAbove, renderFooter, type Ctx } from './render.js';
+import { createRuntime, noteTokens, resetRun, type ContextColor, type Runtime } from './state.js';
+import { STYLES, type StyleName } from './styles.js';
+import { applyColor, parseLabelData } from './utils.js';
+import { randomVerb, shimmerFrame } from './verbs.js';
 
-const PASTE_MARKER_REGEX = /\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]/g;
+const ABOVE_WIDGET = 'composer-above';
 
-/** Replicates pi-tui's paste cleanup so an incoming paste can be compared
- * against already-collapsed paste content. */
-function cleanPastedText(text: string): string {
-  // Decode CSI-u Ctrl+<letter> sequences some terminals emit inside bracketed paste
-  const decoded = text.replace(/\x1b\[(\d+);5u/g, (match, code) => {
-    const cp = Number(code);
-    if (cp >= 97 && cp <= 122) return String.fromCharCode(cp - 96);
-    if (cp >= 65 && cp <= 90) return String.fromCharCode(cp - 64);
-    return match;
-  });
-  // normalizeText: CRLF/CR -> LF, tabs -> 4 spaces
-  const normalized = decoded.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\t/g, '    ');
-  // Strip non-printables except newline
-  return normalized
-    .split('')
-    .filter((c) => c === '\n' || c.charCodeAt(0) >= 32)
-    .join('');
-}
-
-// pi-tui Editor privates we touch at runtime
-interface EditorInternals {
-  state: { lines: string[]; cursorLine: number; cursorCol: number };
-  pastes: Map<number, string>;
-  pasteCounter: number;
-  lastAction: unknown;
-  historyIndex: number;
-  pushUndoSnapshot(): void;
-  cancelAutocomplete(): void;
-  exitHistoryBrowsing(): void;
-  setCursorCol(col: number): void;
-  moveToLineEnd(): void;
-}
-
-import { execFileSync } from 'node:child_process';
-import { CustomEditor, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
-import type { TUI, EditorTheme } from '@earendil-works/pi-tui';
-import type { KeybindingsManager } from '@earendil-works/pi-coding-agent';
-import { isViewportTUI, visibleWidth } from '@earendil-works/pi-tui';
-import { CONFIG, configLoadError, reloadConfig } from './config.js';
-import {
-  applyColor,
-  mixRgb,
-  paneHasFocusedClient,
-  parseFocusInput,
-  parseLabelData,
-  plainText,
-  rainbowRgb,
-  resolveRgb,
-  rgbColor,
-  splitFormat,
-  truncateCells,
-} from './utils.js';
-
-// Corner glyphs per style.
-const CORNERS = {
-  rounded: { tl: '╭', tr: '╮', bl: '╰', br: '╯', side: '│' },
-  square: { tl: '┌', tr: '┐', bl: '└', br: '┘', side: '│' },
-} as const;
-
-// ─── Border / scroll detection on pi's stock render output ────────────────
-
-/** Solid border: every visible char is ─. */
-function isSolidBorder(line: string): boolean {
-  return plainText(line).replace(/─/g, '').length === 0;
-}
-
-/** Extract the `↑ N more` / `↓ N more` scroll indicator, or null. */
-function getScrollText(line: string): string | null {
-  const plain = plainText(line);
-  if (!plain.startsWith('─')) return null;
-  const m = plain.match(/((?:↑|↓)\s*\d+\s*more)/);
-  return m?.[1] ?? null;
-}
-
-function isBorderLike(line: string): boolean {
-  return isSolidBorder(line) || getScrollText(line) !== null;
-}
-
-/** Prefix width in terminal cells — layout math supports multi-cell prefixes.
- * When the spinner is enabled the slot is sized to the widest frame so the
- * layout doesn't shift while animating. Recomputed on config reload. */
-let PREFIX_W = prefixWidth();
-
-function prefixWidth(): number {
-  return Math.max(
-    1,
-    visibleWidth(CONFIG.PREFIX),
-    ...(CONFIG.SPINNER ? CONFIG.SPINNER_FRAMES.map((f) => visibleWidth(f)) : []),
-  );
-}
-
-// ─── Working-state animation (spinner prefix + border glow) ───────────────
-// Busy between agent_start and agent_settled (or during a /composer
-// preview). A single timer drives both animations by requesting renders;
-// frames/phases derive from Date.now() so they stay smooth regardless of
-// tick jitter. pi-tui's invalidate() is a no-op — requestRender() is the
-// only way to repaint from a timer.
-
-let agentBusy = false;
-let agentRunning = false; // real agent run in flight (vs. preview-only busy)
-let busySince = 0;
-
-/** Current session display name, inlaid in the top border when set. pi never
- * auto-names sessions, so any value here was set deliberately — via /name,
- * --name, or an extension such as session-name. */
-let sessionName: string | undefined;
-
-/** Label text pushed by another extension via the `composer:set-label` bus
- * event; takes precedence over the session name. Cleared and re-requested on
- * every session start so a stale label never leaks across sessions. */
-let labelOverride: string | undefined;
-let animTimer: ReturnType<typeof setInterval> | undefined;
-let previewTimer: ReturnType<typeof setTimeout> | undefined;
-let animTui: TUI | undefined;
-
-function startAnimation(): void {
-  if (animTimer || !animTui) return;
-  if (!CONFIG.SPINNER && !CONFIG.GLOW) return;
-  const tickMs = Math.min(CONFIG.SPINNER ? CONFIG.SPINNER_INTERVAL_MS : Infinity, CONFIG.GLOW ? 80 : Infinity);
-  animTimer = setInterval(() => animTui?.requestRender(), tickMs);
-  animTimer.unref?.();
-}
-
-function stopAnimation(): void {
-  if (animTimer) clearInterval(animTimer);
-  animTimer = undefined;
-}
-
-function beginBusy(): void {
-  agentBusy = true;
-  busySince = Date.now();
-  startAnimation();
-}
-
-function endBusy(): void {
-  agentBusy = false;
-  stopAnimation();
-  animTui?.requestRender();
-}
-
-function cancelPreview(): void {
-  if (previewTimer) clearTimeout(previewTimer);
-  previewTimer = undefined;
-}
-
-function spinnerFrame(): string {
-  const frames = CONFIG.SPINNER_FRAMES;
-  return frames[Math.floor((Date.now() - busySince) / CONFIG.SPINNER_INTERVAL_MS) % frames.length]!;
-}
-
-/** 0..1 breathing intensity for the pulse glow. */
-function pulsePhase(): number {
-  return (1 - Math.cos((2 * Math.PI * (Date.now() % CONFIG.GLOW_PERIOD_MS)) / CONFIG.GLOW_PERIOD_MS)) / 2;
-}
-
-/** Locate pi's stock top/bottom borders and their scroll indicators in a render. */
-function scanBorders(stock: string[]): {
-  firstIdx: number;
-  lastIdx: number;
-  topScroll: string | null;
-  bottomScroll: string | null;
-} {
-  const firstIdx = stock.findIndex(isBorderLike);
-  let lastIdx = -1;
-  for (let i = stock.length - 1; i >= 0; i--) {
-    if (isBorderLike(stock[i]!)) {
-      lastIdx = i;
-      break;
-    }
+/** Characters streamed so far in an assistant message (text, thinking, tool-call arguments). */
+export function streamedChars(content: unknown): number {
+  if (typeof content === 'string') return content.length;
+  if (!Array.isArray(content)) return 0;
+  let n = 0;
+  for (const part of content as Array<Record<string, unknown>>) {
+    if (typeof part.text === 'string') n += part.text.length;
+    if (typeof part.thinking === 'string') n += part.thinking.length;
+    if (part.arguments !== undefined) n += JSON.stringify(part.arguments).length;
   }
-  const topScroll = firstIdx !== -1 ? getScrollText(stock[firstIdx]!) : null;
-  const bottomScroll = lastIdx !== -1 && lastIdx !== firstIdx ? getScrollText(stock[lastIdx]!) : null;
-  return { firstIdx, lastIdx, topScroll, bottomScroll };
+  return n;
 }
-
-/** Autocomplete-menu lines (after the last stock border), indented and padded to width. */
-function menuLines(stock: string[], lastIdx: number, width: number): string[] {
-  if (lastIdx === -1) return [];
-  const indent = ' '.repeat(CONFIG.EXTRA_MENU_INDENT);
-  const menu: string[] = [];
-  for (let i = lastIdx + 1; i < stock.length; i++) {
-    const vw = visibleWidth(stock[i]!);
-    const fill = vw + CONFIG.EXTRA_MENU_INDENT < width ? ' '.repeat(width - vw - CONFIG.EXTRA_MENU_INDENT) : '';
-    menu.push(indent + stock[i]! + fill);
-  }
-  return menu;
-}
-
-// ─── Component ────────────────────────────────────────────────────────────
-
-interface Palette {
-  border: (s: string) => string;
-  accent: (s: string) => string;
-  spin: (s: string) => string;
-  glow: (s: string) => string;
-  name: (s: string) => string;
-}
-
-// @ts-expect-error TS2415 — handlePaste is a prototype method typed `private` in
-// pi-tui's Editor; overriding it is legal at runtime (dynamic dispatch) and is the
-// only interception point for paste handling. If this stops erroring, pi-tui made
-// it protected/public — delete both expect-error pragmas in this file.
-class Composer extends CustomEditor {
-  private border: (s: string) => string;
-  private accent: (s: string) => string;
-  private spin: (s: string) => string;
-  private glow: (s: string) => string;
-  private name: (s: string) => string;
-
-  // Read from CONFIG at render time so a config reload takes effect live.
-  private get corners() {
-    return CORNERS[CONFIG.CORNERS];
-  }
-
-  constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager, palette: Palette) {
-    super(tui, theme, keybindings, { paddingX: 0 });
-    this.border = palette.border;
-    this.accent = palette.accent;
-    this.spin = palette.spin;
-    this.glow = palette.glow;
-    this.name = palette.name;
-  }
-
-  // ── Paste-again-to-expand ───────────────────────────────────────────────
-  handlePaste(pastedText: string): void {
-    const self = this as unknown as EditorInternals;
-    if (self.pastes.size > 0) {
-      const cleaned = cleanPastedText(pastedText);
-      for (const [id, content] of self.pastes) {
-        // handlePaste may have prepended a space to path-like pastes
-        if (content !== cleaned && content !== ` ${cleaned}`) continue;
-        const markerRe = new RegExp(`\\[paste #${id}( (\\+\\d+ lines|\\d+ chars))?\\]`);
-        if (!markerRe.test(this.getText())) continue;
-        this.expandCollapsedPaste(id, content);
-        return;
-      }
-    }
-    // @ts-expect-error TS2855 — see class-level note: parent method is typed private.
-    super.handlePaste(pastedText);
-  }
-
-  // ── History recall: cursor at the end ─────────────────────────────────
-  // pi-tui's navigateHistory places the cursor at the *start* of an entry
-  // recalled with Up (so a second Up keeps browsing history in multi-line
-  // entries). The cost is the overwhelmingly common case — recall the
-  // message you just sent and keep typing — which then prepends to your own
-  // sentence. Prefer the common case; Down is untouched. Ported from
-  // workos/arc's editor-history-cursor extension.
-  navigateHistory(direction: number): void {
-    const self = this as unknown as EditorInternals;
-    const previousHistoryIndex = self.historyIndex;
-    // @ts-expect-error TS2855 — see class-level note: parent method is typed private.
-    super.navigateHistory(direction);
-    // Only the Up case, and only when an entry was actually recalled:
-    // historyIndex -1 means the user's in-progress draft was restored, whose
-    // cursor position should be preserved exactly as it was, and an unchanged
-    // index means the original was a boundary no-op (already at the oldest
-    // entry), where moving the cursor would disrupt in-place editing.
-    if (direction !== -1 || self.historyIndex < 0 || self.historyIndex === previousHistoryIndex) return;
-    self.state.cursorLine = Math.max(0, self.state.lines.length - 1);
-    self.moveToLineEnd();
-  }
-
-  /** Replace the collapsed marker for paste `id` with its real content,
-   * keeping the paste registry dense (same bookkeeping as marker deletion). */
-  private expandCollapsedPaste(id: number, content: string): void {
-    const self = this as unknown as EditorInternals;
-    self.cancelAutocomplete();
-    self.exitHistoryBrowsing();
-    self.lastAction = null;
-    self.pushUndoSnapshot();
-
-    const markerRe = new RegExp(`\\[paste #${id}( (\\+\\d+ lines|\\d+ chars))?\\]`);
-
-    // Markers are atomic single-line segments; find the line containing it
-    let lineIdx = -1;
-    let match: RegExpExecArray | null = null;
-    for (let i = 0; i < self.state.lines.length; i++) {
-      const m = markerRe.exec(self.state.lines[i]!);
-      if (m) {
-        lineIdx = i;
-        match = m;
-        break;
-      }
-    }
-    if (lineIdx === -1 || !match) return;
-
-    const line = self.state.lines[lineIdx]!;
-    const before = line.slice(0, match.index);
-    const after = line.slice(match.index + match[0].length);
-    self.state.lines.splice(lineIdx, 1, ...(before + content + after).split('\n'));
-
-    // Remove registry entry, shift higher ids down, renumber their markers
-    self.pastes.delete(id);
-    self.pasteCounter--;
-    const higher = [...self.pastes.keys()].filter((k) => k > id).sort((a, b) => a - b);
-    for (const k of higher) {
-      self.pastes.set(k - 1, self.pastes.get(k)!);
-      self.pastes.delete(k);
-    }
-    self.state.lines = self.state.lines.map((l) =>
-      l.replace(PASTE_MARKER_REGEX, (full, idGroup, suffix) =>
-        Number(idGroup) <= id ? full : `[paste #${Number(idGroup) - 1}${suffix ?? ''}]`,
-      ),
-    );
-
-    // Cursor to end of the expanded content
-    const contentLines = content.split('\n');
-    self.state.cursorLine = lineIdx + contentLines.length - 1;
-    self.setCursorCol(
-      contentLines.length === 1 ? before.length + content.length : contentLines[contentLines.length - 1]!.length,
-    );
-
-    if (this.onChange) this.onChange(this.getText());
-  }
-
-  render(width: number): string[] {
-    const padMultiplier = CONFIG.BOXED_VIEW ? 3 : 1;
-    if (width < 4 + PREFIX_W + CONFIG.BOX_PAD_X * padMultiplier) return super.render(width);
-
-    const contentWidth = CONFIG.BOXED_VIEW
-      ? width - 2 - CONFIG.BOX_PAD_X * 3 - PREFIX_W
-      : width - 2 * CONFIG.BOX_PAD_X - PREFIX_W;
-    const stock = super.render(contentWidth);
-    if (stock.length < 2) return super.render(width);
-
-    return CONFIG.BOXED_VIEW
-      ? this.renderBoxed(stock, contentWidth, width)
-      : this.renderUnboxed(stock, contentWidth, width);
-  }
-
-  /** A horizontal rule of `width` cells, with the scroll indicator inlaid when present. */
-  private rule(scroll: string | null, width: number): string {
-    if (!scroll) {
-      if (agentBusy && CONFIG.GLOW && CONFIG.GLOW_STYLE === 'shimmer') return this.shimmerRule(width);
-      return this.border('─'.repeat(width));
-    }
-    const label = `── ${scroll} `;
-    return this.border(label) + this.border('─'.repeat(Math.max(0, width - visibleWidth(label))));
-  }
-
-  /** A rule with a glowing highlight sweeping left → right. */
-  private shimmerRule(width: number): string {
-    const win = Math.max(3, Math.min(10, Math.floor(width / 6)));
-    const cycle = width + win;
-    const head = Math.floor(((Date.now() % CONFIG.GLOW_PERIOD_MS) / CONFIG.GLOW_PERIOD_MS) * cycle);
-    const left = Math.max(0, head - win);
-    const right = Math.min(width, head);
-    if (right <= left) return this.border('─'.repeat(width));
-    return this.border('─'.repeat(left)) + this.glow('─'.repeat(right - left)) + this.border('─'.repeat(width - right));
-  }
-
-  /** Session-name label segment built from SESSION_NAME_FORMAT — surround
-   * glyphs in the border colour, the name in the name colour — or null when
-   * the session is unnamed or the rule is too narrow (keeps at least 8 cells
-   * of plain rule). */
-  private sessionNameLabel(width: number): { text: string; width: number } | null {
-    const label = labelOverride ?? sessionName;
-    if (!CONFIG.SESSION_NAME || !label) return null;
-    const [pre, post] = splitFormat(CONFIG.SESSION_NAME_FORMAT);
-    const surroundW = visibleWidth(pre) + visibleWidth(post);
-    const fit = width - 8 - surroundW;
-    const cap = CONFIG.SESSION_NAME_MAX_WIDTH > 0 ? Math.min(CONFIG.SESSION_NAME_MAX_WIDTH, fit) : fit;
-    if (cap < 4) return null;
-    const name = truncateCells(label, cap);
-    return {
-      text: this.border(pre) + this.name(name) + this.border(post),
-      width: surroundW + visibleWidth(name),
-    };
-  }
-
-  /** A rule carrying the session-name inlay when `which` is the configured
-   * border, placed at the configured end. The remaining stretch keeps the
-   * usual scroll indicator and shimmer behaviour, shortened by the label. */
-  private labeledRule(scroll: string | null, width: number, which: 'top' | 'bottom'): string {
-    if (CONFIG.SESSION_NAME_BORDER !== which) return this.rule(scroll, width);
-    const label = this.sessionNameLabel(width);
-    if (!label) return this.rule(scroll, width);
-    const rest = this.rule(scroll, width - label.width);
-    return CONFIG.SESSION_NAME_POSITION === 'left' ? label.text + rest : rest + label.text;
-  }
-
-  /** First-line prefix: spinner frame while the agent works, glyph otherwise.
-   * Always padded to PREFIX_W so the layout never shifts. */
-  private prefixGlyph(): string {
-    const spinning = agentBusy && CONFIG.SPINNER;
-    const glyph = spinning ? spinnerFrame() : CONFIG.PREFIX;
-    const painted = spinning ? this.spin(glyph) : this.accent(glyph);
-    return painted + ' '.repeat(Math.max(0, PREFIX_W - visibleWidth(glyph)));
-  }
-
-  /** Body lines (between the stock borders): pad + prefix + content, then `wrap`. */
-  private bodyLines(
-    stock: string[],
-    firstIdx: number,
-    lastIdx: number,
-    contentWidth: number,
-    wrap: (inner: string) => string,
-  ): string[] {
-    const pad = ' '.repeat(CONFIG.BOX_PAD_X);
-    const body: string[] = [];
-    let isFirst = true;
-    for (let i = 0; i < stock.length; i++) {
-      if (i === firstIdx || i === lastIdx) continue;
-      if (lastIdx !== -1 && i > lastIdx) continue;
-      const vw = visibleWidth(stock[i]!);
-      const fill = vw < contentWidth ? ' '.repeat(contentWidth - vw) : '';
-      const prefixStr = isFirst ? this.prefixGlyph() : ' '.repeat(PREFIX_W);
-      body.push(wrap(pad + prefixStr + pad + stock[i]! + fill));
-      isFirst = false;
-    }
-    return body;
-  }
-
-  private renderBoxed(stock: string[], contentWidth: number, width: number): string[] {
-    const c = this.corners;
-    const innerWidth = width - 2;
-    const { firstIdx, lastIdx, topScroll, bottomScroll } = scanBorders(stock);
-    const pad = ' '.repeat(CONFIG.BOX_PAD_X);
-
-    const top = this.border(c.tl) + this.labeledRule(topScroll, innerWidth, 'top') + this.border(c.tr);
-    const bottom = this.border(c.bl) + this.labeledRule(bottomScroll, innerWidth, 'bottom') + this.border(c.br);
-    const body = this.bodyLines(
-      stock,
-      firstIdx,
-      lastIdx,
-      contentWidth,
-      (inner) => this.border(c.side) + inner + pad + this.border(c.side),
-    );
-
-    const gap = Array.from({ length: CONFIG.MENU_GAP }, () => '');
-    return [top, ...body, bottom, ...gap, ...menuLines(stock, lastIdx, width)];
-  }
-
-  private renderUnboxed(stock: string[], contentWidth: number, width: number): string[] {
-    const { firstIdx, lastIdx, topScroll, bottomScroll } = scanBorders(stock);
-
-    const top = this.labeledRule(topScroll, width, 'top');
-    const bottom = this.labeledRule(bottomScroll, width, 'bottom');
-    const body = this.bodyLines(stock, firstIdx, lastIdx, contentWidth, (inner) => inner);
-
-    const gap = Array.from({ length: CONFIG.MENU_GAP }, () => '');
-    return [top, ...body, bottom, ...gap, ...menuLines(stock, lastIdx, width)];
-  }
-}
-
-// ─── Extension entry ──────────────────────────────────────────────────────
-
-// Terminal focus tracking — delineates the focused tmux pane. Fullscreen pi
-// owns DECSET 1004; other TUI modes need composer to enable it so tmux (with
-// `focus-events on`) sends CSI I / CSI O. Observe raw stdin because fullscreen
-// pi consumes those events before extension input listeners run. When composer
-// enables 1004 itself, clean it up so the shell does not inherit `[I`/`[O`.
-
-let paneFocused = true;
-let focusCarry = '';
-let removeFocusListener: (() => void) | undefined;
-let ownsFocusReporting = false;
-let exitHookInstalled = false;
-
-function detectPaneFocus(): boolean {
-  if (!process.env.TMUX_PANE) return true;
-  try {
-    return paneHasFocusedClient(
-      process.env.TMUX_PANE,
-      execFileSync('tmux', ['list-clients', '-F', '#{client_flags}\t#{pane_id}'], { encoding: 'utf8' }),
-    );
-  } catch {
-    return true;
-  }
-}
-
-function enableFocusTracking(tui: TUI): void {
-  paneFocused = detectPaneFocus();
-  ownsFocusReporting = !isViewportTUI(tui);
-  process.stdout.write('\x1b[?1004h');
-  if (!exitHookInstalled) {
-    exitHookInstalled = true;
-    process.on('exit', () => {
-      if (!ownsFocusReporting) return;
-      try {
-        process.stdout.write('\x1b[?1004l');
-      } catch {
-        /* stdout gone */
-      }
-    });
-  }
-  removeFocusListener?.();
-  const onInput = (data: string | Buffer) => {
-    const parsed = parseFocusInput(focusCarry, String(data));
-    focusCarry = parsed.carry;
-    if (parsed.focused === undefined) return;
-    paneFocused = parsed.focused;
-    tui.requestRender();
-  };
-  process.stdin.on('data', onInput);
-  removeFocusListener = () => process.stdin.off('data', onInput);
-}
-
-function disableFocusTracking(): void {
-  if (ownsFocusReporting) {
-    try {
-      process.stdout.write('\x1b[?1004l');
-    } catch {
-      /* stdout gone */
-    }
-  }
-  removeFocusListener?.();
-  removeFocusListener = undefined;
-  ownsFocusReporting = false;
-  focusCarry = '';
-  paneFocused = true;
-}
+const CONTEXT_COLORS = new Set(['success', 'accent', 'warning', 'error', 'dim']);
 
 export default function composer(pi: ExtensionAPI) {
-  // Extension API over pi's shared event bus: another extension pushes label
-  // text with pi.events.emit('composer:set-label', { text }); an absent or
-  // empty text clears the override. Composer re-emits 'composer:label-request'
-  // on every session start so producers can re-push regardless of load order.
-  pi.events.on('composer:set-label', (data) => {
-    labelOverride = parseLabelData(data);
-    animTui?.requestRender();
-  });
+  const rt: Runtime = createRuntime();
+  let loaded: LoadResult = load();
+  /** `/composer style <name>`: lasts until pi exits or `/composer style`. */
+  let sessionStyle: StyleName | undefined;
+  let animTimer: ReturnType<typeof setInterval> | undefined;
+  let shimmerTimer: ReturnType<typeof setInterval> | undefined;
+  let previewTimer: ReturnType<typeof setTimeout> | undefined;
+  let toastTimer: ReturnType<typeof setTimeout> | undefined;
+  let agentRunning = false;
+  /** A config has been applied before, so an unreadable file can fall back to it. */
+  let hasLoaded = false;
 
-  pi.on('session_start', (_event, ctx: ExtensionContext) => {
-    if (ctx.mode !== 'tui') return;
-    sessionName = pi.getSessionName() || undefined;
-    labelOverride = undefined;
-    pi.events.emit('composer:label-request', {});
-    ctx.ui.setEditorComponent((tui, theme, kb) => {
-      // All palette fns read CONFIG.* at call time so /composer reloads
-      // take effect without rebuilding the editor component.
-      const restingBorder = (s: string) =>
-        applyColor(
-          ctx.ui.theme,
-          CONFIG.FOCUS_INDICATOR && paneFocused ? CONFIG.FOCUSED_BORDER_COLOR : CONFIG.BORDER_COLOR,
-          s,
-        );
+  const cfg = (): ComposerConfig => loaded.config;
+  // Read the theme every frame: a live theme switch must repaint in the new colours.
+  const ctxFor = (): Ctx => {
+    rt.paneFocused = paneFocused;
+    return { cfg: cfg(), rt, theme: rt.ctx!.ui.theme as Theme };
+  };
+  const repaint = () => rt.tui?.requestRender();
 
-      // Paint with a colour name that may be a theme token, hex, or the
-      // special "rainbow" value (hue rotates once per rainbowPeriodMs).
-      const paint = (color: string, s: string): string =>
-        color === 'rainbow' ? rgbColor(rainbowRgb(CONFIG.RAINBOW_PERIOD_MS), s) : applyColor(ctx.ui.theme, color, s);
+  /** Whether any slot shows the context meter (checkpoint hides its own widget then). */
+  const showsContext = () => Object.values(cfg().slots).some((list) => list.flat().includes('context'));
+  const announceContextBar = () => pi.events.emit('composer:context-bar', showsContext());
 
-      // Pulse glow: interpolate borderColor toward the glow colour. Anchoring
-      // on borderColor (not the focus-adjusted resting colour) keeps the
-      // default visible: with focusIndicator on, the focused resting border
-      // is accent, and an accent→accent pulse would be a no-op. Falls back to
-      // a steady glow colour when either endpoint can't be resolved to RGB
-      // (non-truecolor theme tokens).
-      const pulseBorder = (s: string): string => {
-        const glowRgb =
-          CONFIG.GLOW_COLOR === 'rainbow'
-            ? rainbowRgb(CONFIG.RAINBOW_PERIOD_MS)
-            : resolveRgb(ctx.ui.theme, CONFIG.GLOW_COLOR);
-        const baseRgb = resolveRgb(ctx.ui.theme, CONFIG.BORDER_COLOR);
-        if (!baseRgb || !glowRgb) return paint(CONFIG.GLOW_COLOR, s);
-        return rgbColor(mixRgb(baseRgb, glowRgb, pulsePhase()), s);
-      };
+  // ── Animation: only while something moves. Idle means no timers. ────────
 
-      const borderFn = (s: string) =>
-        agentBusy && CONFIG.GLOW && CONFIG.GLOW_STYLE === 'pulse' ? pulseBorder(s) : restingBorder(s);
+  function tickMs(): number {
+    const c = cfg();
+    const { frames, intervalMs } = spinnerFrames(c);
+    const spins = c.prompt.whenBusy === 'spinner' && frames.length > 1 && promptWidth(c) > 0;
+    return Math.min(spins ? intervalMs : 1000, c.box.busyEffect === 'off' ? 1000 : 80);
+  }
 
-      if (CONFIG.FOCUS_INDICATOR) enableFocusTracking(tui);
-      animTui = tui;
-      return new Composer(tui, theme, kb, {
-        border: borderFn,
-        accent: (s: string) => applyColor(ctx.ui.theme, CONFIG.PREFIX_COLOR, s),
-        spin: (s: string) => paint(CONFIG.SPINNER_COLOR, s),
-        glow: (s: string) => paint(CONFIG.GLOW_COLOR, s),
-        name: (s: string) => applyColor(ctx.ui.theme, CONFIG.SESSION_NAME_COLOR, s),
+  function startAnimation(): void {
+    stopAnimation();
+    animTimer = setInterval(repaint, tickMs());
+    animTimer.unref?.();
+  }
+
+  function stopAnimation(): void {
+    if (animTimer) clearInterval(animTimer);
+    animTimer = undefined;
+  }
+
+  function beginBusy(): void {
+    rt.busy = true;
+    rt.busySince = rt.now();
+    resetRun(rt);
+    startAnimation();
+  }
+
+  function endBusy(): void {
+    rt.busy = false;
+    rt.tool = undefined;
+    stopAnimation();
+    repaint();
+  }
+
+  // ── Working indicator + message (verbs folded in from pi-spinner) ───────
+
+  function applyIndicator(ctx: ExtensionContext): void {
+    const c = cfg();
+    const { frames, intervalMs } = spinnerFrames(c);
+    // One spinner on screen: if the prompt symbol spins, pi's indicator shows only the message.
+    const promptSpins = c.prompt.whenBusy === 'spinner' && frames.length > 0 && promptWidth(c) > 0;
+    ctx.ui.setWorkingIndicator(
+      promptSpins
+        ? { frames: [] }
+        : { frames: frames.map((f) => applyColor(ctx.ui.theme, c.spinner.color, f)), intervalMs },
+    );
+  }
+
+  function stopShimmer(): void {
+    if (shimmerTimer) clearInterval(shimmerTimer);
+    shimmerTimer = undefined;
+  }
+
+  function startMessage(ctx: ExtensionContext): void {
+    stopShimmer();
+    const c = cfg();
+    const list = c.working.messages;
+    const text =
+      list === 'verbs'
+        ? `${randomVerb()}...`
+        : Array.isArray(list) && list.length
+          ? list[Math.floor(Math.random() * list.length)]
+          : undefined;
+    if (!text) {
+      ctx.ui.setWorkingMessage();
+      return;
+    }
+    const base = c.items.working?.color ?? c.working.baseColor;
+    if (!c.working.shimmer) {
+      ctx.ui.setWorkingMessage(applyColor(ctx.ui.theme, base, text));
+      return;
+    }
+    const frame = () =>
+      ctx.ui.setWorkingMessage(
+        shimmerFrame(text, ctx.ui.theme, {
+          periodMs: c.working.shimmerPeriodMs,
+          bandWidth: c.working.bandWidth,
+          baseColor: base,
+          highlightColor: c.working.highlightColor,
+        }),
+      );
+    frame();
+    shimmerTimer = setInterval(frame, 80);
+    shimmerTimer.unref?.();
+  }
+
+  // ── Toasts (styles with `toasts: true`) ──────────────────────────────────
+
+  function toast(text: string, ms = 5000): void {
+    if (!cfg().toasts) return;
+    rt.toast = { text, until: rt.now() + ms };
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      rt.toast = undefined;
+      repaint();
+    }, ms);
+    toastTimer.unref?.();
+    repaint();
+  }
+
+  // ── Mounting ─────────────────────────────────────────────────────────────
+
+  function report(ctx: ExtensionContext, result: LoadResult): void {
+    for (const error of result.errors) ctx.ui.notify(`composer: ${error}`, 'error');
+    for (const warning of result.warnings) ctx.ui.notify(`composer.json: ${warning}`, 'warning');
+  }
+
+  function mount(ctx: ExtensionContext): void {
+    ctx.ui.setEditorComponent((tui, editorTheme, kb) => {
+      rt.tui = tui;
+      rt.keybindings = kb as Runtime['keybindings'];
+      setDataListener(repaint);
+      if (cfg().box.focusColor) enableFocusTracking(tui);
+      else disableFocusTracking();
+      const editor = new Composer(tui, editorTheme, kb, ctxFor, (indicator) => {
+        rt.indicator = indicator;
+        repaint();
       });
+      editor.onCollapsedPaste = (lines) =>
+        toast(
+          `${applyColor(ctx.ui.theme, 'success', '✓')} ${applyColor(ctx.ui.theme, 'muted', `pasted ${lines} lines · paste again to expand`)}`,
+        );
+      rt.editor = editor;
+      return editor;
     });
+    ctx.ui.setFooter((tui, _theme, footerData) => {
+      rt.footerData = footerData;
+      const unsubscribe = footerData.onBranchChange(() => tui.requestRender());
+      return {
+        render: (width: number) => renderFooter(ctxFor(), width),
+        invalidate() {},
+        dispose: unsubscribe,
+      };
+    });
+    ctx.ui.setWidget(
+      ABOVE_WIDGET,
+      () => ({ render: (width: number) => renderAbove(ctxFor(), width), invalidate() {} }),
+      {
+        placement: 'aboveEditor',
+      },
+    );
+    applyIndicator(ctx);
+    announceContextBar();
+  }
 
-    const loadError = configLoadError();
-    if (loadError) ctx.ui.notify(`composer.json ignored (using defaults): ${loadError}`, 'warning');
+  /** Load composer.json; if it can't be read or parsed, keep what we had and say so. */
+  function loadKeeping(ctx: ExtensionContext): LoadResult {
+    const next = load(sessionStyle);
+    report(ctx, next);
+    // A session style shows the preset as shipped and never reads composer.json,
+    // so only a config that comes from the file is kept back.
+    if (next.unreadable && hasLoaded && !sessionStyle) {
+      ctx.ui.notify('composer: kept the previous config until composer.json parses again', 'warning');
+      return { ...next, kept: true };
+    }
+    loaded = next;
+    hasLoaded = true;
+    return next;
+  }
+
+  function reload(ctx: ExtensionContext): LoadResult {
+    const result = loadKeeping(ctx);
+    mount(ctx);
+    if (rt.busy) startAnimation();
+    repaint();
+    return result;
+  }
+
+  // ── Event wiring ─────────────────────────────────────────────────────────
+
+  pi.events.on('composer:set-label', (data) => {
+    rt.labelOverride = parseLabelData(data);
+    repaint();
+  });
+  pi.events.on('composer:request-context-bar', () => {
+    if (rt.ctx) announceContextBar();
+  });
+  pi.events.on('self-compact:context-color', (color) => {
+    rt.contextColor = typeof color === 'string' && CONTEXT_COLORS.has(color) ? (color as ContextColor) : undefined;
+    repaint();
   });
 
-  pi.registerCommand('composer', {
-    description: 'Reload composer.json and preview the working animation',
-    handler: async (_args, ctx) => {
-      const error = reloadConfig();
-      if (error) {
-        ctx.ui.notify(`composer.json not applied (kept previous config): ${error}`, 'error');
-        return;
-      }
-      PREFIX_W = prefixWidth();
-      if (animTui) {
-        if (CONFIG.FOCUS_INDICATOR) enableFocusTracking(animTui);
-        else disableFocusTracking();
-      }
-      if (agentBusy) {
-        // Restart the timer so a changed spinner interval takes effect.
-        stopAnimation();
-        startAnimation();
-      }
-      ctx.ui.notify('composer config reloaded', 'info');
-      animTui?.requestRender();
-
-      // Fake a short busy window so the spinner/glow can be seen without
-      // sending a prompt. A real agent run takes over seamlessly.
-      if (!agentRunning && (CONFIG.SPINNER || CONFIG.GLOW)) {
-        cancelPreview();
-        beginBusy();
-        previewTimer = setTimeout(() => {
-          previewTimer = undefined;
-          if (!agentRunning) endBusy();
-        }, 3000);
-        previewTimer.unref?.();
-      }
-    },
-  });
-
-  pi.on('session_info_changed', (event, ctx: ExtensionContext) => {
+  pi.on('session_start', async (_event, ctx) => {
     if (ctx.mode !== 'tui') return;
-    sessionName = event.name || undefined;
-    animTui?.requestRender();
+    rt.ctx = ctx;
+    rt.pi = pi;
+    rt.sessionName = pi.getSessionName() || undefined;
+    rt.labelOverride = undefined;
+    loadKeeping(ctx);
+    mount(ctx);
+    pi.events.emit('composer:label-request', {});
   });
 
-  pi.on('agent_start', (_event, ctx: ExtensionContext) => {
+  pi.on('session_info_changed', async (event, ctx) => {
+    if (ctx.mode !== 'tui') return;
+    rt.sessionName = event.name || undefined;
+    repaint();
+  });
+
+  pi.on('agent_start', async (_event, ctx) => {
     if (ctx.mode !== 'tui') return;
     agentRunning = true;
     cancelPreview();
     beginBusy();
   });
 
-  pi.on('agent_settled', (_event, ctx: ExtensionContext) => {
+  pi.on('agent_settled', async (_event, ctx) => {
     if (ctx.mode !== 'tui') return;
     agentRunning = false;
     endBusy();
   });
 
-  pi.on('session_shutdown', (_event, ctx: ExtensionContext) => {
+  pi.on('turn_start', async (_event, ctx) => {
+    if (ctx.mode === 'tui') startMessage(ctx);
+  });
+
+  pi.on('turn_end', async (_event, ctx) => {
     if (ctx.mode !== 'tui') return;
-    if (CONFIG.FOCUS_INDICATOR) disableFocusTracking();
+    stopShimmer();
+    ctx.ui.setWorkingMessage();
+  });
+
+  pi.on('tool_execution_start', async (event) => {
+    rt.toolCalls.add(event.toolCallId);
+    rt.tool = { name: event.toolName, detail: '', since: rt.now() };
+    repaint();
+  });
+
+  pi.on('tool_execution_end', async (event) => {
+    rt.toolCalls.delete(event.toolCallId);
+    if (rt.toolCalls.size === 0) rt.tool = undefined;
+    repaint();
+  });
+
+  pi.on('ui_prompt_start', async (event) => {
+    rt.prompt = { title: event.title ?? '' };
+    repaint();
+  });
+
+  pi.on('ui_prompt_end', async () => {
+    rt.prompt = undefined;
+    repaint();
+  });
+
+  // Live tokens: ~4 characters per token of what has actually streamed. Providers
+  // may report usage early (or only at the end), so the exact figure is used
+  // once the message ends.
+  pi.on('message_update', async (event) => {
+    const message = event.message as { role?: string; content?: unknown };
+    if (message.role !== 'assistant') return;
+    noteTokens(rt, rt.tokensDone + Math.ceil(streamedChars(message.content) / 4));
+  });
+
+  pi.on('message_end', async (event) => {
+    const message = event.message as { role?: string; content?: unknown; usage?: { output?: number } };
+    if (message.role !== 'assistant') return;
+    noteTokens(rt, rt.tokensDone + (message.usage?.output || Math.ceil(streamedChars(message.content) / 4)));
+    rt.tokensDone = rt.tokens;
+  });
+
+  pi.on('session_shutdown', async (_event, ctx) => {
+    if (ctx.mode !== 'tui') return;
+    disableFocusTracking();
     cancelPreview();
-    agentRunning = false;
-    agentBusy = false;
     stopAnimation();
-    animTui = undefined;
-    sessionName = undefined;
-    labelOverride = undefined;
+    stopShimmer();
+    if (toastTimer) clearTimeout(toastTimer);
+    agentRunning = false;
+    rt.busy = false;
+    rt.indicator = undefined;
+    rt.tui = undefined;
+    rt.editor = undefined;
+    rt.footerData = undefined;
+    setDataListener(undefined);
+    pi.events.emit('composer:context-bar', false);
     ctx.ui.setEditorComponent(undefined);
+    ctx.ui.setFooter(undefined);
+    ctx.ui.setWidget(ABOVE_WIDGET, undefined);
+    ctx.ui.setWorkingIndicator();
+    ctx.ui.setWorkingMessage();
+  });
+
+  // ── /composer ────────────────────────────────────────────────────────────
+
+  function cancelPreview(): void {
+    if (previewTimer) clearTimeout(previewTimer);
+    previewTimer = undefined;
+    if (rt.preview) {
+      rt.preview = undefined;
+      if (!agentRunning) endBusy();
+    }
+  }
+
+  /** Step through every state so a style can be judged without running an agent. */
+  function preview(ctx: ExtensionContext): void {
+    if (agentRunning) {
+      ctx.ui.notify('composer: preview is unavailable while the agent is running', 'warning');
+      return;
+    }
+    cancelPreview(); // one preview at a time
+    const steps: StateName[] = STATES.filter((s) => s !== 'idle');
+    let i = 0;
+    const step = () => {
+      const state = steps[i++];
+      if (!state) {
+        cancelPreview();
+        ctx.ui.notify('composer: preview done', 'info');
+        return;
+      }
+      rt.preview = state;
+      const busy = state === 'working' || state === 'tool';
+      if (busy && !rt.busy) beginBusy();
+      if (!busy && rt.busy) endBusy();
+      rt.tool = state === 'tool' ? { name: 'bash', detail: '', since: rt.now() } : undefined;
+      if (busy) {
+        // Sample numbers so the tokens and tps items have something to show.
+        rt.tokens = 1284;
+        rt.tps = [12, 40, 66, 84, 79, 81];
+      }
+      ctx.ui.notify(`composer preview: ${state}`, 'info');
+      repaint();
+      previewTimer = setTimeout(step, 1600);
+      previewTimer.unref?.();
+    };
+    step();
+  }
+
+  const styleNames = Object.keys(STYLES) as StyleName[];
+
+  pi.registerCommand('composer', {
+    description: 'Reload composer.json, try a style (/composer style toad), or preview every state',
+    getArgumentCompletions: (prefix: string): AutocompleteItem[] => {
+      const options = ['style', 'preview', ...styleNames.map((s) => `style ${s}`)];
+      return options.filter((o) => o.startsWith(prefix)).map((o) => ({ value: o, label: o }));
+    },
+    handler: async (args, ctx) => {
+      const [sub, name] = args.trim().split(/\s+/);
+      if (sub === 'preview') {
+        preview(ctx);
+        return;
+      }
+      if (sub === 'style') {
+        if (name && !styleNames.includes(name as StyleName)) {
+          ctx.ui.notify(`composer: no style "${name}". Styles: ${styleNames.join(', ')}`, 'error');
+          return;
+        }
+        const previous = sessionStyle;
+        sessionStyle = name as StyleName | undefined;
+        if (reload(ctx).kept) {
+          // Going back to an unreadable composer.json: stay on what's showing, and say so.
+          sessionStyle = previous;
+          ctx.ui.notify(
+            `composer: composer.json can't be read, so staying on ${previous ? `"${previous}"` : 'the last good config'}`,
+            'error',
+          );
+          return;
+        }
+        ctx.ui.notify(
+          sessionStyle
+            ? `composer: trying "${sessionStyle}" as shipped (your overrides are paused). /composer style to go back; set "style" in composer.json to keep it.`
+            : 'composer: back to your composer.json',
+          'info',
+        );
+        return;
+      }
+      if (sub) {
+        ctx.ui.notify('composer: usage /composer [style <name> | preview]', 'error');
+        return;
+      }
+      const result = reload(ctx);
+      const ok = result.errors.length === 0 && result.warnings.length === 0;
+      ctx.ui.notify(
+        `composer: style "${cfg().style}"${sessionStyle ? ' (session)' : ''}${ok ? ', config OK' : ''} · usage: ${usageHealth}`,
+        'info',
+      );
+    },
   });
 }

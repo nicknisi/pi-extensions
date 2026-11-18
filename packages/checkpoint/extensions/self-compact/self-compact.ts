@@ -231,10 +231,10 @@ export default function (
   let hardActive = false;
   let hardOriginalTools: string[] | undefined;
   let toolsBeforeTree: string[] | undefined;
-  let statuslinePresent = false;
+  let contextBarPresent = false;
   let lastUiContext: ExtensionContext | undefined;
-  const unsubscribeStatusline = pi.events.on('statusline:context-bar', (available) => {
-    statuslinePresent = available === true;
+  const unsubscribeContextBar = pi.events.on('composer:context-bar', (available) => {
+    contextBarPresent = available === true;
     if (!disposed && lastUiContext) updateWidget(lastUiContext);
   });
   // Timers scheduling a post-reconciliation delivery, cleared on shutdown so a
@@ -647,7 +647,7 @@ export default function (
     }
   }
 
-  /** Publish the policy color and show the standalone widget only without a statusline. */
+  /** Publish the policy color and show the standalone widget only when composer shows no context meter. */
   function updateWidget(ctx: ExtensionContext): void {
     lastUiContext = ctx;
     ensureConfig(ctx);
@@ -666,7 +666,7 @@ export default function (
               : 'success';
     pi.events.emit('self-compact:context-color', color);
     if (!ctx.hasUI) return;
-    if (statuslinePresent) {
+    if (contextBarPresent) {
       ctx.ui.setWidget(WIDGET_KEY, undefined);
       return;
     }
@@ -1041,7 +1041,7 @@ export default function (
 
   pi.on('session_start', async (_event, ctx) => {
     restoreBranchState(ctx);
-    pi.events.emit('statusline:request-context-bar', undefined);
+    pi.events.emit('composer:request-context-bar', undefined);
   });
   pi.on('session_before_tree', async (_event, ctx) => {
     const state = currentState(ctx);
@@ -1224,7 +1224,7 @@ export default function (
     reconcileTimers.clear();
     if (ctx.hasUI) ctx.ui.setWidget(WIDGET_KEY, undefined);
     lastUiContext = undefined;
-    unsubscribeStatusline();
+    unsubscribeContextBar();
     pi.events.emit('self-compact:context-color', undefined);
   });
 }

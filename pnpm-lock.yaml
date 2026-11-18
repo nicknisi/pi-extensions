@@ -192,11 +192,7 @@ importers:
 
   packages/stash: {}
 
-  packages/statusline:
-    dependencies:
-      '@nicknisi/pi-shared':
-        specifier: workspace:*
-        version: link:../shared
+  packages/statusline: {}
 
   packages/subagents:
     dependencies:

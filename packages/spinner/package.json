@@ -1,7 +1,7 @@
 {
   "name": "@nicknisi/pi-spinner",
   "version": "0.2.0",
-  "description": "Custom rotating verbs for the working spinner",
+  "description": "Retired: working verbs moved into @nicknisi/pi-composer 1.0",
   "keywords": [
     "pi",
     "pi-coding-agent",
@@ -17,7 +17,7 @@
   "files": [
     "dist",
     "index.ts",
-    "shimmer.ts",
+    "README.md",
     "CHANGELOG.md"
   ],
   "type": "module",

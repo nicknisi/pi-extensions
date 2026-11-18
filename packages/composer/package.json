@@ -1,7 +1,7 @@
 {
   "name": "@nicknisi/pi-composer",
   "version": "0.4.1",
-  "description": "Configurable boxed input editor for pi, with paste-again-to-expand",
+  "description": "The whole bottom of pi's screen: input box, footer, working message and spinner, as configurable styles and slots",
   "keywords": [
     "pi",
     "pi-coding-agent",
@@ -18,6 +18,15 @@
     "dist",
     "index.ts",
     "config.ts",
+    "styles.ts",
+    "state.ts",
+    "layout.ts",
+    "items.ts",
+    "render.ts",
+    "editor.ts",
+    "focus.ts",
+    "data.ts",
+    "verbs.ts",
     "utils.ts",
     "README.md",
     "composer.example.json",
@@ -31,6 +40,7 @@
     }
   },
   "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
   },

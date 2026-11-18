@@ -8,15 +8,6 @@ export function plainText(line: string): string {
   return line.replace(ANSI_RE, '');
 }
 
-/** Split a `{name}` format template into its literal pre/post parts. Assumes
- * the template contains `{name}` (config validation enforces this); a
- * template without it degrades to rendering the bare name. */
-export function splitFormat(format: string): [string, string] {
-  const i = format.indexOf('{name}');
-  if (i === -1) return ['', ''];
-  return [format.slice(0, i), format.slice(i + '{name}'.length)];
-}
-
 /** Parse a `composer:set-label` bus payload: a non-empty string `text` sets
  * the label; anything else (absent, empty, wrong type) clears the override. */
 export function parseLabelData(data: unknown): string | undefined {
@@ -100,19 +91,6 @@ export function mixRgb(a: Rgb, b: Rgb, t: number): Rgb {
     Math.round(a[1] + (b[1] - a[1]) * t),
     Math.round(a[2] + (b[2] - a[2]) * t),
   ];
-}
-
-/** Fully saturated rainbow colour, hue-rotating once per `periodMs`. */
-export function rainbowRgb(periodMs: number): Rgb {
-  const h = ((Date.now() % periodMs) / periodMs) * 6; // hue in [0,6)
-  const x = Math.round(255 * (1 - Math.abs((h % 2) - 1)));
-  const sector = Math.floor(h);
-  if (sector === 0) return [255, x, 0];
-  if (sector === 1) return [x, 255, 0];
-  if (sector === 2) return [0, 255, x];
-  if (sector === 3) return [0, x, 255];
-  if (sector === 4) return [x, 0, 255];
-  return [255, 0, x];
 }
 
 /** Paint text with a truecolor foreground. */
