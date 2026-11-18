@@ -1,7 +1,7 @@
 {
   "name": "@nicknisi/pi-statusline",
   "version": "0.3.5",
-  "description": "Custom footer: model, cost, context usage, git branch, lines changed, tmux status files",
+  "description": "Retired: the footer moved into @nicknisi/pi-composer 1.0",
   "keywords": [
     "pi",
     "pi-coding-agent",
@@ -17,7 +17,7 @@
   "files": [
     "dist",
     "index.ts",
-    "config.ts"
+    "README.md"
   ],
   "type": "module",
   "exports": {
@@ -26,13 +26,8 @@
       "default": "./dist/index.js"
     }
   },
-  "dependencies": {
-    "@nicknisi/pi-shared": "workspace:*"
-  },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-coding-agent": "*"
   },
   "pi": {
     "extensions": [
