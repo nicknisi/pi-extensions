@@ -7,7 +7,7 @@ import type { ExtensionAPI, ExtensionToolContext, ToolDefinition } from '@earend
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import extension from './index.js';
 
-const ok = { stdout: '', stderr: '', code: 0, killed: false };
+const ok = { stdout: '', stderr: '', code: 0, killed: false, truncated: false };
 let cwd: string;
 let file: string;
 beforeEach(async () => {
@@ -125,7 +125,13 @@ it('real CLI searches, previews without writing, applies, and reports no matches
       return { ...ok, ...output };
     } catch (error) {
       const failure = error as Error & { code: number; stdout: string; stderr: string; killed: boolean };
-      return { stdout: failure.stdout, stderr: failure.stderr, code: failure.code, killed: failure.killed ?? false };
+      return {
+        ...ok,
+        stdout: failure.stdout,
+        stderr: failure.stderr,
+        code: failure.code,
+        killed: failure.killed ?? false,
+      };
     }
   });
   const search = await harness.call('ast_search', { pattern: rewrite.pattern });

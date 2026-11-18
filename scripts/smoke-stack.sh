@@ -39,7 +39,7 @@ check "dispatch fan-out returns both answers" /tmp/smoke-2.log "10"
 grep -qi "tokyo" /tmp/smoke-2.log && echo "   (tokyo ✓)" || { echo "❌ FAIL: dispatch tokyo"; FAIL=$((FAIL+1)); }
 
 echo "── 3/7 fleet: persisted runs visible"
-cd /tmp/smoke-a && pi -p --no-session $EXTS "Use the fleet tool with action list. How many runs do you see and from which namespaces? Answer briefly." > /tmp/smoke-3.log 2>&1
+cd /tmp/smoke-a && pi -p --no-session $EXTS "Use the fleet tool with action list and scope all (persisted machine-wide history). How many runs do you see and from which namespaces? Answer briefly." > /tmp/smoke-3.log 2>&1
 check "fleet lists persisted dispatch runs" /tmp/smoke-3.log "subagents"
 
 echo "── 4/7 workflow: parallel agent fan-out"
