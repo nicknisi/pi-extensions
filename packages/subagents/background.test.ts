@@ -34,6 +34,13 @@ describe('backgroundNotice', () => {
     expect(options).toEqual({});
   });
 
+  it('does not start a turn for a stopped run (cancel, or the session ending)', () => {
+    const stopped: SpawnResult = { ...failed, kind: 'aborted', error: 'Interrupted when the pi session ended' };
+    const { message, options } = backgroundNotice('abcdef123456', 'scout', stopped, false);
+    expect(message.content).toContain('failed: Interrupted when the pi session ended');
+    expect(options).toEqual({});
+  });
+
   it('caps the answer', () => {
     const long: SpawnResult = { ...ok, text: 'x'.repeat(10_000) };
     expect(backgroundNotice('abcdef123456', 'scout', long, false).message.content.length).toBeLessThan(4100);
