@@ -22,11 +22,33 @@ pi install npm:@nicknisi/pi-composer
 | `box` (default) | A rounded box with the session label on its top border, the working line above it, and one status row below: model, thinking, cost, lines changed, 5h/7d usage, statuses, context bar, branch and PR. |
 | `slab`          | The same status row, with a shaded slab instead of a box (after the Codex composer), `›` as the prompt symbol, and `│ 12s │ esc to interrupt` on the working line.                                    |
 
-Both styles show the same information in the same format; they differ only in the input's chrome. Try one without editing anything: `/composer style slab`. That lasts for the session, shows the style as shipped (your overrides are paused), and `/composer style` goes back. `/composer preview` steps through every state (typing, paste, working, tool, prompt, near-full, scrolled) so you can judge a style without running an agent.
+Both styles show the same information in the same format; they differ only in the input's chrome. A style is just a set of config values, so anything it does you can undo in your own file. `slab` changes these, on top of `box`:
+
+```jsonc
+{
+  "prompt": { "symbol": "›", "color": "text", "whenBusy": "symbol" },
+  "box": { "border": "slab", "padX": 1, "padY": 0, "focusColor": null, "busyEffect": "off" },
+  "slots": { "above": ["working", "elapsed", "text:esc to interrupt"], "topRight": [] },
+  "toasts": true,
+}
+```
+
+An unknown style name (including the pre-1.0 names `classic`, `keycaps`, `toad`, `starship` and `sidepanel`) gets a warning and falls back to `box`.
+
+## Commands
+
+| Command                  | What it does                                                                                                                                                                                 |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/composer`              | Reloads `composer.json`, reports any problems, and says whether usage data is reachable. Run it after editing the file.                                                                      |
+| `/composer style <name>` | Tries a style for this session only. It shows the style as shipped, with your overrides paused. Nothing is written to `composer.json`.                                                       |
+| `/composer style`        | Goes back to the style and overrides in your file.                                                                                                                                           |
+| `/composer preview`      | Steps through every state (typing, paste, working, tool, prompt, near-full, scrolled) with sample data, so you can judge a look without running an agent. Not available while pi is working. |
 
 ## Configuration
 
-One file, `~/.pi/agent/configs/composer.json`. Every key is optional. Values resolve as **built-in defaults ← the style ← your overrides**; objects merge key by key, lists (slots, spinner frames) replace. Run `/composer` after editing: it reloads, reports problems, and shows whether usage data is reachable.
+One file, `~/.pi/agent/configs/composer.json`. Every key is optional: put in only what you want to change. Values resolve as **built-in defaults ← the style ← your overrides**; objects merge key by key, lists (slots, spinner frames) replace. Run `/composer` after editing to apply it. Keys starting with `$` (`$schema`, `$comment`) are ignored.
+
+Every key, with its default (the `box` style). The `items` entries are examples; items have no overrides by default.
 
 ```jsonc
 {
@@ -37,43 +59,39 @@ One file, `~/.pi/agent/configs/composer.json`. Every key is optional. Values res
     "symbol": "❯",
     "color": "accent",
     "whenBusy": "spinner", // "spinner": the symbol becomes the spinner. "symbol": it stays.
-    "states": {
-      // per-state overrides, see States below
-      "nearFull": { "color": "error" },
-      "typing": { "symbol": "›" },
-    },
+    "states": {}, // per-state symbol/colour, e.g. { "typing": { "symbol": "›" }, "nearFull": { "color": "error" } }
   },
 
   "spinner": {
     "frames": "dots", // a preset name, or your own list: ["◐", "◓", "◑", "◒"]
-    "intervalMs": 80, // 0 = the preset's own speed
+    "intervalMs": 0, // ms per frame; 0 = the preset's own speed
     "color": "accent",
   },
 
   "box": {
     "border": "rounded", // rounded | square | heavy | rule | slab | none
-    "color": "border",
+    "color": "border", // border colour
     "focusColor": "accent", // border colour while this tmux pane has focus; null turns it off
     "background": "userMessageBg", // slab only: background theme token
     "padX": 1, // spaces inside the box, left and right
     "padY": 0, // blank rows inside the box, top and bottom
     "placeholder": null, // dim text in an empty input, e.g. "Ask pi anything"
     "busyEffect": "pulse", // off | pulse | shimmer | rainbow, while pi works
-    "effectColor": "accent",
-    "effectPeriodMs": 2000,
-    "states": { "nearFull": { "color": "context" } },
+    "effectColor": "accent", // colour of the pulse and shimmer effects
+    "effectPeriodMs": 2000, // ms for one pulse or sweep (rainbow too); at least 1
+    "states": {}, // per-state border colour, e.g. { "nearFull": { "color": "context" } }
     "menuGap": 0, // blank rows between the box and the autocomplete menu
-    "menuIndent": 1,
+    "menuIndent": 1, // columns the autocomplete menu is indented
   },
 
   // The working message (folded in from pi-spinner).
   "working": {
     "messages": "verbs", // "verbs": a random fun verb per turn. "default": pi's own. Or your own list.
     "shimmer": true, // a highlight band sweeping across the message
-    "shimmerPeriodMs": 2000,
-    "bandWidth": 6,
-    "baseColor": "muted",
-    "highlightColor": "text",
+    "shimmerPeriodMs": 2000, // ms for one sweep; at least 1
+    "bandWidth": 6, // width of the highlight band, in characters; at least 1
+    "baseColor": "muted", // the message colour
+    "highlightColor": "text", // the band colour
   },
 
   // What goes where. Each slot is a list of items; a nested list is a group.
@@ -88,7 +106,7 @@ One file, `~/.pi/agent/configs/composer.json`. Every key is optional. Values res
     "footerRight": [["branch", "pr"]],
   },
 
-  // Per-item options.
+  // Per-item options (examples, see Item options below).
   "items": {
     "context": { "show": "bar", "barWidth": 20, "label": "ctx" },
     "statuses": { "hide": ["mcp"] },
@@ -102,7 +120,16 @@ One file, `~/.pi/agent/configs/composer.json`. Every key is optional. Values res
 }
 ```
 
-Problems are reported, never fatal. An unknown key, slot, item or state warns with a suggestion (`unknown item "brnch" (did you mean "branch"?)`), and a bad value falls back to the style's value.
+### Validation
+
+Problems are reported when the file loads (and by `/composer`), never fatal:
+
+- An unknown key, slot, item or state warns with a suggestion (`unknown item "brnch" (did you mean "branch"?)`), and is ignored.
+- A value of the wrong type or outside its list warns and falls back to the style's value.
+- Numbers can't be negative. `box.padX`, `padY`, `menuGap` and `menuIndent` must be whole numbers, and `box.effectPeriodMs`, `working.shimmerPeriodMs` and `working.bandWidth` must be at least 1.
+- An unknown `style` warns and uses `box`.
+- 0.x keys (`boxedView`, `prefix`, `spinnerStyle`, …) are an error; see [Migrating from 0.x](#migrating-from-0x).
+- A file that isn't valid JSON keeps the previous config until it parses again.
 
 ### Slots
 
@@ -142,7 +169,37 @@ A row with nothing to say takes no space: no working message while idle, no cost
 | `scroll`       | `↓ scrolled · ctrl+end to follow` while the transcript is scrolled back                                                | shorter                                                        |
 | `text:…`       | Literal text, e.g. `text:esc to interrupt`                                                                             |                                                                |
 
-Every item also takes `priority`, `color`, `icon` (`""` hides the default glyph), `prefix` and `suffix` (painted dim, e.g. `"on "`).
+### Item options
+
+Set under `items.<name>`, e.g. `"items": { "model": { "color": "muted" } }`. Every item takes:
+
+| Option     | Default                                                   | What it does                                        |
+| ---------- | --------------------------------------------------------- | --------------------------------------------------- |
+| `priority` | see [When a row is too narrow](#when-a-row-is-too-narrow) | Higher survives longer when a row runs out of room. |
+| `color`    | the item's own                                            | Any [colour](#colours).                             |
+| `icon`     | see [Icons](#icons)                                       | Glyph before the item; `""` hides it.               |
+| `prefix`   | none                                                      | Text before the item, painted dim, e.g. `"on "`.    |
+| `suffix`   | none                                                      | Text after the item, painted dim.                   |
+
+A few items take more:
+
+| Item       | Option      | Default | What it does                                                                      |
+| ---------- | ----------- | ------- | --------------------------------------------------------------------------------- |
+| `context`  | `show`      | `bar`   | `bar` (an elastic meter with `71% ctx (58K)`), `percent` (`71% ctx`) or `tokens`. |
+| `context`  | `barWidth`  | `20`    | The widest the bar may grow.                                                      |
+| `context`  | `label`     | `ctx`   | Words after the percentage, e.g. `"context left"`; `""` for none.                 |
+| `statuses` | `hide`      | `[]`    | Extension status keys to leave out, e.g. `["mcp"]`.                               |
+| `usage`    | `showBelow` | none    | Only show usage when the 5h or 7d window has less than this % left.               |
+
+### Icons
+
+`icons` picks the default glyphs; `items.<name>.icon` overrides any one of them.
+
+| `icons`   | Glyphs                                                                                                                              |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `nerd`    | Model family icon (Opus, Sonnet, Haiku, other), plus `cost` , `lines` , `usage` 󰉁, `context` 󰧑 and `branch` . Needs a Nerd Font. |
+| `unicode` | `model` ◆ and `branch` ⎇.                                                                                                           |
+| `ascii`   | None.                                                                                                                               |
 
 ### When a row is too narrow
 
@@ -150,7 +207,7 @@ One rule for every row: **the lowest-priority item gives way first.** It switche
 
 ### States
 
-`prompt.states` and `box.states` take overrides per state. Several states can apply at once (typing while context is nearly full); they apply in this order, later winning:
+`prompt.states` takes `symbol` and `color` per state, and `box.states` takes `color` (the border). Several states can apply at once (typing while context is nearly full); they apply in this order, later winning:
 
 `idle` → `typing` → `paste` → `scrolled` → `nearFull` → `working` → `tool` → `prompt`
 

@@ -273,3 +273,37 @@ describe('computeTotals', () => {
     expect(computeTotals(entries)).toEqual({ cost: 1.25, added: 1, removed: 1 });
   });
 });
+
+describe('README', () => {
+  it('documents every option', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { BORDERS, DEFAULTS, EFFECTS, ITEMS, SLOTS, SPINNERS, STATES } = await import('./config.js');
+    const readme = readFileSync(new URL('./README.md', import.meta.url), 'utf8');
+    const keys = Object.entries(DEFAULTS).flatMap(([k, v]) =>
+      v && typeof v === 'object' && !Array.isArray(v) && k !== 'slots' && k !== 'items' ? Object.keys(v) : [k],
+    );
+    const itemOptions = [
+      'priority',
+      'color',
+      'icon',
+      'prefix',
+      'suffix',
+      'show',
+      'barWidth',
+      'label',
+      'hide',
+      'showBelow',
+    ];
+    const names = [
+      ...keys,
+      ...SLOTS,
+      ...ITEMS,
+      ...STATES,
+      ...Object.keys(SPINNERS),
+      ...BORDERS,
+      ...EFFECTS,
+      ...itemOptions,
+    ];
+    expect(names.filter((n) => !readme.includes(`\`${n}\``) && !readme.includes(`"${n}"`))).toEqual([]);
+  });
+});
