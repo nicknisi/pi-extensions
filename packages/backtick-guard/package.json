@@ -1,0 +1,40 @@
+{
+  "name": "@nicknisi/pi-backtick-guard",
+  "version": "0.0.0",
+  "description": "Refuse bash calls whose backtick command substitutions would run, and hint around the bash 3.2 heredoc bug",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-package"
+  ],
+  "homepage": "https://github.com/nicknisi/pi-extensions/tree/main/packages/backtick-guard#readme",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicknisi/pi-extensions.git",
+    "directory": "packages/backtick-guard"
+  },
+  "files": [
+    "dist",
+    "index.ts",
+    "CHANGELOG.md"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "sh-syntax": "^0.8.7"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
