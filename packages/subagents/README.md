@@ -4,7 +4,7 @@ First-party subagent dispatch and fleet for pi — fan out parallel child agents
 
 ## What it adds
 
-- **`dispatch` tool** (model-facing) — fan out up to 8 child agents in parallel. Each task gets its own prompt, optional label/model/system-prompt, and a tool allowlist (default read-only: `read`, `grep`, `find`, `ls`). Running rows show cumulative token usage after each completed model response. Typed per-task results aggregate into one tool result. `background: true` runs detached and surfaces completion via a transcript message. Tasks whose allowlist includes `edit`, `write`, or `bash` mutate the shared working tree: they must declare `allowTreeMutation: true` (otherwise that task is refused) and always run **sequentially**, one at a time, after the parallel read-only batch completes — never concurrently with each other or the read-only batch.
+- **`dispatch` tool** (model-facing) — fan out up to 8 child agents in parallel. Each task gets its own prompt, optional label/model/thinking level/system-prompt, and a tool allowlist (default read-only: `read`, `grep`, `find`, `ls`). Running rows show cumulative token usage after each completed model response. Typed per-task results aggregate into one tool result. `background: true` runs detached; when the child finishes, its answer (or error) arrives as a message that wakes the parent (see **Background completion** below). Tasks whose allowlist includes `edit`, `write`, or `bash` mutate the shared working tree: they must declare `allowTreeMutation: true` (otherwise that task is refused) and always run **sequentially**, one at a time, after the parallel read-only batch completes — never concurrently with each other or the read-only batch.
 - **`fleet` tool** (model-facing) — `list` shows queued/running runs owned by the current Pi session. Pass `scope: "all"` for persisted machine-wide history, or fetch a `result` directly by runId. This is how the model checks on background dispatches without mixing in unrelated sessions.
 - **`/fleet` command** — user-facing active-run table. `/fleet all` opens persisted machine-wide history; `/fleet <runId-prefix>` jumps to a historical result.
 - **Fleet radar overlay + statusline** — `Alt+Ctrl+F` (rebind via `~/.pi/agent/keybindings.json`) opens a tmux-choose-tree-style overlay listing active runs owned by the current Pi session as per-child lanes: status, model, current tool, token burn, last activity. `Enter` inspects the live run transcript; `c` cancels the focused run (wired into the cascading-cancellation registry); `Esc` closes. The ambient footer segment (`ctx.ui.setStatus`) exists only while this session owns queued/running subagents; runs from other sessions never make it appear.
@@ -53,6 +53,16 @@ Live progress shows in a widget above the editor; when the child settles, the re
 ```
 
 `/again` re-fires the last `&` dispatch verbatim, or with an amendment appended. Cancellation: an inline run is registered in the cascading-cancellation registry, so it is aborted on session shutdown and can be cancelled mid-flight from the fleet radar (`Alt+Ctrl+F` → `c`) or the `fleet` tool — it is **not** aborted by a bare Esc (the `input` event fires while idle, so no agent abort signal is available to thread in).
+
+### Background completion
+
+When a background child finishes, its answer (capped at 4,000 characters, the same as a foreground result) or its error and partial output land in the transcript as a `subagents:background` message, and that message wakes the parent: an idle session starts a turn, and a busy one gets it at the next tool boundary (Pi's `steer` delivery). The model doesn't need to poll `fleet`. Several children finishing together queue up and are handled in order.
+
+A run that was resumed after the session reopened (see **Durable runs**) posts the same notice but doesn't start a turn, because the call that launched it is gone; the model sees it with your next prompt. This matches resumed workflows. A run you or the model stopped (a cancel from `fleet` or the radar, or an interruption because the session quit, reloaded or switched) also posts its notice without starting a turn. A child that times out or exceeds a budget still wakes the parent, since that's a failure the model should hear about.
+
+### Thinking level
+
+`thinking` sets one child's thinking level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) without changing the parent's. It works with or without `model`, so `{ "task": "…", "thinking": "low" }` runs a quick scout on the parent's model. A `model` written as `provider/id:level` sets it too, and `thinking` wins when both are given. Omit it for the model's default. Pi lowers the level if the model doesn't support it, and a resumed run keeps it.
 
 ### Worktree isolation
 
@@ -223,7 +233,6 @@ export default (pi: ExtensionAPI) => subagents(pi, { profileDirs: ['/path/to/bun
 ## Caveats
 
 - **In-process means no crash isolation.** Children share the parent session's event loop and memory; a pathological child can hurt the host. Untrusted or heavy parallel work should stay on pi-subagents (or a future RPC transport) until this platform grows an isolation option.
-- **Background completion is a notification, not a turn.** The completion message lands in the transcript but doesn't drive the agent — the model learns results when it next acts (or when asked to check `fleet`).
 - **Fleet history is per-machine, per-agent-dir.** `/fleet all` reads records under `~/.pi/agent/subagent-runs/` (or `$PI_SUBAGENTS_DIR/runs/`); they are garbage-collected at startup after 7 days (along with their patches and worktrees). The default `/fleet`, shortcut, tool list, and footer are current-session active views.
 - **Runs execute only while their host session is open.** They are detached in-process children: pi exiting or switching sessions interrupts them, and they continue when that session reopens (see **Durable runs** above). Cancel one for good with the `fleet` tool (`action: 'cancel'`).
 - Depends on pi SDK internals (`createAgentSession`, `DefaultResourceLoader` flags, `SessionManager.inMemory`) that could change across pi versions — runtime-aliased to the host at load time, but type-level drift would surface at extension load.
