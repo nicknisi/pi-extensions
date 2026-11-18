@@ -330,8 +330,9 @@ function body(name: string, o: ItemOptions, env: ItemEnv): Body | null {
     }
     case 'paste': {
       if (!env.states.includes('paste')) return null;
-      const lines = (rt.editor?.getText() ?? '').split('\n').length;
-      const pastes = rt.editor?.pasteCount() ?? 0;
+      const preview = rt.preview === 'paste'; // /composer preview's sample: 3 lines, 1 paste
+      const lines = preview ? 3 : (rt.editor?.getText() ?? '').split('\n').length;
+      const pastes = preview ? 1 : (rt.editor?.pasteCount() ?? 0);
       const parts = [
         `${lines} line${lines === 1 ? '' : 's'}`,
         ...(pastes ? [`${pastes} paste${pastes === 1 ? '' : 's'}`] : []),
