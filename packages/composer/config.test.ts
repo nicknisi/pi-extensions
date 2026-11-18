@@ -210,12 +210,26 @@ describe('prototype keys', () => {
 });
 
 describe('cacheDirIsPrivate', () => {
+  it('rejects the cache when ownership cannot be verified (no process.getuid)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'composer-cache-'));
+    const getuid = process.getuid;
+    try {
+      chmodSync(dir, 0o700);
+      Object.defineProperty(process, 'getuid', { value: undefined, configurable: true, writable: true });
+      expect(cacheDirIsPrivate(dir)).toBe(false);
+    } finally {
+      Object.defineProperty(process, 'getuid', { value: getuid, configurable: true, writable: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('accepts a 0700 dir and rejects symlinks, missing dirs and group/world-writable dirs', () => {
     const base = mkdtempSync(join(tmpdir(), 'composer-cache-'));
     try {
       const ok = join(base, 'ok');
       mkdirSync(ok, { mode: 0o700 });
-      expect(cacheDirIsPrivate(ok)).toBe(true);
+      // Accepted only where ownership can be verified; rejected without process.getuid (Windows).
+      expect(cacheDirIsPrivate(ok)).toBe(typeof process.getuid === 'function');
       const link = join(base, 'link');
       symlinkSync(ok, link);
       expect(cacheDirIsPrivate(link)).toBe(false);
