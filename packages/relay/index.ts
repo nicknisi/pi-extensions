@@ -635,7 +635,6 @@ export default function relay(pi: ExtensionAPI) {
         Type.Array(Type.String({ minLength: 1, maxLength: 256 }), {
           minItems: 1,
           maxItems: 64,
-          uniqueItems: true,
           description: 'Exact full Pi session IDs; defaults to all presence states and may include self.',
         }),
       ),

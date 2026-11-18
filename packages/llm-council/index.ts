@@ -694,7 +694,6 @@ export default function (pi: ExtensionAPI) {
       models: Type.Optional(
         Type.Array(Type.String({ minLength: 1 }), {
           minItems: 1,
-          uniqueItems: true,
           description: 'Member models for this call only. Provider/model IDs or unambiguous names.',
         }),
       ),
