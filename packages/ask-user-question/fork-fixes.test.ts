@@ -75,6 +75,21 @@ describe('fork fixes', () => {
     expect(r.content[0]).toMatchObject({ text: expect.stringContaining('unanswered') });
   });
 
+  it('keeps a note on a blank multi-select question when moving on', async () => {
+    const q = askTool(twoQuestions(true)).call();
+    await q.mounted;
+    q.press('n');
+    for (const c of 'none fit') q.press(c);
+    q.press(ENTER); // save the note, nothing checked
+    for (let i = 0; i < 3; i++) q.press(DOWN); // "Next"
+    q.press(ENTER);
+    q.press(ENTER); // Second: X
+    q.press(ENTER); // Submit
+    const r = await q.result;
+    expect(r.details).toMatchObject({ answers: [{ questionIndex: 0, notes: 'none fit' }, { answer: 'X' }] });
+    expect(r.content[0]).toMatchObject({ text: expect.stringContaining('none fit') });
+  });
+
   it("keeps another tab's note out of the global note's undo history", async () => {
     const q = askTool(twoQuestions(false)).call();
     await q.mounted;

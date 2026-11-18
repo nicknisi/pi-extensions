@@ -1,5 +1,6 @@
 import type { Theme } from '@earendil-works/pi-coding-agent';
 import { type Component, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
+import { TIMEOUT_MINUTES } from '../afk-timeout.js';
 import { t } from '../state/i18n-bridge.js';
 import { NO_INPUT_PLACEHOLDER } from '../tool/format-answer.js';
 import {
@@ -50,7 +51,7 @@ export function renderAskResult(
   }
   if (!details) return new WidthLines(() => [theme.fg('success', '✓')]);
   if (details.timedOut)
-    return new WidthLines(() => [theme.fg('warning', '⏱ no answer within 5 minutes, agent moved on')]);
+    return new WidthLines(() => [theme.fg('warning', `⏱ no answer within ${TIMEOUT_MINUTES} minutes, agent moved on`)]);
   if (details.cancelled) {
     return new WidthLines(() => [theme.fg('dim', `✗ ${t('transcript.no_answer', 'no answer')}`)]);
   }

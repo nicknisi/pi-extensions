@@ -10,6 +10,8 @@ A fork of [`@juicesharp/rpiv-ask-user-question`](https://github.com/juicesharp/r
 
 The result's `details` are `{ answers: [], cancelled: false, timedOut: true }`, and the transcript shows `⏱ no answer within 5 minutes, agent moved on`. The idea and wording come from [fitchmultz/pi-ask-question](https://github.com/fitchmultz/pi-ask-question). The timeout is fixed at 5 minutes and only applies in the terminal UI; questions shown through an RPC host's own dialogs wait indefinitely, as upstream does.
 
+Only keys the dialog receives count. Scrolling the transcript (the mouse wheel in fullscreen, or your terminal's scrollback) or just reading doesn't, because Pi handles those before the extension sees them. If you need longer than 5 minutes to read before answering, press any key in the dialog first, such as an arrow.
+
 When two questionnaires are open at once (one inline, one as an overlay), the inline one doesn't time out until the others close: closing it makes Pi focus its main editor, which would strand the overlay you may be answering. Aborting the tool call (Esc) also closes the dialog, as a cancel.
 
 **Other differences from upstream:**
