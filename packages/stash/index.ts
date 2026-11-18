@@ -64,8 +64,14 @@ function load(cwd: string): Draft[] {
   return drafts;
 }
 
-/** Write drafts durably: fsync the temp file, rename it into place, then fsync the directory. */
-function save(cwd: string, drafts: Draft[]): void {
+const BUSY = 'the stash is busy in another window; try again';
+
+/**
+ * Write drafts durably: fsync the temp file, rename it into place, then fsync
+ * the directory. `owned` is checked right before the rename, so a window whose
+ * lock was taken over never overwrites the new owner's write.
+ */
+function save(cwd: string, drafts: Draft[], owned: () => boolean): void {
   const file = stashFile(cwd);
   const tmp = `${file}.${randomUUID()}.tmp`;
   try {
@@ -76,18 +82,23 @@ function save(cwd: string, drafts: Draft[]): void {
     } finally {
       closeSync(fd);
     }
+    if (!owned()) throw new Error(BUSY);
     renameSync(tmp, file);
-    // Makes the rename itself survive a power loss. Windows can't open a directory.
-    if (process.platform !== 'win32') {
-      const dir = openSync(dirname(file), 'r');
-      try {
-        fsyncSync(dir);
-      } finally {
-        closeSync(dir);
-      }
-    }
   } finally {
     rmSync(tmp, { force: true });
+  }
+  // The update is committed once the rename succeeds; this only makes the rename itself
+  // survive a power loss, so a failure here must not undo a restore. Windows can't open a directory.
+  if (process.platform === 'win32') return;
+  try {
+    const dir = openSync(dirname(file), 'r');
+    try {
+      fsyncSync(dir);
+    } finally {
+      closeSync(dir);
+    }
+  } catch {
+    // best effort
   }
 }
 
@@ -99,40 +110,58 @@ function lockAge(lock: string): number {
   }
 }
 
+function lockOwner(lock: string): string | undefined {
+  try {
+    return readFileSync(join(lock, 'owner'), 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Run `fn` holding the directory's stash lock, so another Pi window can't read
  * and rewrite the same stash at the same time. `mkdir` is atomic, so whoever
- * creates the lock directory owns it.
+ * creates the lock directory owns it; an owner token inside lets a holder tell
+ * whether a window reclaiming a stale lock took its lock over.
  */
-function withLock<T>(cwd: string, fn: () => T): T {
+function withLock<T>(cwd: string, fn: (owned: () => boolean) => T): T {
   const lock = `${stashFile(cwd)}.lock`;
+  const token = randomUUID();
   mkdirSync(dirname(lock), { recursive: true, mode: 0o700 });
   const pause = new Int32Array(new SharedArrayBuffer(4));
   for (let attempt = 0; ; attempt++) {
     try {
       mkdirSync(lock);
-      break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      if (attempt >= LOCK_ATTEMPTS) throw new Error('the stash is busy in another window; try again');
-      // shortcut: two windows reclaiming the same stale lock at once could both proceed; needs a crash plus a collision.
+      if (attempt >= LOCK_ATTEMPTS) throw new Error(BUSY);
+      // Two windows can reclaim the same stale lock at once; the owner check in `save` stops the loser from writing.
       if (lockAge(lock) > STALE_LOCK_MS) rmSync(lock, { recursive: true, force: true });
       else Atomics.wait(pause, 0, 0, LOCK_RETRY_MS);
+      continue;
     }
+    try {
+      writeFileSync(join(lock, 'owner'), token);
+    } catch (error) {
+      rmSync(lock, { recursive: true, force: true });
+      throw error;
+    }
+    break;
   }
+  const owned = () => lockOwner(lock) === token;
   try {
-    return fn();
+    return fn(owned);
   } finally {
-    rmSync(lock, { recursive: true, force: true });
+    if (owned()) rmSync(lock, { recursive: true, force: true });
   }
 }
 
 /** Under the lock: re-read, change, and save only if `change` returned a new list. */
 function update(cwd: string, change: (drafts: Draft[]) => Draft[]): Draft[] {
-  return withLock(cwd, () => {
+  return withLock(cwd, (owned) => {
     const current = load(cwd);
     const drafts = change(current);
-    if (drafts !== current) save(cwd, drafts);
+    if (drafts !== current) save(cwd, drafts, owned);
     return drafts;
   });
 }
