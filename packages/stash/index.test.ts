@@ -1,19 +1,41 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import stash, { MAX_DRAFTS, preview, stashFile } from './index.js';
+import stash, { MAX_DRAFTS, preview, stashDir } from './index.js';
+
+// Lets a test make the next directory listing fail, to simulate an I/O error after a commit.
+const failures = vi.hoisted(() => ({ skip: 0, readdir: 0 }));
+vi.mock('node:fs', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...real,
+    readdirSync: ((...args: Parameters<typeof real.readdirSync>) => {
+      if (failures.skip > 0) failures.skip--;
+      else if (failures.readdir > 0) {
+        failures.readdir--;
+        throw new Error('EIO: simulated read failure');
+      }
+      return real.readdirSync(...args);
+    }) as typeof real.readdirSync,
+  };
+});
 
 let agentDir: string;
 beforeEach(() => {
-  agentDir = mkdtempSync(join(tmpdir(), 'pi-stash-'));
+  agentDir = fs.mkdtempSync(join(tmpdir(), 'pi-stash-'));
   vi.stubEnv('PI_CODING_AGENT_DIR', agentDir);
+  failures.skip = 0;
+  failures.readdir = 0;
 });
 afterEach(() => {
   vi.unstubAllEnvs();
-  rmSync(agentDir, { recursive: true, force: true });
+  fs.rmSync(agentDir, { recursive: true, force: true });
 });
+
+const saved = (cwd = '/work/repo') =>
+  fs.existsSync(stashDir(cwd)) ? fs.readdirSync(stashDir(cwd)).filter((name) => name.endsWith('.json')) : [];
 
 /** One pi window: an extension instance with its own editor and session id. */
 function window(session: string, cwd = '/work/repo') {
@@ -94,6 +116,8 @@ it("auto-restores only this session's drafts; Ctrl+S restores any window's", asy
   expect(b.text).toBe(''); // B's send must not pull in A's draft
   await b.ctrlS();
   expect(b.text).toBe('draft from A');
+  await a.ctrlS();
+  expect(a.text).toBe(''); // already claimed by B
 });
 
 it('keeps the newest drafts up to the cap', async () => {
@@ -102,58 +126,68 @@ it('keeps the newest drafts up to the cap', async () => {
     w.type(`draft ${i}`);
     await w.ctrlS();
   }
-  const saved = JSON.parse(readFileSync(stashFile('/work/repo'), 'utf8'));
-  expect(saved).toHaveLength(MAX_DRAFTS);
-  expect(saved[0].text).toBe('draft 1');
+  expect(saved()).toHaveLength(MAX_DRAFTS);
+  w.type('');
+  for (let i = MAX_DRAFTS; i >= 1; i--) {
+    await w.ctrlS();
+    expect(w.text).toBe(`draft ${i}`);
+    w.type('');
+  }
 });
 
-it('never overwrites an unreadable stash file, and keeps the editor text', async () => {
-  const file = stashFile('/work/repo');
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, '{ not json');
+it('skips and keeps an unreadable draft file', async () => {
+  fs.mkdirSync(stashDir('/work/repo'), { recursive: true });
+  const junk = join(stashDir('/work/repo'), '0000000000000000-junk.json');
+  fs.writeFileSync(junk, '{ not json');
+  const w = window('a');
+  w.type('good draft');
+  await w.ctrlS();
+  w.type('');
+  await w.ctrlS();
+  expect(w.text).toBe('good draft');
+  expect(fs.readFileSync(junk, 'utf8')).toBe('{ not json');
+});
+
+it('keeps the editor text when the draft cannot be saved', async () => {
+  fs.mkdirSync(join(agentDir, 'stash'), { recursive: true });
+  fs.writeFileSync(stashDir('/work/repo'), 'a file where the folder should be');
   const w = window('a');
   w.type('precious draft');
   await w.ctrlS();
   expect(w.text).toBe('precious draft');
-  expect(readFileSync(file, 'utf8')).toBe('{ not json');
   expect(w.notify).toHaveBeenCalledWith(expect.stringContaining('Stash failed'), 'error');
 });
 
-it('does not create a stash file when there is nothing to stash', async () => {
+it('still delivers a claimed draft when the widget refresh after it fails', async () => {
+  const w = window('a');
+  w.type('claimed draft');
+  await w.ctrlS();
+  w.type('');
+  failures.skip = 1; // take()'s listing works and claims the draft…
+  failures.readdir = 1; // …then the widget's listing fails
+  await w.ctrlS();
+  expect(w.text).toBe('claimed draft');
+  expect(saved()).toHaveLength(0);
+  expect(w.notify).toHaveBeenCalledWith(expect.stringContaining('simulated read failure'), 'error');
+});
+
+it('keeps a saved draft and clears the editor when the widget refresh fails', async () => {
+  const w = window('a');
+  w.type('saved draft');
+  failures.readdir = 2; // trim's listing and the widget's listing both fail
+  await w.ctrlS();
+  expect(w.text).toBe('');
+  expect(saved()).toHaveLength(1);
+  expect(w.notify).toHaveBeenCalledWith(expect.stringContaining('simulated read failure'), 'error');
+});
+
+it('does not create a stash folder when there is nothing to stash', async () => {
   const w = window('a');
   await w.submit();
   await w.ctrlS();
-  expect(existsSync(stashFile('/work/repo'))).toBe(false);
+  expect(fs.existsSync(stashDir('/work/repo'))).toBe(false);
 });
 
 it('previews the first line without control characters', () => {
   expect(preview('Evil\x1b[31m\x07draft\nsecond line')).toBe('Evil [31m draft');
-});
-
-it('releases the lock after saving, and reclaims one left by a crashed window', async () => {
-  const w = window('a');
-  const lock = `${stashFile('/work/repo')}.lock`;
-  w.type('first');
-  await w.ctrlS();
-  expect(existsSync(lock)).toBe(false);
-
-  mkdirSync(lock);
-  const old = new Date(Date.now() - 60_000);
-  utimesSync(lock, old, old);
-  w.type('second');
-  await w.ctrlS();
-  expect(w.text).toBe('');
-  expect(JSON.parse(readFileSync(stashFile('/work/repo'), 'utf8'))).toHaveLength(2);
-});
-
-it('waits for a window holding the lock, then gives up without losing the draft', async () => {
-  const w = window('a');
-  w.type('seed');
-  await w.ctrlS();
-  mkdirSync(`${stashFile('/work/repo')}.lock`); // held by another window right now
-  w.type('precious draft');
-  await w.ctrlS();
-  expect(w.text).toBe('precious draft');
-  expect(w.notify).toHaveBeenCalledWith(expect.stringContaining('busy in another window'), 'error');
-  expect(JSON.parse(readFileSync(stashFile('/work/repo'), 'utf8'))).toHaveLength(1);
 });

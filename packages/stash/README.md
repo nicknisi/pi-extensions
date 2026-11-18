@@ -30,11 +30,16 @@ ctrl+s      (with empty editor) pops the stash back manually
 
 ## Persistence
 
-Drafts are saved per working directory in `<agentDir>/stash/<hash of cwd>.json` (normally `~/.pi/agent/stash/`), so they survive `/reload`, quitting Pi, and starting a new session in the same directory. Every change takes a per-directory lock, re-reads the file, and replaces it atomically: a temporary file (mode `0600`) is flushed to disk, renamed into place, and the directory is flushed too, so a saved draft survives a crash or power loss. The lock is a `<file>.lock` directory held for a few milliseconds. Another window waits up to about two seconds for it, and a lock older than ten seconds (left by a crashed process) is cleared. The stack keeps the newest 10 drafts and drops the oldest.
+Drafts are saved per working directory under `<agentDir>/stash/<hash of cwd>/` (normally `~/.pi/agent/stash/`), one file per draft, so they survive `/reload`, quitting Pi, and starting a new session in the same directory. The stack keeps the newest 10 drafts and drops the oldest.
+
+No file is ever rewritten, so there is no lock:
+
+- **Stashing** writes the draft to a temporary file (mode `0600`), flushes it to disk, renames it into place, and flushes the folder, so a saved draft survives a crash or power loss. The editor is cleared only after the rename.
+- **Restoring** claims a draft by deleting its file. Only one window's delete can succeed, so two windows never get the same draft. The draft is put in the editor right after the claim, before anything else that could fail.
 
 Each draft remembers the session that stashed it. Sending a message only auto-restores drafts from the current session, so another Pi window in the same directory never has a draft pulled into its editor. `ctrl+s` on an empty editor restores the newest draft from any session.
 
-If the stash file can't be read or parsed, the extension reports an error and leaves both the file and the editor text alone, rather than overwriting what may be the only copy of a draft.
+A draft file that can't be read is skipped and left alone. If a draft can't be saved, the extension reports an error and leaves the text in the editor.
 
 ## Configuration
 
@@ -60,7 +65,6 @@ Merge these entries into your existing config, then run `/reload`. Model-save an
 - UI-gated: every handler checks `ctx.hasUI`; the extension is a no-op in headless/non-TUI mode.
 - Depends on the editor text APIs (`ctx.ui.getEditorText` / `setEditorText`) and the widget system (`ctx.ui.setWidget`) — these are stable pi extension APIs, but a pi version that changes editor or widget semantics could affect it.
 - The `before_agent_start` auto-restore pops a stash whenever a message is sent with an empty editor. If you intentionally sent a quick command and wanted the stash to stay parked, it will still be restored into the editor (you can `ctrl+s` it back). This matches Claude Code's behavior.
-- If another window holds the lock for more than about two seconds, the stash reports that it's busy and leaves the editor text alone.
 - The shifted replacement shortcuts require a terminal that reports them distinctly, for example through the Kitty keyboard protocol. The widget preview uses the Unicode glyphs `⧉` and `…`.
 
 ## Install
