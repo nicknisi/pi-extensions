@@ -1,0 +1,680 @@
+import { describe, expect, it } from 'vitest';
+import {
+  itemsRegular,
+  itemsWithOther,
+  makeApplyContext as makeCtx,
+  makeQuestion,
+  makeQuestionnaireState as makeState,
+} from '../test-fixtures.js';
+import type { QuestionAnswer, QuestionData } from '../tool/types.js';
+import type { QuestionnaireAction } from './key-router.js';
+import { type Effect, reduce } from './state-reducer.js';
+
+describe('reduce — nav', () => {
+  it('regular nav keeps the active draft buffer intact', () => {
+    const r = reduce(makeState(), { kind: 'nav', nextIndex: 1, inputValue: '' }, makeCtx());
+    expect(r.state.optionIndex).toBe(1);
+    expect(r.state.inputMode).toBe(false);
+    expect(r.effects).toEqual([]);
+  });
+
+  it("nav onto kind:'other' row with prior kind:'custom' answer restores the buffer", () => {
+    const answers = new Map<number, QuestionAnswer>([
+      [0, { questionIndex: 0, question: 'Pick one', kind: 'custom', answer: 'Hello' }],
+    ]);
+    const ctx = makeCtx({ itemsByTab: [itemsWithOther] });
+    const r = reduce(makeState({ answers }), { kind: 'nav', nextIndex: 2, inputValue: '' }, ctx);
+    expect(r.state.inputMode).toBe(true);
+    expect(r.effects).toEqual([{ kind: 'set_input_buffer', value: 'Hello' }]);
+  });
+
+  it('restores custom text from a prior multi-select answer', () => {
+    const answers = new Map<number, QuestionAnswer>([
+      [0, { questionIndex: 0, question: 'Pick one', kind: 'multi', answer: 'Other', selected: ['A'] }],
+    ]);
+    const ctx = makeCtx({ itemsByTab: [itemsWithOther] });
+    const r = reduce(makeState({ answers }), { kind: 'nav', nextIndex: 2, inputValue: '' }, ctx);
+    expect(r.effects).toEqual([{ kind: 'set_input_buffer', value: 'Other' }]);
+  });
+
+  it('does not copy a single-select option label into the custom editor', () => {
+    const answers = new Map<number, QuestionAnswer>([
+      [0, { questionIndex: 0, question: 'Pick one', kind: 'option', answer: 'A' }],
+    ]);
+    const ctx = makeCtx({ itemsByTab: [itemsWithOther] });
+    const r = reduce(makeState({ answers }), { kind: 'nav', nextIndex: 2, inputValue: '' }, ctx);
+    expect(r.effects).toEqual([{ kind: 'set_input_buffer', value: '' }]);
+  });
+
+  it("nav onto kind:'other' row with no draft resets the buffer", () => {
+    const ctx = makeCtx({ itemsByTab: [itemsWithOther] });
+    const r = reduce(makeState(), { kind: 'nav', nextIndex: 2, inputValue: '' }, ctx);
+    expect(r.state.inputMode).toBe(true);
+    expect(r.effects).toEqual([{ kind: 'set_input_buffer', value: '' }]);
+  });
+
+  it("nav back onto kind:'other' restores the in-flight draft ahead of a confirmed answer", () => {
+    const answers = new Map<number, QuestionAnswer>([
+      [0, { questionIndex: 0, question: 'Pick one', kind: 'custom', answer: 'confirmed' }],
+    ]);
+    const ctx = makeCtx({ itemsByTab: [itemsWithOther] });
+    const state = makeState({ answers, customDraftsByTab: new Map([[0, 'draft']]) });
+    const r = reduce(state, { kind: 'nav', nextIndex: 2, inputValue: '' }, ctx);
+    expect(r.effects).toEqual([{ kind: 'set_input_buffer', value: 'draft' }]);
+  });
+
+  it('an explicitly cleared draft does not resurrect a confirmed custom answer', () => {
+    const answers = new Map<number, QuestionAnswer>([
+      [0, { questionIndex: 0, question: 'Pick one', kind: 'custom', answer: 'confirmed' }],
+    ]);
+    const ctx = makeCtx({ itemsByTab: [itemsWithOther] });
+    const state = makeState({ answers, customDraftsByTab: new Map([[0, '']]) });
+    const r = reduce(state, { kind: 'nav', nextIndex: 2, inputValue: '' }, ctx);
+    expect(r.effects).toEqual([{ kind: 'set_input_buffer', value: '' }]);
+  });
+
+  it('snapshots the live input value when navigation leaves the custom row', () => {
+    const state = makeState({ optionIndex: 2, inputMode: true });
+    const ctx = makeCtx({ itemsByTab: [itemsWithOther] });
+    const r = reduce(state, { kind: 'nav', nextIndex: 1, inputValue: 'draft' }, ctx);
+    expect(r.state.customDraftsByTab.get(0)).toBe('draft');
+  });
+
+  it('persists checked options and custom text when navigation leaves the custom row', () => {
+    const questions = [makeQuestion({ multiSelect: true })];
+    const items = [...itemsWithOther, { kind: 'next' as const, label: 'Next' }];
+    const ctx = makeCtx({ questions, itemsByTab: [items] });
+    const state = makeState({ optionIndex: 2, inputMode: true, multiSelectChecked: new Set([0]) });
+    const r = reduce(state, { kind: 'nav', nextIndex: 3, inputValue: 'custom' }, ctx);
+    expect(r.state.answers.get(0)).toMatchObject({ kind: 'multi', selected: ['A'], answer: 'custom' });
+  });
+
+  it('does not persist whitespace-only custom text as a multi-select answer', () => {
+    const questions = [makeQuestion({ multiSelect: true })];
+    const items = [...itemsWithOther, { kind: 'next' as const, label: 'Next' }];
+    const ctx = makeCtx({ questions, itemsByTab: [items] });
+    const state = makeState({ optionIndex: 2, inputMode: true });
+    const r = reduce(state, { kind: 'nav', nextIndex: 3, inputValue: ' ' }, ctx);
+    expect(r.state.answers.has(0)).toBe(false);
+  });
+});
+
+describe('reduce — tab_switch', () => {
+  it('emits set_notes_focused(false) + set_notes_value', () => {
+    const r = reduce(
+      makeState(),
+      { kind: 'tab_switch', nextTab: 1 },
+      makeCtx({ questions: [makeQuestion(), makeQuestion()], itemsByTab: [itemsRegular, itemsRegular] }),
+    );
+    expect(r.state.currentTab).toBe(1);
+    expect(r.state.optionIndex).toBe(0);
+    expect(r.state.notesVisible).toBe(false);
+    expect(r.effects).toEqual([
+      { kind: 'set_notes_focused', focused: false },
+      { kind: 'set_notes_value', value: '' },
+      { kind: 'set_input_buffer', value: '' },
+    ]);
+  });
+
+  it("rehydrates the target question's custom draft without leaking the current tab", () => {
+    const questions = [makeQuestion(), makeQuestion()];
+    const ctx = makeCtx({ questions, itemsByTab: [itemsRegular, itemsRegular] });
+    const state = makeState({
+      customDraftsByTab: new Map([
+        [0, 'first'],
+        [1, 'second'],
+      ]),
+    });
+    const r = reduce(state, { kind: 'tab_switch', nextTab: 1 }, ctx);
+    expect(r.effects).toContainEqual({ kind: 'set_input_buffer', value: 'second' });
+  });
+
+  const twoTabs = (items: ReadonlyArray<(typeof itemsWithOther)[number]>) =>
+    makeCtx({ questions: [makeQuestion(), makeQuestion()], itemsByTab: [itemsRegular, items] });
+  const answered = (answer: Omit<QuestionAnswer, 'questionIndex' | 'question'>) =>
+    makeState({ answers: new Map([[1, { questionIndex: 1, question: 'Pick one', ...answer }]]) });
+
+  it('focuses the previously chosen option when revisiting an answered tab', () => {
+    const r = reduce(
+      answered({ kind: 'option', answer: 'B' }),
+      { kind: 'tab_switch', nextTab: 1 },
+      twoTabs(itemsRegular),
+    );
+    expect(r.state.optionIndex).toBe(1);
+    expect(r.state.inputMode).toBe(false);
+  });
+
+  it('focuses the Next row when revisiting a multi-select answered tab', () => {
+    const items = [...itemsWithOther, { kind: 'next' as const, label: 'Next' }];
+    const r = reduce(
+      answered({ kind: 'multi', answer: null, selected: ['A'] }),
+      { kind: 'tab_switch', nextTab: 1 },
+      twoTabs(items),
+    );
+    expect(r.state.optionIndex).toBe(3);
+    expect(r.state.inputMode).toBe(false);
+  });
+
+  it('starts a custom-answered tab at row 0 outside input mode', () => {
+    const r = reduce(
+      answered({ kind: 'custom', answer: 'typed' }),
+      { kind: 'tab_switch', nextTab: 1 },
+      twoTabs(itemsWithOther),
+    );
+    expect(r.state.optionIndex).toBe(0);
+    expect(r.state.inputMode).toBe(false);
+  });
+
+  it('falls back to row 0 when the saved option label is not in the list', () => {
+    const r = reduce(
+      answered({ kind: 'option', answer: 'gone' }),
+      { kind: 'tab_switch', nextTab: 1 },
+      twoTabs(itemsRegular),
+    );
+    expect(r.state.optionIndex).toBe(0);
+  });
+});
+
+describe('reduce — confirm', () => {
+  it('regular option without preview emits done with the answer', () => {
+    const action: QuestionnaireAction = {
+      kind: 'confirm',
+      answer: { questionIndex: 0, question: 'Pick one', kind: 'option', answer: 'A' },
+    };
+    const r = reduce(makeState(), action, makeCtx());
+    expect(r.state.answers.get(0)?.answer).toBe('A');
+    expect(r.effects).toEqual([{ kind: 'done', result: { answers: [r.state.answers.get(0)!], cancelled: false } }]);
+  });
+
+  it('makes the confirmed custom answer authoritative by removing its draft', () => {
+    const action: QuestionnaireAction = {
+      kind: 'confirm',
+      answer: { questionIndex: 0, question: 'Pick one', kind: 'custom', answer: 'latest' },
+    };
+    const state = makeState({ customDraftsByTab: new Map([[0, 'stale']]) });
+    const r = reduce(state, action, makeCtx());
+    expect(r.state.customDraftsByTab.has(0)).toBe(false);
+    expect(r.state.answers.get(0)?.answer).toBe('latest');
+  });
+
+  it('regular option matching a preview-bearing option augments answer.preview', () => {
+    const questions = [
+      makeQuestion({
+        options: [
+          { label: 'A', description: 'a', preview: 'code' },
+          { label: 'B', description: 'b' },
+        ],
+      }),
+    ];
+    const action: QuestionnaireAction = {
+      kind: 'confirm',
+      answer: { questionIndex: 0, question: 'Pick one', kind: 'option', answer: 'A' },
+    };
+    const r = reduce(makeState(), action, makeCtx({ questions }));
+    expect(r.state.answers.get(0)?.preview).toBe('code');
+  });
+
+  it('merges pendingNotes from notesByTab into the confirmed answer', () => {
+    const action: QuestionnaireAction = {
+      kind: 'confirm',
+      answer: { questionIndex: 0, question: 'Pick one', kind: 'option', answer: 'A' },
+    };
+    const state = makeState({ notesByTab: new Map([[0, '  side note  ']]) });
+    const r = reduce(state, action, makeCtx());
+    expect(r.state.answers.get(0)?.notes).toBe('  side note  ');
+  });
+
+  it('autoAdvanceTab dispatches a tab_switch result instead of done', () => {
+    const action: QuestionnaireAction = {
+      kind: 'confirm',
+      answer: { questionIndex: 0, question: 'Pick one', kind: 'option', answer: 'A' },
+      autoAdvanceTab: 1,
+    };
+    const ctx = makeCtx({ questions: [makeQuestion(), makeQuestion()], itemsByTab: [itemsRegular, itemsRegular] });
+    const r = reduce(makeState(), action, ctx);
+    expect(r.state.currentTab).toBe(1);
+    expect(r.effects.some((e) => e.kind === 'set_notes_focused')).toBe(true);
+    expect(r.effects.some((e) => e.kind === 'done')).toBe(false);
+  });
+});
+
+describe('reduce — toggle', () => {
+  it('toggles index 0 on then off and persists into answers', () => {
+    const ctx = makeCtx({ questions: [makeQuestion({ multiSelect: true })] });
+    const r1 = reduce(makeState(), { kind: 'toggle', index: 0 }, ctx);
+    expect(r1.state.multiSelectChecked.has(0)).toBe(true);
+    expect(r1.state.answers.get(0)?.selected).toEqual(['A']);
+    const r2 = reduce(r1.state, { kind: 'toggle', index: 0 }, ctx);
+    expect(r2.state.multiSelectChecked.has(0)).toBe(false);
+    expect(r2.state.answers.has(0)).toBe(false);
+  });
+
+  it('preserves committed custom text while toggling another option', () => {
+    const ctx = makeCtx({ questions: [makeQuestion({ multiSelect: true })] });
+    const answers = new Map<number, QuestionAnswer>([
+      [0, { questionIndex: 0, question: 'Pick one', kind: 'multi', answer: 'custom', selected: ['A'] }],
+    ]);
+    const state = makeState({ answers, multiSelectChecked: new Set([0]) });
+    const r = reduce(state, { kind: 'toggle', index: 1 }, ctx);
+    expect(r.state.answers.get(0)).toMatchObject({ selected: ['A', 'B'], answer: 'custom' });
+  });
+});
+
+describe('reduce — round-trip property [toggle, tab_switch, tab_switch_back] preserves multiSelectChecked (precedent f4fdd25)', () => {
+  it('multiSelectChecked is reconstructed from answers on tab-back', () => {
+    const questions = [makeQuestion({ multiSelect: true }), makeQuestion()];
+    const ctx = makeCtx({ questions, itemsByTab: questions.map(() => itemsRegular) });
+
+    let s = makeState();
+    s = reduce(s, { kind: 'toggle', index: 0 }, ctx).state;
+    s = reduce(s, { kind: 'toggle', index: 1 }, ctx).state;
+    expect([...s.multiSelectChecked].sort()).toEqual([0, 1]);
+    expect(s.answers.get(0)?.selected).toEqual(['A', 'B']);
+
+    s = reduce(s, { kind: 'tab_switch', nextTab: 1 }, ctx).state;
+    expect([...s.multiSelectChecked]).toEqual([]);
+
+    s = reduce(s, { kind: 'tab_switch', nextTab: 0 }, ctx).state;
+    expect([...s.multiSelectChecked].sort()).toEqual([0, 1]);
+  });
+});
+
+describe('reduce — multi_confirm', () => {
+  it('persists answer + multiSelectChecked from action.selected', () => {
+    const ctx = makeCtx({ questions: [makeQuestion({ multiSelect: true })] });
+    const r = reduce(makeState(), { kind: 'multi_confirm', selected: ['A', 'B'], answer: null }, ctx);
+    expect(r.state.answers.get(0)?.selected).toEqual(['A', 'B']);
+    expect([...r.state.multiSelectChecked].sort()).toEqual([0, 1]);
+    expect(r.effects.some((e) => e.kind === 'done')).toBe(true);
+  });
+
+  it('persists selected labels and custom text together', () => {
+    const ctx = makeCtx({ questions: [makeQuestion({ multiSelect: true })] });
+    const state = makeState({ customDraftsByTab: new Map([[0, 'stale']]) });
+    const r = reduce(state, { kind: 'multi_confirm', selected: ['A'], answer: 'custom' }, ctx);
+    expect(r.state.answers.get(0)).toMatchObject({ kind: 'multi', selected: ['A'], answer: 'custom' });
+    expect(r.state.customDraftsByTab.has(0)).toBe(false);
+  });
+});
+
+describe('reduce — cancel/submit', () => {
+  it('cancel emits done with cancelled: true', () => {
+    const r = reduce(makeState(), { kind: 'cancel' }, makeCtx());
+    expect(r.effects).toEqual([{ kind: 'done', result: { answers: [], cancelled: true } }]);
+  });
+  it('submit emits done with cancelled: false', () => {
+    const r = reduce(makeState(), { kind: 'submit' }, makeCtx());
+    expect(r.effects).toEqual([{ kind: 'done', result: { answers: [], cancelled: false } }]);
+  });
+});
+
+describe('reduce — global note lift (doneFor)', () => {
+  const twoQuestionCtx = makeCtx({
+    questions: [makeQuestion(), makeQuestion()],
+    itemsByTab: [itemsRegular, itemsRegular],
+  });
+
+  it('submit on the Submit tab lifts notesByTab[questions.length] into result.globalNote (strict toEqual)', () => {
+    const state = makeState({ currentTab: 2, notesByTab: new Map([[2, 'ship it Friday']]) });
+    const r = reduce(state, { kind: 'submit' }, twoQuestionCtx);
+    expect(r.effects).toEqual([
+      { kind: 'done', result: { answers: [], cancelled: false, globalNote: 'ship it Friday' } },
+    ]);
+  });
+
+  it('cancel with a committed note still lifts it (attach-on-cancel — no cancelled guard)', () => {
+    const state = makeState({ currentTab: 2, notesByTab: new Map([[2, 'note survives decline']]) });
+    const r = reduce(state, { kind: 'cancel' }, twoQuestionCtx);
+    expect(r.effects).toEqual([
+      { kind: 'done', result: { answers: [], cancelled: true, globalNote: 'note survives decline' } },
+    ]);
+  });
+
+  it('note-free submit/cancel/confirm produce the key absent (never undefined-assigned)', () => {
+    const submit = reduce(makeState(), { kind: 'submit' }, twoQuestionCtx);
+    const cancel = reduce(makeState(), { kind: 'cancel' }, twoQuestionCtx);
+    const confirm = reduce(
+      makeState(),
+      { kind: 'confirm', answer: { questionIndex: 0, question: 'Pick one', kind: 'option', answer: 'A' } },
+      twoQuestionCtx,
+    );
+    for (const r of [submit, cancel, confirm]) {
+      const done = r.effects[0] as Extract<Effect, { kind: 'done' }>;
+      expect(done.kind).toBe('done');
+      expect('globalNote' in done.result).toBe(false);
+    }
+  });
+
+  it('single-question dialog: a per-question note rides answers[0].notes, never globalNote', () => {
+    const state = makeState({ notesByTab: new Map([[0, 'per-question note']]) });
+    const r = reduce(
+      state,
+      { kind: 'confirm', answer: { questionIndex: 0, question: 'Pick one', kind: 'option', answer: 'A' } },
+      makeCtx(),
+    );
+    const done = r.effects[0] as Extract<Effect, { kind: 'done' }>;
+    expect(done.result.answers[0]?.notes).toBe('per-question note');
+    expect('globalNote' in done.result).toBe(false);
+  });
+});
+
+describe('reduce — notes_enter / notes_exit / notes_forward', () => {
+  it('notes_enter seeds state.notesDraft from existing answer.notes and emits set_notes_value', () => {
+    const answers = new Map<number, QuestionAnswer>([
+      [0, { questionIndex: 0, question: 'q', kind: 'option', answer: 'A', notes: 'old note' }],
+    ]);
+    const r = reduce(makeState({ answers }), { kind: 'notes_enter' }, makeCtx());
+    expect(r.state.notesVisible).toBe(true);
+    expect(r.state.notesDraft).toBe('old note');
+    expect(r.effects).toEqual([
+      { kind: 'set_notes_value', value: 'old note' },
+      { kind: 'set_notes_focused', focused: true },
+    ]);
+  });
+
+  it('notes_enter seeds notesDraft from notesByTab when the option is not yet confirmed (regression: reopening cleared the note)', () => {
+    // User typed a note and pressed Enter (notes_exit) BEFORE confirming the option, so the
+    // note lives only in notesByTab — answers has no entry yet. Reopening the editor must
+    // rehydrate from notesByTab, not start empty (which would delete the note on next close).
+    const state = makeState({ notesByTab: new Map([[0, 'pending note']]) });
+    const r = reduce(state, { kind: 'notes_enter' }, makeCtx());
+    expect(r.state.notesVisible).toBe(true);
+    expect(r.state.notesDraft).toBe('pending note');
+    expect(r.effects).toEqual([
+      { kind: 'set_notes_value', value: 'pending note' },
+      { kind: 'set_notes_focused', focused: true },
+    ]);
+  });
+
+  it('notes_enter prefers notesByTab over a committed answer.notes', () => {
+    const answers = new Map<number, QuestionAnswer>([
+      [0, { questionIndex: 0, question: 'q', kind: 'option', answer: 'A', notes: 'committed' }],
+    ]);
+    const r = reduce(
+      makeState({ answers, notesByTab: new Map([[0, 'in-flight edit']]) }),
+      { kind: 'notes_enter' },
+      makeCtx(),
+    );
+    expect(r.state.notesDraft).toBe('in-flight edit');
+  });
+
+  it('notes_exit with empty notesDraft clears notesByTab + strips answer.notes', () => {
+    const answers = new Map<number, QuestionAnswer>([
+      [0, { questionIndex: 0, question: 'q', kind: 'option', answer: 'A', notes: 'old note' }],
+    ]);
+    const state = makeState({
+      answers,
+      notesByTab: new Map([[0, 'old note']]),
+      notesVisible: true,
+      notesDraft: '',
+    });
+    const r = reduce(state, { kind: 'notes_exit' }, makeCtx());
+    expect(r.state.notesVisible).toBe(false);
+    expect(r.state.notesByTab.has(0)).toBe(false);
+    expect(r.state.answers.get(0)?.notes).toBeUndefined();
+  });
+
+  it('notes_exit trims state.notesDraft before persisting', () => {
+    const answers = new Map<number, QuestionAnswer>([
+      [0, { questionIndex: 0, question: 'q', kind: 'option', answer: 'A' }],
+    ]);
+    const r = reduce(
+      makeState({ answers, notesVisible: true, notesDraft: '  fresh  ' }),
+      { kind: 'notes_exit' },
+      makeCtx(),
+    );
+    expect(r.state.notesByTab.get(0)).toBe('fresh');
+    expect(r.state.answers.get(0)?.notes).toBe('fresh');
+  });
+
+  it('notes_exit with whitespace-only notesDraft clears notesByTab + strips answer.notes', () => {
+    const answers = new Map<number, QuestionAnswer>([
+      [0, { questionIndex: 0, question: 'q', kind: 'option', answer: 'A', notes: 'old note' }],
+    ]);
+    const r = reduce(
+      makeState({
+        answers,
+        notesByTab: new Map([[0, 'old note']]),
+        notesVisible: true,
+        notesDraft: '   ',
+      }),
+      { kind: 'notes_exit' },
+      makeCtx(),
+    );
+    expect(r.state.notesByTab.has(0)).toBe(false);
+    expect(r.state.answers.get(0)?.notes).toBeUndefined();
+  });
+
+  it('notes_forward emits a single forward_notes_keystroke effect with no state change', () => {
+    const s = makeState({ notesVisible: true, notesDraft: 'hel' });
+    const r = reduce(s, { kind: 'notes_forward', data: 'l' }, makeCtx());
+    expect(r.state).toBe(s);
+    expect(r.effects).toEqual([{ kind: 'forward_notes_keystroke', data: 'l' }]);
+  });
+});
+
+describe('reduce — custom-input controls', () => {
+  it('input_clear clears the headless input buffer and records an explicit empty draft', () => {
+    const state = makeState({ inputMode: true, customDraftsByTab: new Map([[0, 'draft']]) });
+    const r = reduce(state, { kind: 'input_clear' }, makeCtx());
+    expect(r.state.customDraftsByTab.get(0)).toBe('');
+    expect(r.effects).toEqual([{ kind: 'clear_input_buffer' }]);
+  });
+
+  it('input_edit opens the external editor with the current draft', () => {
+    const r = reduce(makeState({ inputMode: true }), { kind: 'input_edit', value: 'draft' }, makeCtx());
+    expect(r.effects).toEqual([{ kind: 'open_input_editor', value: 'draft' }]);
+  });
+
+  it('input_replace stores and rehydrates the edited value', () => {
+    const r = reduce(makeState({ inputMode: true }), { kind: 'input_replace', value: 'edited' }, makeCtx());
+    expect(r.state.customDraftsByTab.get(0)).toBe('edited');
+    expect(r.effects).toEqual([{ kind: 'set_input_buffer', value: 'edited' }]);
+  });
+});
+
+describe('reduce — submit_nav / ignore', () => {
+  it('submit_nav updates submitChoiceIndex with no effects', () => {
+    const r = reduce(makeState(), { kind: 'submit_nav', nextIndex: 1 }, makeCtx());
+    expect(r.state.submitChoiceIndex).toBe(1);
+    expect(r.effects).toEqual([]);
+  });
+
+  it('ignore is identity (state unchanged, no effects)', () => {
+    const s = makeState({ optionIndex: 2 });
+    const r = reduce(s, { kind: 'ignore' }, makeCtx());
+    expect(r.state).toEqual(s);
+    expect(r.effects).toEqual([]);
+  });
+});
+
+describe('confirmHandler — multi-select custom compatibility', () => {
+  const multiQ: QuestionData = {
+    question: 'areas?',
+    header: 'H',
+    multiSelect: true,
+    options: [
+      { label: 'FE', description: 'f' },
+      { label: 'BE', description: 'b' },
+    ],
+  };
+
+  it('normalizes a legacy custom confirm and preserves pre-existing checks', () => {
+    const state = makeState({
+      currentTab: 0,
+      multiSelectChecked: new Set([0, 1]),
+    });
+    const ctx = makeCtx({ questions: [multiQ] });
+    const result = reduce(
+      state,
+      { kind: 'confirm', answer: { questionIndex: 0, question: 'areas?', kind: 'custom', answer: 'custom-text' } },
+      ctx,
+    );
+    expect([...result.state.multiSelectChecked]).toEqual([0, 1]);
+    expect(result.state.answers.get(0)).toMatchObject({
+      kind: 'multi',
+      selected: ['FE', 'BE'],
+      answer: 'custom-text',
+    });
+  });
+
+  it('option confirm on a single-select tab leaves multiSelectChecked untouched (no spurious clear)', () => {
+    const singleQ: QuestionData = { question: 'pick?', header: 'H', options: [{ label: 'A', description: 'a' }] };
+    const state = makeState({ currentTab: 0, multiSelectChecked: new Set([0]) });
+    const ctx = makeCtx({ questions: [singleQ] });
+    const result = reduce(
+      state,
+      { kind: 'confirm', answer: { questionIndex: 0, question: 'pick?', kind: 'option', answer: 'A' } },
+      ctx,
+    );
+    expect(result.state.multiSelectChecked.size).toBe(1);
+  });
+});
+
+describe('reduce — toggle_collapsed', () => {
+  it('flips false → true and emits set_overlay_hidden(true) so the runtime hides the overlay', () => {
+    const r = reduce(makeState(), { kind: 'toggle_collapsed' }, makeCtx());
+    expect(r.state.collapsed).toBe(true);
+    expect(r.effects).toEqual([{ kind: 'set_overlay_hidden', hidden: true }]);
+  });
+
+  it('flips true → false (expand round-trip) and emits set_overlay_hidden(false)', () => {
+    const r = reduce(makeState({ collapsed: true }), { kind: 'toggle_collapsed' }, makeCtx());
+    expect(r.state.collapsed).toBe(false);
+    expect(r.effects).toEqual([{ kind: 'set_overlay_hidden', hidden: false }]);
+  });
+
+  it('preserves orthogonal fields — collapse is a pure render-mode flip, never touches answers/optionIndex/notes', () => {
+    // Regression guard: a future refactor that resets nav/notes on collapse would silently
+    // drop the user's mid-edit work. The collapse toggle must be additive only.
+    const answers = new Map<QuestionAnswer['questionIndex'], QuestionAnswer>([
+      [0, { questionIndex: 0, question: 'Pick one', kind: 'option', answer: 'A' }],
+    ]);
+    const s = makeState({ optionIndex: 1, notesVisible: true, notesDraft: 'in-flight', answers });
+    const r = reduce(s, { kind: 'toggle_collapsed' }, makeCtx());
+    expect(r.state.collapsed).toBe(true);
+    expect(r.state.optionIndex).toBe(1);
+    expect(r.state.notesVisible).toBe(true);
+    expect(r.state.notesDraft).toBe('in-flight');
+    expect(r.state.answers).toBe(answers);
+    expect(r.effects).toEqual([{ kind: 'set_overlay_hidden', hidden: true }]);
+  });
+});
+
+describe('reduce — multi-select notes merge (dormant code lit up by universal `n` gate)', () => {
+  it('toggle attaches a pending note onto the multi answer (persistMultiSelectAnswer merge)', () => {
+    const ctx = makeCtx({ questions: [makeQuestion({ multiSelect: true })] });
+    const state = makeState({ notesByTab: new Map([[0, 'side note']]) });
+    const r = reduce(state, { kind: 'toggle', index: 0 }, ctx);
+    const answer = r.state.answers.get(0);
+    expect(answer?.kind).toBe('multi');
+    expect(answer?.selected).toEqual(['A']);
+    expect(answer?.notes).toBe('side note');
+  });
+
+  it('toggle with empty notesByTab persists a multi answer with NO notes field (negative case)', () => {
+    const ctx = makeCtx({ questions: [makeQuestion({ multiSelect: true })] });
+    const r = reduce(makeState(), { kind: 'toggle', index: 0 }, ctx);
+    const answer = r.state.answers.get(0);
+    expect(answer?.kind).toBe('multi');
+    expect(answer?.selected).toEqual(['A']);
+    expect(answer?.notes).toBeUndefined();
+  });
+
+  it('multi_confirm attaches a pending note onto the multi answer (multiConfirmHandler merge)', () => {
+    const ctx = makeCtx({ questions: [makeQuestion({ multiSelect: true })] });
+    const state = makeState({ notesByTab: new Map([[0, 'confirm note']]) });
+    const r = reduce(state, { kind: 'multi_confirm', selected: ['A', 'B'], answer: null }, ctx);
+    const answer = r.state.answers.get(0);
+    expect(answer?.kind).toBe('multi');
+    expect(answer?.selected).toEqual(['A', 'B']);
+    expect(answer?.notes).toBe('confirm note');
+  });
+
+  it('strip round-trip: notes_exit with an empty draft strips notes from a multi answer; a subsequent toggle does not resurrect it', () => {
+    const ctx = makeCtx({ questions: [makeQuestion({ multiSelect: true })] });
+    const answers = new Map<number, QuestionAnswer>([
+      [0, { questionIndex: 0, question: 'Pick one', kind: 'multi', answer: null, selected: ['A'], notes: 'stale' }],
+    ]);
+    let state = makeState({
+      answers,
+      notesByTab: new Map([[0, 'stale']]),
+      notesVisible: true,
+      notesDraft: '   ',
+      multiSelectChecked: new Set([0]),
+    });
+    // notes_exit with a whitespace-only draft strips `notes` from the answer AND clears notesByTab.
+    state = reduce(state, { kind: 'notes_exit' }, ctx).state;
+    expect(state.answers.get(0)?.notes).toBeUndefined();
+    expect(state.notesByTab.has(0)).toBe(false);
+    // A subsequent toggle persists a multi answer WITHOUT resurrecting notes —
+    // persistMultiSelectAnswer reads the now-empty notesByTab, not the stripped answer.
+    const after = reduce(state, { kind: 'toggle', index: 1 }, ctx).state;
+    expect(after.answers.get(0)?.selected).toEqual(['A', 'B']);
+    expect(after.answers.get(0)?.notes).toBeUndefined();
+  });
+});
+
+describe('reduce — global note at the Submit-tab pseudo-index', () => {
+  // questions.length === 2 → the Submit tab (and its global note) live at index 2.
+  const twoQuestionCtx = makeCtx({
+    questions: [makeQuestion(), makeQuestion()],
+    itemsByTab: [itemsRegular, itemsRegular],
+  });
+
+  function submitState(over: Partial<Parameters<typeof makeState>[0]> = {}) {
+    return makeState({ currentTab: 2, ...over });
+  }
+
+  it('notes_enter seeds notesDraft from notesByTab[questions.length]', () => {
+    const r = reduce(
+      submitState({ notesByTab: new Map([[2, 'ship it Friday']]) }),
+      { kind: 'notes_enter' },
+      twoQuestionCtx,
+    );
+    expect(r.state.notesVisible).toBe(true);
+    expect(r.state.notesDraft).toBe('ship it Friday');
+    expect(r.effects).toEqual([
+      { kind: 'set_notes_value', value: 'ship it Friday' },
+      { kind: 'set_notes_focused', focused: true },
+    ]);
+  });
+
+  it('notes_exit writes the trimmed draft into notesByTab[questions.length], leaving answers untouched', () => {
+    const answers = new Map<number, QuestionAnswer>([
+      [0, { questionIndex: 0, question: 'Pick one', kind: 'option', answer: 'A' }],
+    ]);
+    const r = reduce(
+      submitState({ answers, notesVisible: true, notesDraft: '  global  ' }),
+      { kind: 'notes_exit' },
+      twoQuestionCtx,
+    );
+    expect(r.state.notesVisible).toBe(false);
+    expect(r.state.notesByTab.get(2)).toBe('global');
+    // Side-band only: the pseudo-index owns no answer, and existing answers are invariant.
+    expect(r.state.answers.get(2)).toBeUndefined();
+    expect([...r.state.answers.entries()]).toEqual([...answers.entries()]);
+  });
+
+  it('notes_exit with an empty draft deletes the pseudo-index key', () => {
+    const r = reduce(
+      submitState({ notesByTab: new Map([[2, 'stale']]), notesVisible: true, notesDraft: '   ' }),
+      { kind: 'notes_exit' },
+      twoQuestionCtx,
+    );
+    expect(r.state.notesByTab.has(2)).toBe(false);
+  });
+
+  it('tab away and back reseeds the shared editor via switchTabResult', () => {
+    let s = submitState({ notesByTab: new Map([[2, 'keep me']]) });
+    s = reduce(s, { kind: 'tab_switch', nextTab: 0 }, twoQuestionCtx).state;
+    // Leaving the Submit tab closes the editor and seeds tab 0's (empty) note value.
+    expect(s.currentTab).toBe(0);
+    expect(s.notesVisible).toBe(false);
+    expect(s.notesDraft).toBe('');
+    s = reduce(s, { kind: 'tab_switch', nextTab: 2 }, twoQuestionCtx).state;
+    // Returning to the Submit tab reseeds the global draft from notesByTab[2].
+    expect(s.currentTab).toBe(2);
+    expect(s.notesDraft).toBe('keep me');
+  });
+});

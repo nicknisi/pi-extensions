@@ -74,6 +74,8 @@ importers:
         specifier: ^1.13.0
         version: 1.13.0
 
+  packages/ask-user-question: {}
+
   packages/ast-grep:
     dependencies:
       '@nicknisi/pi-shared':

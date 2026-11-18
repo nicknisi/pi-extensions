@@ -1,0 +1,399 @@
+import { Key, matchesKey } from '@earendil-works/pi-tui';
+import type { QuestionAnswer } from '../tool/types.js';
+import { ROW_INTENT_META } from './row-intent.js';
+import type { QuestionnaireRuntime, QuestionnaireState } from './state.js';
+
+const KEYBIND_UP = 'tui.select.up';
+const KEYBIND_DOWN = 'tui.select.down';
+const KEYBIND_CONFIRM = 'tui.select.confirm';
+const KEYBIND_SUBMIT = 'tui.input.submit';
+const KEYBIND_CANCEL = 'tui.select.cancel';
+const KEYBIND_NEW_LINE = 'tui.input.newLine';
+const KEYBIND_EDITOR_UP = 'tui.editor.cursorUp';
+const KEYBIND_EDITOR_DOWN = 'tui.editor.cursorDown';
+const KEYBIND_CLEAR = 'tui.editor.deleteToLineStart';
+const KEYBIND_EXTERNAL_EDITOR = 'app.editor.external';
+
+const NOTES_ACTIVATE_KEY = 'n';
+
+/**
+ * The notes shortcut. A single-character key matches the character as typed, so a
+ * non-Latin one works (pi-tui's key parser knows only ASCII); anything else matches as
+ * a pi-tui key spec. A non-string key — a stale outer module, as with `collapseKey`
+ * below — falls back to `n`.
+ */
+function matchesNotesKey(data: string, notesKey: unknown): boolean {
+  const key = typeof notesKey === 'string' ? notesKey : NOTES_ACTIVATE_KEY;
+  return data === key || matchesKey(data, key as Parameters<typeof matchesKey>[1]);
+}
+
+export type QuestionnaireAction =
+  | { kind: 'nav'; nextIndex: number; inputValue: string }
+  | { kind: 'input_clear' }
+  | { kind: 'input_edit'; value: string }
+  | { kind: 'input_replace'; value: string }
+  | { kind: 'tab_switch'; nextTab: number }
+  | { kind: 'confirm'; answer: QuestionAnswer; autoAdvanceTab?: number | undefined }
+  | { kind: 'toggle'; index: number }
+  | { kind: 'multi_confirm'; selected: string[]; answer: string | null; autoAdvanceTab?: number | undefined }
+  | { kind: 'cancel' }
+  | { kind: 'notes_enter' }
+  | { kind: 'notes_exit' }
+  | { kind: 'submit' }
+  | { kind: 'submit_nav'; nextIndex: 0 | 1 }
+  | { kind: 'notes_forward'; data: string }
+  /** Flip `state.collapsed`. Always available, regardless of inner mode (see top intercept in `routeKey`). */
+  | { kind: 'toggle_collapsed' }
+  | { kind: 'ignore' };
+
+export interface QuestionnaireKeybindings {
+  matches(data: string, name: string): boolean;
+}
+
+// Confirm has two semantic sources: `tui.select.confirm` (the select-list default)
+// and `tui.input.submit` (the user's "send" key). A Slack-style configuration folds
+// `enter` into `tui.input.newLine` and moves submit elsewhere (e.g. `ctrl+enter`);
+// the newline checks below stay first, so without the submit source every confirm
+// branch would be shadowed by the collision and no key could confirm (#156). With
+// pi defaults both names resolve to `enter`, so matching either is equivalent.
+function isConfirm(kb: QuestionnaireKeybindings, data: string): boolean {
+  return kb.matches(data, KEYBIND_CONFIRM) || kb.matches(data, KEYBIND_SUBMIT);
+}
+
+export function wrapTab(index: number, total: number): number {
+  if (total <= 0) return 0;
+  return ((index % total) + total) % total;
+}
+
+export function allAnswered(state: QuestionnaireState, runtime: QuestionnaireRuntime): boolean {
+  if (runtime.questions.length === 0) return false;
+  for (let i = 0; i < runtime.questions.length; i++) {
+    if (!state.answers.has(i)) return false;
+  }
+  return true;
+}
+
+function totalTabs(runtime: QuestionnaireRuntime): number {
+  return runtime.isMulti ? runtime.questions.length + 1 : 1;
+}
+
+function computeAutoAdvanceTab(state: QuestionnaireState, runtime: QuestionnaireRuntime): number | undefined {
+  if (!runtime.isMulti) return undefined;
+  if (state.currentTab < runtime.questions.length - 1) return state.currentTab + 1;
+  return runtime.questions.length;
+}
+
+function buildSingleSelectAnswer(state: QuestionnaireState, runtime: QuestionnaireRuntime): QuestionAnswer | null {
+  const q = runtime.questions[state.currentTab];
+  if (!q) return null;
+
+  const item = runtime.currentItem;
+
+  if (state.inputMode) {
+    // A blank draft is not an answer (#301): Enter stays on the row instead of recording
+    // an empty custom answer. Skipping a question is the Submit tab's `unanswered:` path.
+    const label = runtime.inputBuffer;
+    if (label.trim().length === 0) return null;
+    return {
+      questionIndex: state.currentTab,
+      question: q.question,
+      kind: 'custom',
+      answer: label,
+    };
+  }
+  if (!item) return null;
+  if (item.kind === 'other') {
+    return null;
+  }
+  if (item.kind === 'next') {
+    return null;
+  }
+  return {
+    questionIndex: state.currentTab,
+    question: q.question,
+    kind: 'option',
+    answer: item.label,
+  };
+}
+
+function buildMultiSelected(state: QuestionnaireState, runtime: QuestionnaireRuntime): string[] {
+  const q = runtime.questions[state.currentTab];
+  if (!q) return [];
+  const out: string[] = [];
+  for (let i = 0; i < q.options.length; i++) {
+    if (state.multiSelectChecked.has(i)) {
+      const label = q.options[i]?.label;
+      if (typeof label === 'string') out.push(label);
+    }
+  }
+  return out;
+}
+
+function buildMultiConfirmAction(state: QuestionnaireState, runtime: QuestionnaireRuntime): QuestionnaireAction {
+  return {
+    kind: 'multi_confirm',
+    selected: buildMultiSelected(state, runtime),
+    answer: runtime.inputBuffer.trim().length > 0 ? runtime.inputBuffer : null,
+    autoAdvanceTab: computeAutoAdvanceTab(state, runtime),
+  };
+}
+
+function tabSwitchAction(
+  data: string,
+  state: QuestionnaireState,
+  runtime: QuestionnaireRuntime,
+): QuestionnaireAction | null {
+  if (!runtime.isMulti) return null;
+  const total = totalTabs(runtime);
+  if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
+    return { kind: 'tab_switch', nextTab: wrapTab(state.currentTab + 1, total) };
+  }
+  if (matchesKey(data, Key.shift('tab')) || matchesKey(data, Key.left)) {
+    return { kind: 'tab_switch', nextTab: wrapTab(state.currentTab - 1, total) };
+  }
+  return null;
+}
+
+// DOWN at the last item wraps to the first (cycle through [option0, …, optionLast]).
+function nextNavOnDown(state: QuestionnaireState, runtime: QuestionnaireRuntime): QuestionnaireAction {
+  return {
+    kind: 'nav',
+    nextIndex: wrapTab(state.optionIndex + 1, Math.max(1, runtime.items.length)),
+    inputValue: runtime.inputBuffer,
+  };
+}
+
+// UP at the first item wraps to the last (symmetric with nextNavOnDown).
+function prevNavOnUp(state: QuestionnaireState, runtime: QuestionnaireRuntime): QuestionnaireAction {
+  return {
+    kind: 'nav',
+    nextIndex: wrapTab(state.optionIndex - 1, Math.max(1, runtime.items.length)),
+    inputValue: runtime.inputBuffer,
+  };
+}
+
+// Collapsed-mode lockout: while collapsed, swallow every keystroke except cancel so
+// the user can read the now-uncovered transcript without accidentally mutating
+// answers or notes. The collapse toggle itself is already handled above.
+function routeCollapsed(kb: QuestionnaireKeybindings, data: string): QuestionnaireAction {
+  if (kb.matches(data, KEYBIND_CANCEL)) return { kind: 'cancel' };
+  return { kind: 'ignore' };
+}
+
+function routeNotesMode(kb: QuestionnaireKeybindings, data: string): QuestionnaireAction {
+  if (kb.matches(data, KEYBIND_CANCEL)) return { kind: 'notes_exit' };
+  if (kb.matches(data, KEYBIND_NEW_LINE)) return { kind: 'notes_forward', data };
+  if (isConfirm(kb, data)) return { kind: 'notes_exit' };
+  return { kind: 'notes_forward', data };
+}
+
+function routeInputMode(
+  kb: QuestionnaireKeybindings,
+  data: string,
+  state: QuestionnaireState,
+  runtime: QuestionnaireRuntime,
+): QuestionnaireAction {
+  // Newline takes precedence over confirmation if a user configuration binds
+  // the same physical key to both semantic actions.
+  if (kb.matches(data, KEYBIND_NEW_LINE)) return { kind: 'ignore' };
+  if (isConfirm(kb, data)) {
+    const q = runtime.questions[state.currentTab];
+    if (q?.multiSelect) return buildMultiConfirmAction(state, runtime);
+    const answer = buildSingleSelectAnswer(state, runtime);
+    if (!answer) return { kind: 'ignore' };
+    return { kind: 'confirm', answer, autoAdvanceTab: computeAutoAdvanceTab(state, runtime) };
+  }
+  // Treat Pi's Ctrl+U line-kill binding as an explicit whole-draft clear,
+  // independent of the current cursor position.
+  if (kb.matches(data, KEYBIND_CLEAR)) return { kind: 'input_clear' };
+  if (kb.matches(data, KEYBIND_EXTERNAL_EDITOR)) return { kind: 'input_edit', value: runtime.inputBuffer };
+  if (kb.matches(data, KEYBIND_CANCEL)) return { kind: 'cancel' };
+  if (kb.matches(data, KEYBIND_EDITOR_UP) && runtime.canMoveInputUp) return { kind: 'ignore' };
+  if (kb.matches(data, KEYBIND_EDITOR_DOWN) && runtime.canMoveInputDown) return { kind: 'ignore' };
+  if (kb.matches(data, KEYBIND_UP)) return prevNavOnUp(state, runtime);
+  if (kb.matches(data, KEYBIND_DOWN)) return nextNavOnDown(state, runtime);
+  return { kind: 'ignore' };
+}
+
+function routeSubmitTab(
+  kb: QuestionnaireKeybindings,
+  data: string,
+  state: QuestionnaireState,
+  runtime: QuestionnaireRuntime,
+): QuestionnaireAction {
+  if (kb.matches(data, KEYBIND_CANCEL)) return { kind: 'cancel' };
+  const tab = tabSwitchAction(data, state, runtime);
+  if (tab) return tab;
+  if (kb.matches(data, KEYBIND_UP) || kb.matches(data, KEYBIND_DOWN)) {
+    const delta = kb.matches(data, KEYBIND_DOWN) ? 1 : -1;
+    const next = wrapTab(state.submitChoiceIndex + delta, 2);
+    return { kind: 'submit_nav', nextIndex: (next === 1 ? 1 : 0) as 0 | 1 };
+  }
+  if (isConfirm(kb, data)) {
+    // D1 (revised): Submit always submits; Cancel always cancels. The warning header
+    // is informational only — `allAnswered(state)` no longer gates submission. Partial
+    // answers flow through `orderedAnswers()` in the host.
+    return state.submitChoiceIndex === 1 ? { kind: 'cancel' } : { kind: 'submit' };
+  }
+  // Global note (#182): the notes key on the Submit tab opens the notes editor scoped to the whole
+  // questionnaire at the pseudo-index (`questions.length` in notesByTab). Reachable only
+  // with the editor closed — `routeKey` dispatches notesVisible traffic to
+  // `routeNotesMode` before the submit-tab block runs. The branch shadows nothing above
+  // it (cancel, tab switch, submit-nav, confirm): the default `n` matches none of them
+  // under default bindings, and a user who deliberately binds one of those actions to
+  // `n` keeps that mapping because the earlier branch still wins (Enter still submits).
+  if (matchesNotesKey(data, runtime.notesKey)) {
+    return { kind: 'notes_enter' };
+  }
+  return { kind: 'ignore' };
+}
+
+const DIGIT_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9'] as const;
+
+/**
+ * The row a digit hotkey names: `1`-`9` follow the list's numbering, so the
+ * unnumbered Next row has no digit. One key per keystroke — a pasted `"12"`
+ * matches none. Checked after every keybinding, so a digit bound to an action
+ * keeps that action.
+ */
+function digitRow(
+  data: string,
+  runtime: QuestionnaireRuntime,
+): { index: number; activatesInputMode: boolean } | undefined {
+  const index = DIGIT_KEYS.findIndex((digit) => matchesKey(data, digit));
+  const item = runtime.items[index];
+  if (!item || !ROW_INTENT_META[item.kind].numbered) return undefined;
+  return { index, activatesInputMode: ROW_INTENT_META[item.kind].activatesInputMode };
+}
+
+function routeMultiSelectTab(
+  kb: QuestionnaireKeybindings,
+  data: string,
+  state: QuestionnaireState,
+  runtime: QuestionnaireRuntime,
+): QuestionnaireAction {
+  const focusedKind = runtime.currentItem?.kind;
+  const focusedMeta = focusedKind ? ROW_INTENT_META[focusedKind] : undefined;
+  // Space toggles the focused row's checkbox. Suppressed on rows whose META declares
+  // `blocksMultiToggle` (the Next sentinel) or `activatesInputMode` (the "Type
+  // something." row — it is an inline input, not a checkable option).
+  if (matchesKey(data, Key.space)) {
+    if (focusedMeta?.blocksMultiToggle) return { kind: 'ignore' };
+    if (focusedMeta?.activatesInputMode) return { kind: 'ignore' };
+    return { kind: 'toggle', index: state.optionIndex };
+  }
+  if (isConfirm(kb, data)) {
+    // Enter on the "Type something." row is handled by the inputMode block above.
+    // Defensive: never enter the toggle/multi_confirm path for an input-mode row.
+    if (focusedMeta?.activatesInputMode) return { kind: 'ignore' };
+    // Enter on a regular row toggles (matching Space) — committing the question is now
+    // gated behind explicit focus on a row whose META declares `autoSubmitsInMulti`
+    // (the Next sentinel), so Enter on options is a no-cost way to flip checkboxes
+    // without leaving the keyboard home row.
+    if (!focusedMeta?.autoSubmitsInMulti) return { kind: 'toggle', index: state.optionIndex };
+    return buildMultiConfirmAction(state, runtime);
+  }
+  if (kb.matches(data, KEYBIND_CANCEL)) return { kind: 'cancel' };
+  // A digit toggles its row; the Type something. row's digit focuses it instead.
+  const row = digitRow(data, runtime);
+  if (!row) return { kind: 'ignore' };
+  if (row.activatesInputMode) return { kind: 'nav', nextIndex: row.index, inputValue: runtime.inputBuffer };
+  return { kind: 'toggle', index: row.index };
+}
+
+function routeSingleSelectTab(
+  kb: QuestionnaireKeybindings,
+  data: string,
+  state: QuestionnaireState,
+  runtime: QuestionnaireRuntime,
+): QuestionnaireAction {
+  if (isConfirm(kb, data)) {
+    const answer = buildSingleSelectAnswer(state, runtime);
+    if (!answer) return { kind: 'ignore' };
+    return { kind: 'confirm', answer, autoAdvanceTab: computeAutoAdvanceTab(state, runtime) };
+  }
+  if (kb.matches(data, KEYBIND_CANCEL)) return { kind: 'cancel' };
+  // A digit answers with its row, as Enter on it would; the Type something. row's digit focuses it instead.
+  const row = digitRow(data, runtime);
+  if (!row) return { kind: 'ignore' };
+  if (row.activatesInputMode) return { kind: 'nav', nextIndex: row.index, inputValue: runtime.inputBuffer };
+  const answer = buildSingleSelectAnswer(
+    { ...state, optionIndex: row.index },
+    { ...runtime, currentItem: runtime.items[row.index] },
+  );
+  if (!answer) return { kind: 'ignore' };
+  return { kind: 'confirm', answer, autoAdvanceTab: computeAutoAdvanceTab(state, runtime) };
+}
+
+export function routeKey(data: string, state: QuestionnaireState, runtime: QuestionnaireRuntime): QuestionnaireAction {
+  const kb = runtime.keybindings;
+
+  // Collapse/expand toggle is a UI-level affordance — intercepted at the top so it
+  // works from every inner state (notes, inputMode, submit tab, multi-select)
+  // without reaching any branch that would otherwise consume the keystroke. The
+  // questionnaire overlay is fully hidden via `OverlayHandle.setHidden(true)` while
+  // collapsed; pi-tui's overlay stack updates accordingly, so overlay-aware consumers
+  // (e.g. `pi-station`) see no visible modal and chat scroll resumes. The toggle key is
+  // also captured at the raw terminal level via `ctx.ui.onTerminalInput` so it still
+  // routes here when the overlay is hidden (pi-tui does not deliver input to a hidden
+  // overlay's `component.handleInput`).
+  //
+  // The default `ctrl+]` is free in every mainstream macOS terminal (Terminal.app,
+  // iTerm2, Warp), every multiplexer (tmux, zellij, screen — none use it as a prefix),
+  // and the legacy telnet/ssh escape role doesn't apply because our overlay runs
+  // in-process. It is, however, awkward on keyboard layouts where `]` is on the
+  // shifted layer (Latin American `es-AR`/`es-MX` require `Ctrl+Shift+}` for `Ctrl+]`)
+  // — use the `collapseKey` config field to override.
+  // Treat a missing/non-string key as disabled. This can occur at runtime when
+  // a long-lived Pi process retains an older outer module while a package update
+  // replaces the lazily imported QuestionnaireSession graph on disk. Passing
+  // undefined into matchesKey reaches parseKeyId().toLowerCase() and crashes the
+  // entire host process, so keep the runtime boundary defensive even though the
+  // TypeScript contract requires a string. The "off" literal is deliberate:
+  // importing COLLAPSE_KEY_OFF would pull ../config.js (and its rpiv-config
+  // loader graph) into this pure module for a string that cannot change.
+  if (
+    typeof runtime.collapseKey === 'string' &&
+    runtime.collapseKey !== 'off' &&
+    matchesKey(data, runtime.collapseKey as Parameters<typeof matchesKey>[1])
+  ) {
+    return { kind: 'toggle_collapsed' };
+  }
+
+  if (state.collapsed) return routeCollapsed(kb, data);
+  if (state.notesVisible) return routeNotesMode(kb, data);
+  if (state.inputMode) return routeInputMode(kb, data, state, runtime);
+  if (runtime.isMulti && state.currentTab === runtime.questions.length) {
+    return routeSubmitTab(kb, data, state, runtime);
+  }
+
+  const tab = tabSwitchAction(data, state, runtime);
+  if (tab) return tab;
+
+  const q = runtime.questions[state.currentTab];
+  if (!q) return { kind: 'ignore' };
+
+  // Universal `n` activation (FR-1): the notes editor opens on every question tab
+  // (single- or multi-select, preview or no-preview). The blocks above already
+  // swallow `n` when it should NOT reach here — notesVisible forwards to the
+  // notes Input, inputMode forwards to the inline Input, the submit-tab block
+  // activates it via its own branch (the global note, ahead of its ignore
+  // fall-through), and tabSwitchAction ignores it — so by the time we reach this
+  // gate, `n` is unambiguously a notes-enter request. Row intent (Next sentinel,
+  // "Type something.") is irrelevant: the gate sits ABOVE the multi-select
+  // toggle block and the Next sentinel never activates inputMode, so `n` is
+  // neither swallowed earlier nor blocked by `blocksMultiToggle`.
+  if (matchesNotesKey(data, runtime.notesKey)) {
+    return { kind: 'notes_enter' };
+  }
+
+  if (kb.matches(data, KEYBIND_UP)) {
+    return prevNavOnUp(state, runtime);
+  }
+  if (kb.matches(data, KEYBIND_DOWN)) {
+    return nextNavOnDown(state, runtime);
+  }
+
+  if (q.multiSelect) return routeMultiSelectTab(kb, data, state, runtime);
+  return routeSingleSelectTab(kb, data, state, runtime);
+}
