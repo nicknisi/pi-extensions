@@ -10,7 +10,7 @@
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import { getAgentDir, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { execFile } from 'node:child_process';
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -73,7 +73,23 @@ async function oauthToken(): Promise<string | undefined> {
   }
 }
 
+/**
+ * The cache dir must be a real directory (not a symlink) owned by this user
+ * and not writable by group or others; otherwise the cache is not used.
+ */
+export function cacheDirIsPrivate(dir: string): boolean {
+  try {
+    const st = lstatSync(dir);
+    if (!st.isDirectory() || st.isSymbolicLink()) return false;
+    if (typeof process.getuid === 'function' && st.uid !== process.getuid()) return false;
+    return (st.mode & 0o022) === 0;
+  } catch {
+    return false;
+  }
+}
+
 function readUsageCache(allowStale: boolean): UsageData | undefined {
+  if (!cacheDirIsPrivate(usageCacheDir())) return undefined;
   try {
     const file = usageCacheFile();
     const ageS = (Date.now() - statSync(file).mtimeMs) / 1000;
@@ -105,9 +121,12 @@ function refreshUsage(): void {
       if (res.status !== 200) return failUsage(`usage API answered HTTP ${res.status}`);
       if (!parseUsage(JSON.parse(body))) return failUsage('usage API response was missing a 5h or 7d window');
       mkdirSync(usageCacheDir(), { recursive: true, mode: 0o700 });
-      // Write then rename: atomic, and never follows a link planted at the target name.
+      if (!cacheDirIsPrivate(usageCacheDir())) return failUsage(`usage cache dir ${usageCacheDir()} is not private`);
+      // Exclusive-create a temp file, then rename over the target: atomic, and
+      // neither step follows a link planted at either name.
       const tmp = `${usageCacheFile()}.${process.pid}.tmp`;
-      writeFileSync(tmp, body, { mode: 0o600 });
+      rmSync(tmp, { force: true });
+      writeFileSync(tmp, body, { mode: 0o600, flag: 'wx' });
       renameSync(tmp, usageCacheFile());
       usageHealth = 'ok';
       usageRetryAt = 0;

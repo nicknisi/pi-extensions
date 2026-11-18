@@ -1,6 +1,9 @@
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DEFAULTS, loadFrom, spinnerFrames } from './config.js';
-import { countDiffLines, parseUsage } from './data.js';
+import { cacheDirIsPrivate, countDiffLines, parseUsage } from './data.js';
 import { randomVerb, VERBS } from './verbs.js';
 import { streamedChars } from './index.js';
 import { fitRow, type Piece } from './layout.js';
@@ -203,5 +206,26 @@ describe('prototype keys', () => {
     expect(warnings.some((w) => w.includes('items.branch.constructor'))).toBe(true);
     expect(config.style).toBe('classic');
     expect(config.items.branch).toEqual({});
+  });
+});
+
+describe('cacheDirIsPrivate', () => {
+  it('accepts a 0700 dir and rejects symlinks, missing dirs and group/world-writable dirs', () => {
+    const base = mkdtempSync(join(tmpdir(), 'composer-cache-'));
+    try {
+      const ok = join(base, 'ok');
+      mkdirSync(ok, { mode: 0o700 });
+      expect(cacheDirIsPrivate(ok)).toBe(true);
+      const link = join(base, 'link');
+      symlinkSync(ok, link);
+      expect(cacheDirIsPrivate(link)).toBe(false);
+      const open = join(base, 'open');
+      mkdirSync(open);
+      chmodSync(open, 0o777);
+      expect(cacheDirIsPrivate(open)).toBe(false);
+      expect(cacheDirIsPrivate(join(base, 'missing'))).toBe(false);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });
