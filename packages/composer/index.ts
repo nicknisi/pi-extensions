@@ -300,17 +300,20 @@ export default function composer(pi: ExtensionAPI) {
     repaint();
   });
 
+  // Live tokens: ~4 characters per token of what has actually streamed. Providers
+  // may report usage early (or only at the end), so the exact figure is used
+  // once the message ends.
   pi.on('message_update', async (event) => {
-    const message = event.message as { role?: string; content?: unknown; usage?: { output?: number } };
+    const message = event.message as { role?: string; content?: unknown };
     if (message.role !== 'assistant') return;
-    // Provider usage when it has arrived, else ~4 characters per token of what has streamed.
-    const streamed = streamedChars(message.content);
-    const estimate = message.usage?.output || Math.ceil(streamed / 4);
-    noteTokens(rt, rt.tokensDone + estimate);
+    noteTokens(rt, rt.tokensDone + Math.ceil(streamedChars(message.content) / 4));
   });
 
   pi.on('message_end', async (event) => {
-    if ((event.message as { role?: string }).role === 'assistant') rt.tokensDone = rt.tokens;
+    const message = event.message as { role?: string; content?: unknown; usage?: { output?: number } };
+    if (message.role !== 'assistant') return;
+    noteTokens(rt, rt.tokensDone + (message.usage?.output || Math.ceil(streamedChars(message.content) / 4)));
+    rt.tokensDone = rt.tokens;
   });
 
   pi.on('session_shutdown', async (_event, ctx) => {
