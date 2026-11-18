@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-statusline",
-  "version": "0.3.5",
+  "version": "1.0.0",
   "description": "Retired: the footer moved into @nicknisi/pi-composer 1.0",
   "keywords": [
     "pi",

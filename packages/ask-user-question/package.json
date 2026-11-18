@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-ask-user-question",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Structured ask_user_question dialog for pi, forked from @juicesharp/rpiv-ask-user-question, with an AFK timeout",
   "keywords": [
     "pi",

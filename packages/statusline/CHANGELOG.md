@@ -1,5 +1,15 @@
 # @nicknisi/pi-statusline
 
+## 1.0.0
+
+### Major Changes
+
+- 9897517: Retired in favour of `@nicknisi/pi-composer` 1.0, which renders the footer and the working verbs. This release is a stub that warns once per session and does nothing else. Statusline's tmux status files were already written by fleet's pi hook, which now also reports dialogs and notifies.
+
+### Patch Changes
+
+- e434bdb: Ship `CHANGELOG.md` in the npm package so pi 1.5 can show what changed under "Extension Updates" after `pi update`.
+
 ## 0.3.5
 
 ### Patch Changes

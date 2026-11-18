@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-stash",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Stash and restore the current prompt draft",
   "keywords": [
     "pi",

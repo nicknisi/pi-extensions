@@ -1,5 +1,11 @@
 # @nicknisi/pi-cloak
 
+## 0.2.1
+
+### Patch Changes
+
+- e434bdb: Ship `CHANGELOG.md` in the npm package so pi 1.5 can show what changed under "Extension Updates" after `pi update`.
+
 ## 0.2.0
 
 ### Minor Changes

@@ -1,5 +1,15 @@
 # @nicknisi/pi-fast
 
+## 0.4.0
+
+### Minor Changes
+
+- d619d63: Fix Fast mode on OpenAI Codex: send `service_tier: "priority"`, because the Codex backend rejects `"fast"` with a 400. Add Fast mode for Claude Fable 5.2, Claude Mythos 5.2, GPT-6.1 Terra, GPT-6.2 Astra, and GPT-6.2 Sol, drop the retired GPT-5.5, record Anthropic Fast replies at their 2x cost, and fall back to standard speed for a model when the plan or workspace refuses Fast mode.
+
+### Patch Changes
+
+- e434bdb: Ship `CHANGELOG.md` in the npm package so pi 1.5 can show what changed under "Extension Updates" after `pi update`.
+
 ## 0.3.4
 
 ### Patch Changes
