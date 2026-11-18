@@ -9,7 +9,9 @@ set -u
 PKG="$(cd "$(dirname "${BASH_SOURCE[0]}")/../packages" && pwd)"
 EXTS="-ne -e $PKG/llm-council/index.ts -e $PKG/subagents/index.ts -e $PKG/workflows/index.ts -e $PKG/relay/index.ts"
 export PI_RELAY_DIR=/tmp/smoke-relay
-rm -rf /tmp/smoke-relay /tmp/smoke-a /tmp/smoke-b /tmp/smoke-council
+# Own subagent run history, so the fleet step only sees runs this script created.
+export PI_SUBAGENTS_DIR=/tmp/smoke-subagents
+rm -rf /tmp/smoke-relay /tmp/smoke-subagents /tmp/smoke-a /tmp/smoke-b /tmp/smoke-council
 mkdir -p /tmp/smoke-a /tmp/smoke-b /tmp/smoke-council/.pi/configs
 cat > /tmp/smoke-council/.pi/configs/llm-council.json <<'EOF'
 {
