@@ -1,5 +1,12 @@
 # @nicknisi/pi-answer
 
+## 0.3.5
+
+### Patch Changes
+
+- Updated dependencies [9ec3ab2]
+  - @nicknisi/pi-shared@0.10.1
+
 ## 0.3.4
 
 ### Patch Changes

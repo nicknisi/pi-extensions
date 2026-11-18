@@ -1,5 +1,12 @@
 # @nicknisi/pi-workflows
 
+## 0.7.3
+
+### Patch Changes
+
+- Updated dependencies [9ec3ab2]
+  - @nicknisi/pi-shared@0.10.1
+
 ## 0.7.2
 
 ### Patch Changes

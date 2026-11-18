@@ -1,5 +1,12 @@
 # @nicknisi/pi-recap
 
+## 0.1.11
+
+### Patch Changes
+
+- Updated dependencies [9ec3ab2]
+  - @nicknisi/pi-shared@0.10.1
+
 ## 0.1.10
 
 ### Patch Changes

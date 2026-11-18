@@ -1,5 +1,16 @@
 # @nicknisi/pi-subagents
 
+## 0.8.0
+
+### Minor Changes
+
+- 9ec3ab2: subagents: a finished background child now wakes the parent with its answer (starting a turn when idle, or steered in at the next tool boundary), so the model no longer polls `fleet`. `dispatch` tasks take a `thinking` level for one child, with or without `model`. pi-shared exports `THINKING_LEVELS` and `ThinkingLevel`.
+
+### Patch Changes
+
+- Updated dependencies [9ec3ab2]
+  - @nicknisi/pi-shared@0.10.1
+
 ## 0.7.0
 
 ### Minor Changes
