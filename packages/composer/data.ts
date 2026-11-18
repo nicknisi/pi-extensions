@@ -112,6 +112,7 @@ function refreshUsage(): void {
       mkdirSync(usageCacheDir(), { recursive: true });
       writeFileSync(usageCacheFile(), body);
       usageHealth = 'ok';
+      memo = undefined;
       onDataUpdated?.();
     } catch (error) {
       usageHealth = `usage fetch failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -121,16 +122,21 @@ function refreshUsage(): void {
   })();
 }
 
+// Renders run up to ~12×/s while animating; look at the cache file at most every 5s.
+let memo: { at: number; data: UsageData | undefined } | undefined;
+
 /** Cached usage; kicks an async refresh when stale. Never does I/O beyond a cache read. */
 export function getUsage(ctx: ExtensionContext): UsageData | undefined {
   if (ctx.model?.provider !== 'anthropic') {
     usageHealth = 'only shown for Anthropic models';
     return undefined;
   }
+  const now = Date.now();
+  if (memo && now - memo.at < 5000) return memo.data;
   const fresh = readUsageCache(false);
-  if (fresh) return fresh;
-  refreshUsage();
-  return readUsageCache(true);
+  if (!fresh) refreshUsage();
+  memo = { at: now, data: fresh ?? readUsageCache(true) };
+  return memo.data;
 }
 
 export function timeUntil(iso: string, now = Date.now()): string {
