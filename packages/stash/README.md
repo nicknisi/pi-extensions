@@ -34,7 +34,7 @@ Drafts are saved per working directory under `<agentDir>/stash/<hash of cwd>/` (
 
 No file is ever rewritten, so there is no lock:
 
-- **Stashing** writes the draft to a temporary file (mode `0600`), flushes it to disk, renames it into place, and flushes the folder, so a saved draft survives a crash or power loss. The editor is cleared only after the rename.
+- **Stashing** writes the draft to a temporary file (mode `0600`), flushes it to disk, and renames it into place. The editor is cleared only after the rename, so a saved draft survives Pi exiting or crashing. The folder is also flushed after the rename for power-loss protection, but only on a best-effort basis: it's skipped on Windows, and a failed folder flush is ignored.
 - **Restoring** claims a draft by deleting its file. Only one window's delete can succeed, so two windows never get the same draft. The draft is put in the editor right after the claim, before anything else that could fail.
 
 Each draft remembers the session that stashed it. Sending a message only auto-restores drafts from the current session, so another Pi window in the same directory never has a draft pulled into its editor. `ctrl+s` on an empty editor restores the newest draft from any session.

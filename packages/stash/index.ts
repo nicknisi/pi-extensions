@@ -95,12 +95,16 @@ function syncDir(dir: string): void {
   }
 }
 
+/** Last timestamp used for a draft name in this process; keeps same-millisecond saves in order. */
+let lastStamp = 0;
+
 /** Save a draft durably. Once this returns, the draft is on disk; nothing after the rename can throw. */
 function add(cwd: string, draft: Draft): void {
   const dir = stashDir(cwd);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  // Names sort by stash time; the UUID keeps two windows in the same millisecond apart.
-  const name = `${String(Date.now()).padStart(16, '0')}-${randomUUID()}`;
+  // Names sort by stash time. The stamp never repeats within a process, and the UUID keeps windows apart.
+  lastStamp = Math.max(Date.now(), lastStamp + 1);
+  const name = `${String(lastStamp).padStart(16, '0')}-${randomUUID()}`;
   const tmp = join(dir, `${name}.tmp`);
   try {
     const fd = openSync(tmp, 'wx', 0o600);
@@ -172,10 +176,12 @@ export default function stash(pi: ExtensionAPI) {
     }
   };
 
-  /** Put a claimed draft in the editor first, so a later widget failure can't lose it. */
+  /**
+   * Put a claimed draft in the editor first, so a later widget failure can't lose it.
+   * The widget refreshes either way: another window may have taken the draft it showed.
+   */
   const restore = (ctx: ExtensionContext, draft: Draft | undefined) => {
-    if (!draft) return;
-    ctx.ui.setEditorText(draft.text);
+    if (draft) ctx.ui.setEditorText(draft.text);
     run(ctx, () => updateWidget(ctx));
   };
 

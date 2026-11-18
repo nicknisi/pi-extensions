@@ -135,6 +135,36 @@ it('keeps the newest drafts up to the cap', async () => {
   }
 });
 
+it('restores same-millisecond stashes newest first', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+  try {
+    const w = window('a');
+    for (const text of ['one', 'two', 'three']) {
+      w.type(text);
+      await w.ctrlS();
+    }
+    for (const text of ['three', 'two', 'one']) {
+      await w.ctrlS();
+      expect(w.text).toBe(text);
+      w.type('');
+    }
+  } finally {
+    vi.restoreAllMocks();
+  }
+});
+
+it('clears a stale widget when another window already took the draft', async () => {
+  const a = window('a');
+  const b = window('b');
+  a.type('shared draft');
+  await a.ctrlS();
+  await b.ctrlS();
+  expect(b.text).toBe('shared draft');
+  await a.ctrlS(); // nothing left to restore
+  expect(a.text).toBe('');
+  expect(a.setWidget).toHaveBeenLastCalledWith('message-stash', undefined);
+});
+
 it('skips and keeps an unreadable draft file', async () => {
   fs.mkdirSync(stashDir('/work/repo'), { recursive: true });
   const junk = join(stashDir('/work/repo'), '0000000000000000-junk.json');
