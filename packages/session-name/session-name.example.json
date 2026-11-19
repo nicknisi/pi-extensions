@@ -5,5 +5,8 @@
   "llmModel": null,
   "notifyOnAutoName": true,
   "setTitle": true,
-  "titleFormat": "{summary} — {dir}"
+  "titleFormat": "{summary} — {dir}",
+  "autoRename": true,
+  "renameEvery": 3,
+  "renameThreshold": 0.85
 }
