@@ -33,12 +33,29 @@
  *                                                  // null = use session model
  *       "notifyOnAutoName": true,
  *       "setTitle": true,
- *       "titleFormat": "{summary} — {dir}"
+ *       "titleFormat": "{summary} — {dir}",
+ *       "autoRename": true,       // rename when the work moves to a new task
+ *       "renameEvery": 3,         // user prompts between drift checks
+ *       "renameThreshold": 0.85,  // classifier probability needed to rename
+ *       "renameModels": [...]     // decision models; first with credentials wins
  *     }
+ *
+ * Auto-renaming:
+ *   With a decision model (classifier) available, every `renameEvery` user
+ *   prompts it asks whether the work has moved to a different task than the
+ *   current name describes, and renames the session when it has. Only names
+ *   this extension set are eligible; names from /sn, /name or --name are
+ *   never touched.
  */
 
 import type { Message } from '@earendil-works/pi-ai';
-import { selectSideModel } from '@nicknisi/pi-shared';
+import {
+  type Classifier,
+  classifyBool,
+  DEFAULT_CLASSIFIERS,
+  findClassifier,
+  selectSideModel,
+} from '@nicknisi/pi-shared';
 import {
   getAgentDir,
   getPackageDir,
@@ -68,6 +85,14 @@ interface SessionNameConfig {
   setTitle: boolean;
   /** Title template using {summary}, {dir} and {app} placeholders. */
   titleFormat: string;
+  /** Rename auto-named sessions when the work moves to a different task (needs a classifier). */
+  autoRename: boolean;
+  /** User prompts between drift checks. */
+  renameEvery: number;
+  /** Classifier probability (0-1) that the task changed, needed to rename. */
+  renameThreshold: number;
+  /** Classifier models as "provider/model-id"; the first with credentials is used. */
+  renameModels: string[];
 }
 
 const DEFAULT_CONFIG: SessionNameConfig = {
@@ -78,6 +103,10 @@ const DEFAULT_CONFIG: SessionNameConfig = {
   notifyOnAutoName: true,
   setTitle: true,
   titleFormat: '{summary} — {dir}',
+  autoRename: true,
+  renameEvery: 3,
+  renameThreshold: 0.85,
+  renameModels: [...DEFAULT_CLASSIFIERS],
 };
 
 function loadConfig(): SessionNameConfig {
@@ -87,7 +116,13 @@ function loadConfig(): SessionNameConfig {
     const path = join(getAgentDir(), 'configs', 'session-name.json');
     const raw = readFileSync(path, 'utf8');
     const parsed = JSON.parse(raw) as Partial<SessionNameConfig>;
-    return { ...DEFAULT_CONFIG, ...parsed };
+    const merged = { ...DEFAULT_CONFIG, ...parsed };
+    if (!Number.isInteger(merged.renameEvery) || merged.renameEvery < 1)
+      merged.renameEvery = DEFAULT_CONFIG.renameEvery;
+    if (typeof merged.renameThreshold !== 'number' || !(merged.renameThreshold > 0 && merged.renameThreshold <= 1))
+      merged.renameThreshold = DEFAULT_CONFIG.renameThreshold;
+    if (!Array.isArray(merged.renameModels)) merged.renameModels = DEFAULT_CONFIG.renameModels;
+    return merged;
   } catch {
     return { ...DEFAULT_CONFIG };
   }
@@ -164,6 +199,38 @@ function firstTaskText(branch: SessionEntry[]): string | undefined {
 
 /** Custom entry recording that the user cleared the name via `/sn clear`. */
 const CLEARED_ENTRY = 'session-name-cleared';
+
+/** Custom entry recording a name this extension set; only such names are eligible for auto-rename. */
+const AUTO_ENTRY = 'session-name-auto';
+
+/** The name of the most recent auto-name entry, so a later manual rename makes the session ineligible. */
+function lastAutoName(entries: SessionEntry[]): string | undefined {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i]!;
+    if (entry.type === 'custom' && entry.customType === AUTO_ENTRY) {
+      const name = (entry.data as { name?: unknown } | undefined)?.name;
+      return typeof name === 'string' ? name : undefined;
+    }
+  }
+  return undefined;
+}
+
+/** Recent task-stating user prompts (oldest first) and the last assistant reply, for the drift check. */
+function recentWork(branch: SessionEntry[], count: number): { prompts: string[]; reply: string } {
+  const prompts: string[] = [];
+  let reply = '';
+  for (let i = branch.length - 1; i >= 0 && prompts.length < count; i--) {
+    const entry = branch[i]!;
+    if (entry.type !== 'message') continue;
+    if (entry.message.role === 'user') {
+      const text = taskText(contentToText(entry.message.content));
+      if (text) prompts.unshift(truncate(text, 500));
+    } else if (entry.message.role === 'assistant' && !reply) {
+      reply = truncate(contentToText(entry.message.content).trim(), 1000);
+    }
+  }
+  return { prompts, reply };
+}
 
 /** Derive a name from the first user message: first non-empty line, trimmed. */
 function deriveHeuristicName(text: string, maxLen: number): string | null {
@@ -252,8 +319,14 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
   let pendingTitleTimer: ReturnType<typeof setTimeout> | null = null;
   // Set on shutdown so a title resolving afterwards never names a replaced session.
   let shutDown = false;
+  // User prompts since the last drift check, for auto-rename.
+  let promptsSinceCheck = 0;
+  let renameAbort: AbortController | null = null;
+  // Cached once found; a miss is retried so credentials added later are picked up.
+  let classifier: Classifier | undefined;
 
   pi.on('session_start', (_event, ctx) => {
+    promptsSinceCheck = 0;
     // A `/sn clear` from an earlier runtime still opts this session out.
     autoNamed = ctx.sessionManager
       .getEntries()
@@ -283,6 +356,8 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
     shutDown = true;
     titleAbort?.abort();
     titleAbort = null;
+    renameAbort?.abort();
+    renameAbort = null;
     if (pendingTitleTimer) {
       clearTimeout(pendingTitleTimer);
       pendingTitleTimer = null;
@@ -291,9 +366,10 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
 
   // ── Auto-naming as soon as the first prompt is sent ───────────────────
   pi.on('before_agent_start', (event, ctx) => {
-    if (autoNamed || config.autoName === 'off') return;
     // Older pi (e.g. 1.1) has no messageType: this event only fires for user prompts there.
     if ('messageType' in event && event.messageType !== 'user') return;
+    if (pi.getSessionName()) promptsSinceCheck++;
+    if (autoNamed || config.autoName === 'off') return;
     // Respect an existing name (set via /name, /sn, --name, or a prior turn).
     if (pi.getSessionName()) {
       autoNamed = true;
@@ -328,12 +404,76 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
     if (!name || shutDown || pi.getSessionName()) return;
 
     pi.setSessionName(name);
+    pi.appendEntry(AUTO_ENTRY, { name });
     if (config.notifyOnAutoName && ctx.hasUI) {
       ctx.ui.notify(`Session named: ${name}`, 'info');
     }
   }
 
-  async function generateLlmTitle(ctx: ExtensionContext, userText: string): Promise<string | null> {
+  // ── Auto-renaming when the work moves to a different task ─────────────
+  pi.on('agent_settled', (event, ctx) => {
+    if (event.aborted || promptsSinceCheck < config.renameEvery) return;
+    if (!config.autoRename || config.autoName === 'off' || shutDown) return;
+    const name = pi.getSessionName();
+    if (!name || name !== lastAutoName(ctx.sessionManager.getEntries())) return;
+    promptsSinceCheck = 0;
+    // Not awaited: nothing should wait on the rename.
+    maybeRename(ctx, name).catch(() => {
+      // Renaming is best-effort.
+    });
+  });
+
+  async function maybeRename(ctx: ExtensionContext, name: string): Promise<void> {
+    renameAbort?.abort();
+    const controller = new AbortController();
+    renameAbort = controller;
+    try {
+      classifier ??= await findClassifier(ctx.modelRegistry, config.renameModels);
+      if (!classifier || controller.signal.aborted) return;
+      const { prompts, reply } = recentWork(ctx.sessionManager.getBranch(), 3);
+      if (prompts.length === 0) return;
+      const probability = await classifyBool(
+        ctx.modelRegistry,
+        classifier,
+        { sessionName: name, recentUserPrompts: prompts, lastAssistantReply: reply },
+        {
+          instructions:
+            'A coding-agent session is named after the task it started with. Judge whether the recent work has moved on to a different task than the one the session name describes.',
+          criteria: {
+            true: 'The recent prompts are about a different task than the session name describes.',
+            false:
+              'The recent prompts continue the named task, including related subtasks, follow-ups, fixes, refinements or reviews of the same work.',
+          },
+        },
+        controller.signal,
+      );
+      if (probability === undefined || probability < config.renameThreshold || controller.signal.aborted) return;
+
+      let next: string | null = null;
+      if (config.autoName === 'llm') {
+        next = await generateLlmTitle(ctx, prompts.join('\n\n'), 'Recent user prompts');
+      }
+      next ??= deriveHeuristicName(prompts.at(-1)!, config.heuristicMaxLength);
+      next = next && (cleanName(next) || null);
+      // Skip if the name changed meanwhile (manual rename, /sn clear) or the session went away.
+      if (!next || next.toLowerCase() === name.toLowerCase() || shutDown || controller.signal.aborted) return;
+      if (pi.getSessionName() !== name) return;
+
+      pi.setSessionName(next);
+      pi.appendEntry(AUTO_ENTRY, { name: next });
+      if (config.notifyOnAutoName && ctx.hasUI) {
+        ctx.ui.notify(`Session renamed: ${next}`, 'info');
+      }
+    } finally {
+      if (renameAbort === controller) renameAbort = null;
+    }
+  }
+
+  async function generateLlmTitle(
+    ctx: ExtensionContext,
+    userText: string,
+    label = "User's first prompt",
+  ): Promise<string | null> {
     const controller = new AbortController();
     titleAbort = controller;
     try {
@@ -342,8 +482,8 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
       const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
       if (!auth.ok || controller.signal.aborted) return null;
 
-      const systemPrompt = `You generate concise session titles for a coding agent. Given the user's first prompt, reply with ONLY a short title of at most ${config.llmMaxWords} words. No quotes, no trailing punctuation, no explanation.`;
-      const body = `User's first prompt:\n${truncate(userText, 1000)}`;
+      const systemPrompt = `You generate concise session titles for a coding agent. Given the user's prompt, reply with ONLY a short title of at most ${config.llmMaxWords} words. No quotes, no trailing punctuation, no explanation.`;
+      const body = `${label}:\n${truncate(userText, 1000)}`;
       const userMessage: Message = {
         role: 'user',
         content: [{ type: 'text', text: body }],

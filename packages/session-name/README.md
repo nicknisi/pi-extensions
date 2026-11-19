@@ -9,6 +9,7 @@ Name pi sessions so they're easy to search and resume. Pi's built-in `/name` wor
   - `/sessions [query] [--all]` — Interactive picker of sessions for the current project (`SessionManager.list(ctx.cwd)`), or across every project with `--all` / `-a` (`SessionManager.listAll()`). Selecting an entry resumes that session via `ctx.switchSession`. Requires interactive mode (`ctx.hasUI`).
 - **Terminal title** — Sets the window/tab title via `ctx.ui.setTitle` to reflect the session name (e.g. `fix login bug — dotfiles`). Reaches whatever pi's terminal layer drives (Ghostty, tmux panes, etc.).
 - **Auto-naming** — When the first prompt of an unnamed session starts a run (`before_agent_start`), derives a name from that prompt (heuristic mode) or a one-off LLM call (llm mode), then calls `pi.setSessionName`. Runs alongside the agent rather than delaying it. Fires at most once per session instance. A prompt with fewer than three words (`ok`, `hello`) is skipped and the next prompt gets another try, so a session isn't named "Empty start".
+- **Auto-renaming** — When a decision model (classifier, e.g. TypeSafe's Jev) is available, every few user prompts it asks whether the work has moved on to a different task than the current name describes, and renames the session when it has. Only names this extension set are eligible; names from `/sn`, `/name`, or `--name` are never touched. See [How auto-renaming works](#how-auto-renaming-works).
 
 ## Events hooked
 
@@ -17,9 +18,10 @@ Name pi sessions so they're easy to search and resume. Pi's built-in `/name` wor
 | `session_start`        | Resets the auto-name guard; defers a title set (via `setTimeout(0)`) so it runs after pi's built-in `updateTerminalTitle()` on startup. |
 | `session_info_changed` | Re-sets the title. `setSessionName` emits to built-in handlers first, so this runs after pi's built-in title update and wins.           |
 | `session_shutdown`     | Aborts any in-flight LLM title call and clears the pending title timer so a resolved name never lands on a torn-down/replaced session.  |
-| `before_agent_start`   | Triggers auto-naming when the first prompt is sent, without blocking the run.                                                           |
+| `before_agent_start`   | Triggers auto-naming when the first prompt is sent, without blocking the run. Counts user prompts for the auto-rename check.            |
+| `agent_settled`        | Runs the auto-rename drift check every `renameEvery` user prompts, without blocking anything.                                           |
 
-No custom tools, keybindings, widgets, or message types. `/sn clear` writes one custom entry type, `session-name-cleared` (not sent to the model).
+No custom tools, keybindings, widgets, or message types. Two custom entry types, neither sent to the model: `session-name-cleared` (written by `/sn clear`) and `session-name-auto` (written whenever this extension sets a name, so it knows later which names it may rename).
 
 ## Usage
 
@@ -55,6 +57,10 @@ Config file: `~/.pi/agent/configs/session-name.json` (JSON, all keys optional; m
 | `notifyOnAutoName`   | `boolean`                       | `true`                | Show a `Session named: …` notification when auto-naming succeeds.                                                                                                                                                                                                                  |
 | `setTitle`           | `boolean`                       | `true`                | Mirror the session name into the terminal/window title.                                                                                                                                                                                                                            |
 | `titleFormat`        | `string`                        | `"{summary} — {dir}"` | Title template. Placeholders: `{summary}` (session name), `{dir}` (basename of cwd) and `{app}` (what the host calls itself — `π`, or the brand name under a rebranded distribution such as `arc`). When the session is unnamed the title is `{app} — {dir}` regardless of format. |
+| `autoRename`         | `boolean`                       | `true`                | Rename auto-named sessions when the work moves on to a different task. Only runs when a model from `renameModels` has credentials, and never when `autoName` is `"off"`.                                                                                                           |
+| `renameEvery`        | `number`                        | `3`                   | User prompts between drift checks. Must be a positive integer.                                                                                                                                                                                                                     |
+| `renameThreshold`    | `number`                        | `0.85`                | Classifier probability (0 to 1) that the task changed, needed to rename.                                                                                                                                                                                                           |
+| `renameModels`       | `string[]`                      | Jev on every provider | Classifier models as `"provider/model-id"`; the first one with credentials is used. Defaults to `DEFAULT_CLASSIFIERS` from `@nicknisi/pi-shared` (`typesafe/jev-latest`, then Jev on OpenRouter, Cloudflare, Vercel and OpenCode).                                                 |
 
 Example (`session-name.example.json`):
 
@@ -66,7 +72,10 @@ Example (`session-name.example.json`):
   "llmModel": null,
   "notifyOnAutoName": true,
   "setTitle": true,
-  "titleFormat": "{summary} — {dir}"
+  "titleFormat": "{summary} — {dir}",
+  "autoRename": true,
+  "renameEvery": 3,
+  "renameThreshold": 0.85
 }
 ```
 
@@ -85,9 +94,17 @@ LLM selection uses `selectSideModel` from `@nicknisi/pi-shared`, checking the pr
 
 Every name, from either mode or `/sn`, has control and bidi characters replaced with spaces before it's saved, and the terminal title is cleaned the same way. Pi writes the title inside an escape sequence, so a stray ESC or BEL in a name could otherwise break out of it.
 
+## How auto-renaming works
+
+1. Every name this extension sets is recorded with a `session-name-auto` custom entry. A session is eligible for renaming only while its current name matches the latest such entry, so a name set with `/sn`, `/name`, or `--name` (or a cleared name) is never renamed, including after `/reload` and resume. Sessions named before this feature have no entry and are left alone.
+2. Each user prompt in a named session counts toward `renameEvery`. When the run settles (`agent_settled`, skipped if aborted) and the count is reached, the count resets and a check runs in the background.
+3. The check sends the classifier the current name, the last three task-stating user prompts, and the start of the last assistant reply, and asks whether the work moved on to a different task. Related subtasks, follow-ups, fixes and reviews of the same work count as the same task.
+4. At or above `renameThreshold`, a new name is generated the same way as the first one: an LLM title from the recent prompts in `llm` mode, else the first line of the latest prompt. If the name changed in the meantime, or the new name equals the old one, nothing happens.
+5. The rename shows `Session renamed: …` when `notifyOnAutoName` is on. Shutdown cancels a pending check.
+
 ## Dependencies
 
-- `@nicknisi/pi-shared` — optional side-model selection. Older supported hosts without `getAvailableOfType()` use `find()` plus `getApiKeyAndHeaders()`.
+- `@nicknisi/pi-shared` — optional side-model selection, and `findClassifier`/`classifyBool` for the auto-rename check. Older supported hosts without `getAvailableOfType()` use `find()` plus `getApiKeyAndHeaders()`.
 
 - `@earendil-works/pi-coding-agent` (peer, `>=0.86.0`) — `ExtensionAPI`, `ExtensionContext`, `SessionEntry`, `SessionInfo`, `SessionManager` (used for `list`/`listAll` in `/sessions`).
 - `@earendil-works/pi-ai` (peer) — `Message` type for the LLM title request.
@@ -99,6 +116,8 @@ Every name, from either mode or `/sn`, has control and bidi characters replaced 
 - LLM title generation relies on `ctx.modelRegistry.complete()` (`stopReason`, text content blocks) and `ctx.modelRegistry.getApiKeyAndHeaders`.
 - `/sessions` excludes the current session by comparing `SessionInfo.path` to `ctx.sessionManager.getSessionFile()`.
 - Clearing the name via pi's built-in `/name` (empty) does not set the auto-name guard — only `/sn clear` does — so a cleared-via-`/name` session may be auto-named again on the next turn.
+- Auto-renaming changes the session name mid-session. Anything that addresses a session by its exact name, such as `pi-relay` targets, stops matching after a rename; use relay's `@alias` for a stable address, or set `autoRename: false`.
+- On hosts without `agent_settled` or classifier support, auto-renaming silently never runs.
 - Title behavior depends on the terminal honoring pi's title escape sequences (works in Ghostty and tmux panes as noted in the source header).
 
 ## Install
