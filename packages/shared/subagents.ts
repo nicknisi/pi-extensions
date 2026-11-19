@@ -71,7 +71,10 @@ export function bindPiSdk(sdk: PiSdk): void {
 }
 
 async function piSdk(): Promise<PiSdk> {
-  boundSdk ??= await import('@earendil-works/pi-coding-agent');
+  if (boundSdk) return boundSdk;
+  const imported = await import('@earendil-works/pi-coding-agent');
+  // A bindPiSdk() that landed during the import wins.
+  boundSdk ??= imported;
   return boundSdk;
 }
 
@@ -906,7 +909,17 @@ export function createSubagentRuntime(options: {
     resumed: boolean,
   ): Promise<SpawnResult> {
     // Before any worktree exists, so a failed import leaves nothing to clean up.
-    const sdk = await piSdk();
+    let sdk: PiSdk;
+    try {
+      sdk = await piSdk();
+    } catch (err) {
+      const result = markFailed(
+        record,
+        fail(runId, 'crashed', `Cannot load pi: ${err instanceof Error ? err.message : String(err)}`, startedAt),
+      );
+      persist(record);
+      return result;
+    }
     let cwd = opts.cwd ?? process.cwd();
     const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
