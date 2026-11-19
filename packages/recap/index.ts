@@ -137,7 +137,9 @@ export default function (pi: ExtensionAPI) {
         modelRegistry: ctx.modelRegistry,
       },
       preferences,
+      signal,
     );
+    if (signal.aborted) return null;
     if (!model) {
       ctx.ui.notify('recap: no model available', 'warning');
       return null;

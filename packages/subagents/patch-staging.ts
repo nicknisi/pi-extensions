@@ -9,11 +9,25 @@ export interface PatchState {
   decisions: Record<string, { decision: 'applied' | 'discarded'; at: number }>;
 }
 
-/** Read `<dir>/state.json`; missing or corrupt state starts fresh. */
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/** Read `<dir>/state.json`; missing or corrupt state starts fresh, malformed entries are dropped. */
 export function loadPatchState(dir: string): PatchState {
   try {
-    const j = JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8')) as Partial<PatchState>;
-    if (j && j.decisions) return { version: 1, decisions: j.decisions };
+    const j: unknown = JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8'));
+    if (isRecord(j) && isRecord(j.decisions)) {
+      const decisions: PatchState['decisions'] = {};
+      for (const [key, entry] of Object.entries(j.decisions)) {
+        if (
+          isRecord(entry) &&
+          (entry.decision === 'applied' || entry.decision === 'discarded') &&
+          typeof entry.at === 'number'
+        ) {
+          decisions[key] = { decision: entry.decision, at: entry.at };
+        }
+      }
+      return { version: 1, decisions };
+    }
   } catch {
     // missing/corrupt state — start fresh
   }

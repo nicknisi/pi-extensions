@@ -207,4 +207,33 @@ describe('cooldown footer', () => {
     expect(statuses.at(-1)).toBe('fast');
     pi.emit('session_shutdown', {}, uiCtx);
   });
+
+  it('clears "fast (cooldown)" when only a child was rate limited', async () => {
+    vi.useFakeTimers();
+    const statuses: (string | undefined)[] = [];
+    const uiCtx = {
+      ...ctx,
+      hasUI: true,
+      ui: { notify() {}, setStatus: (_id: string, text?: string) => statuses.push(text) },
+    };
+    const pi = fakePi();
+    fastExtension(pi.api);
+    pi.emit('session_start', {}, uiCtx);
+    await pi.commands.get('fast')!.handler('', uiCtx);
+    const child = fakePi();
+    await childExtensions().get('fast')!(child.api);
+
+    child.emit('before_provider_request', { payload: { model: model.id } }, uiCtx);
+    child.emit(
+      'message_end',
+      { message: { role: 'assistant', stopReason: 'error', errorMessage: '429 {"type":"rate_limit_error"}' } },
+      uiCtx,
+    );
+    pi.emit('before_provider_request', { payload: { model: model.id } }, uiCtx);
+    expect(statuses.at(-1)).toBe('fast (cooldown)');
+
+    vi.advanceTimersByTime(60_000);
+    expect(statuses.at(-1)).toBe('fast');
+    pi.emit('session_shutdown', {}, uiCtx);
+  });
 });

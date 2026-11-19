@@ -245,6 +245,32 @@ describe('recap extension', () => {
     expect(notify).not.toHaveBeenCalledWith(expect.stringContaining('aborted'), expect.anything());
   });
 
+  it('stops silently when aborted during model selection', async () => {
+    mkdirSync(join(agentDir, 'configs'));
+    writeFileSync(join(agentDir, 'configs/recap.json'), JSON.stringify({ model: { provider: 'opt', id: 'm' } }));
+    const h = harness();
+    let release!: () => void;
+    let lookupSignal: AbortSignal | undefined;
+    vi.mocked(h.ctx.modelRegistry.getAvailableOfType).mockImplementation(
+      async (_type: unknown, _provider: unknown, options?: { signal?: AbortSignal }) => {
+        lookupSignal = options?.signal;
+        await new Promise<void>((r) => (release = r));
+        return [];
+      },
+    );
+
+    const pending = h.commands.get('recap')!('', h.ctx);
+    await vi.waitFor(() => expect(lookupSignal).toBeDefined());
+    await h.handlers.get('before_agent_start')!({}, h.ctx);
+    expect(lookupSignal!.aborted).toBe(true);
+    release();
+    await pending;
+
+    expect(h.complete).not.toHaveBeenCalled();
+    expect(h.notify).not.toHaveBeenCalledWith(expect.stringMatching(/^recap:/), expect.anything());
+    expect(h.appendEntry).not.toHaveBeenCalled();
+  });
+
   it('summarizes the compacted context, not history before compaction', async () => {
     const { commands, complete, ctx } = harness([
       { type: 'message', message: { role: 'user', content: 'old pre-compaction message' } },

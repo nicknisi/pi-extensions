@@ -592,6 +592,13 @@ describe('config persistence', () => {
     expect(loadCouncil(dir, true).member.council.map((m) => m.model)).toEqual([fable]);
     writeConfig({ member: { council: [null, { label: 'x' }, { model: '' }, { model: astra }] } }, project);
     expect(loadCouncil(dir, true).member.council).toEqual([expect.objectContaining({ model: astra, label: '1' })]);
+    writeConfig({ member: { council: [null, { model: '' }] } }, project);
+    expect(loadCouncil(dir, true).member.council.map((m) => m.model)).toEqual([fable]);
+    writeConfig({ member: { council: [] } }, project);
+    expect(loadCouncil(dir, true).member.council.map((m) => m.model)).toEqual([fable]);
+    writeConfig({ member: { council: [astra] } }, project);
+    expect(loadCouncil(dir, true).member.council.map((m) => m.model)).toEqual([fable]);
+    writeConfig({ member: { council: [{ model: astra }] } }, project);
     writeConfig([1, 2]);
     expect(loadCouncil(dir, true).member.council.map((m) => m.model)).toEqual([astra]);
     expect(error).toHaveBeenCalled();

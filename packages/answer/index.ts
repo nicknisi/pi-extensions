@@ -152,7 +152,8 @@ export function fallbackExtractQuestions(text: string): ExtractionResult {
   // "?" inside inline code or URLs is not a question either. Mask them with same-length filler
   // so sentence boundaries found in the masked text map back onto the original prose.
   const mask = (match: string) => 'x'.repeat(match.length);
-  const masked = prose.replace(/`[^`\n]*`/g, mask).replace(/\bhttps?:\/\/\S+/g, mask);
+  // Trailing sentence punctuation stays outside the URL mask so "use https://x.dev?" is a question.
+  const masked = prose.replace(/`[^`\n]*`/g, mask).replace(/\bhttps?:\/\/\S+?(?=[.,;:!?"')\]*_]*(?:\s|$))/g, mask);
   // Sentences end at punctuation (optionally followed by closing quotes/brackets/emphasis) and
   // whitespace, so "v1.2" or "foo.ts" do not split a question.
   const boundaries = [...masked.matchAll(/\n|(?<=[.!?]["')\]*_]*)[^\S\n]+/g)];

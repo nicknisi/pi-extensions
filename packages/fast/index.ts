@@ -176,7 +176,12 @@ export default function fastExtension(pi: ExtensionAPI) {
   });
 
   attachRequestHooks(pi, (ctx) => getState(ctx), {
-    afterRequest: (ctx) => updateStatus(ctx, getState(ctx)),
+    afterRequest: (ctx) => {
+      const current = getState(ctx);
+      updateStatus(ctx, current);
+      // A child may have started the shared cooldown without arming the parent's timer.
+      if (!cooldownTimer && isCoolingDown(current)) scheduleCooldownEnd(current, ctx);
+    },
     onCooldown: (until, ctx) => {
       const current = getState(ctx);
       updateStatus(ctx, current);

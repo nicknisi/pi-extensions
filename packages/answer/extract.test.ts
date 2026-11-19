@@ -65,6 +65,11 @@ describe('fallbackExtractQuestions', () => {
     expect(questions(text)).toEqual(['Which option do you want?']);
   });
 
+  it('keeps a sentence-ending "?" after a URL', () => {
+    expect(questions('Should I use https://example.com?')).toEqual(['Should I use https://example.com?']);
+    expect(questions('See https://example.com/?q=value.')).toEqual([]);
+  });
+
   it('accepts questions wrapped in closing Markdown emphasis', () => {
     expect(questions('**Which database should I use?** Noted. _Ready to ship?_ Done.')).toEqual([
       'Which database should I use?',

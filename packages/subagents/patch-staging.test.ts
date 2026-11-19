@@ -140,4 +140,29 @@ describe('recordPatchDecision', () => {
       '/runs/a.patch': { decision: 'applied', at: 3 },
     });
   });
+
+  it('starts fresh from a non-object decisions container and drops invalid entries', () => {
+    const dir = tmpDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'state.json');
+    for (const bad of ['"bad"', '[]', 'null']) {
+      fs.writeFileSync(file, `{"version":1,"decisions":${bad}}`);
+      expect(loadPatchState(dir).decisions).toEqual({});
+      expect(recordPatchDecision(dir, '/runs/a.patch', 'applied', 3).decisions).toEqual({
+        '/runs/a.patch': { decision: 'applied', at: 3 },
+      });
+    }
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        version: 1,
+        decisions: {
+          '/runs/ok.patch': { decision: 'discarded', at: 1 },
+          '/runs/bad1.patch': 'nope',
+          '/runs/bad2.patch': { decision: 'maybe', at: 2 },
+        },
+      }),
+    );
+    expect(loadPatchState(dir).decisions).toEqual({ '/runs/ok.patch': { decision: 'discarded', at: 1 } });
+  });
 });

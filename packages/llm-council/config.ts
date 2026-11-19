@@ -112,7 +112,10 @@ function readJson(path: string): Partial<LlmCouncilUserConfig> {
   }
 }
 
-/** Keep only council entries with a non-empty string `model`; non-arrays are ignored entirely. */
+/**
+ * Keep only council entries with a non-empty string `model`. Non-arrays and
+ * arrays with no valid entries return `undefined` so the next layer applies.
+ */
 function validCouncil(value: unknown, source: string): CouncilMemberUserConfig[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) {
@@ -128,7 +131,7 @@ function validCouncil(value: unknown, source: string): CouncilMemberUserConfig[]
       `[llm-council] ignoring ${value.length - valid.length} member.council entr${value.length - valid.length === 1 ? 'y' : 'ies'} in ${source}: each needs a non-empty string "model"`,
     );
   }
-  return valid;
+  return valid.length > 0 ? valid : undefined;
 }
 
 // ── Global config (shared + display) ───────────────────────────────────────
