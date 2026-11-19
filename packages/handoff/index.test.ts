@@ -104,6 +104,7 @@ describe('/handoff', () => {
     let handler!: Handler;
     handoff({
       registerCommand: (_name: string, c: { handler: Handler }) => (handler = c.handler),
+      on: vi.fn(),
     } as unknown as ExtensionAPI);
 
     // pi throws on any use of the old ctx after the session is replaced.
@@ -193,6 +194,7 @@ describe('/handoff generation outcomes', () => {
     let handler!: Handler;
     handoff({
       registerCommand: (_name: string, c: { handler: Handler }) => (handler = c.handler),
+      on: () => {},
     } as unknown as ExtensionAPI);
     const complete = vi.fn<Complete>(opts.complete ?? (async () => textResponse('RPC prompt')));
     const ctx = {
