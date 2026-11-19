@@ -38,7 +38,7 @@ const saved = (cwd = '/work/repo') =>
   fs.existsSync(stashDir(cwd)) ? fs.readdirSync(stashDir(cwd)).filter((name) => name.endsWith('.json')) : [];
 
 /** One pi window: an extension instance with its own editor and session id. */
-function window(session: string, cwd = '/work/repo') {
+function window(session: string, cwd = '/work/repo', mode = 'tui') {
   const registerShortcut = vi.fn<ExtensionAPI['registerShortcut']>();
   const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
   stash({ registerShortcut, on: (name: string, h: never) => handlers.set(name, h) } as unknown as ExtensionAPI);
@@ -50,6 +50,7 @@ function window(session: string, cwd = '/work/repo') {
   const setWidget = vi.fn();
   const ctx = {
     hasUI: true,
+    mode,
     cwd,
     sessionManager: { getSessionId: () => session },
     ui: {
@@ -70,7 +71,16 @@ function window(session: string, cwd = '/work/repo') {
       text = value;
     },
     ctrlS: () => handler(ctx),
-    submit: () => handlers.get('before_agent_start')!({}, ctx),
+    /** A prompt typed in the editor and sent. */
+    submit: async () => {
+      await handlers.get('input')!({ type: 'input', text: 'hi', source: 'interactive' }, ctx);
+      await handlers.get('before_agent_start')!({ type: 'before_agent_start', messageType: 'user' }, ctx);
+    },
+    /** A run started by another extension (sendUserMessage or sendMessage with triggerTurn). */
+    extensionRun: async (messageType: 'user' | 'custom') => {
+      if (messageType === 'user') await handlers.get('input')!({ type: 'input', text: 'hi', source: 'extension' }, ctx);
+      await handlers.get('before_agent_start')!({ type: 'before_agent_start', messageType }, ctx);
+    },
     start: () => handlers.get('session_start')!({}, ctx),
     notify,
     setWidget,
@@ -118,6 +128,32 @@ it("auto-restores only this session's drafts; Ctrl+S restores any window's", asy
   expect(b.text).toBe('draft from A');
   await a.ctrlS();
   expect(a.text).toBe(''); // already claimed by B
+});
+
+it('does not auto-restore for runs started by extensions', async () => {
+  const w = window('a');
+  w.type('parked draft');
+  await w.ctrlS();
+  await w.extensionRun('custom');
+  expect(w.text).toBe('');
+  await w.extensionRun('user');
+  expect(w.text).toBe('');
+  expect(saved()).toHaveLength(1);
+  await w.submit();
+  expect(w.text).toBe('parked draft');
+});
+
+it('is a no-op outside the TUI, so RPC never claims a draft', async () => {
+  const tuiWindow = window('a');
+  tuiWindow.type('tui draft');
+  await tuiWindow.ctrlS();
+
+  const rpc = window('a', '/work/repo', 'rpc');
+  await rpc.start();
+  await rpc.submit();
+  await rpc.ctrlS();
+  expect(rpc.setWidget).not.toHaveBeenCalled();
+  expect(saved()).toHaveLength(1);
 });
 
 it('keeps the newest drafts up to the cap', async () => {

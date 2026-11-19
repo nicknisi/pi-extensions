@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { findAdrDir, listAdrs } from './index.js';
@@ -21,6 +21,30 @@ describe('findAdrDir', () => {
     expect(findAdrDir(join(repo))).toBeNull();
   });
 
+  it('ignores a docs/decisions that is a file', () => {
+    const root = mkdtempSync(join(tmpdir(), 'adr-'));
+    mkdirSync(join(root, 'docs'), { recursive: true });
+    writeFileSync(join(root, 'docs', 'decisions'), '');
+    mkdirSync(join(root, '.git'));
+    expect(findAdrDir(root)).toBeNull();
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'treats an untraversable docs/ as unavailable instead of throwing',
+    () => {
+      const root = mkdtempSync(join(tmpdir(), 'adr-'));
+      const docs = join(root, 'docs');
+      mkdirSync(join(docs, 'decisions'), { recursive: true });
+      mkdirSync(join(root, '.git'));
+      chmodSync(docs, 0o000);
+      try {
+        expect(findAdrDir(root)).toBeNull();
+      } finally {
+        chmodSync(docs, 0o755);
+      }
+    },
+  );
+
   it('returns null when nothing exists', () => {
     const root = mkdtempSync(join(tmpdir(), 'adr-'));
     expect(findAdrDir(root)).toBeNull();
@@ -39,6 +63,16 @@ describe('listAdrs', () => {
     writeFileSync(join(dir, 'README.md'), '');
     writeFileSync(join(dir, 'superseded', '0009-old.md'), '');
     expect(listAdrs(dir)).toEqual(['0001-first.md', '0002-second.md', '0003-template-rendering.md']);
+  });
+});
+
+describe('listAdrs errors', () => {
+  it('returns [] when the directory cannot be read', () => {
+    const root = mkdtempSync(join(tmpdir(), 'adr-'));
+    const file = join(root, 'not-a-dir');
+    writeFileSync(file, '');
+    expect(listAdrs(file)).toEqual([]);
+    expect(listAdrs(join(root, 'missing'))).toEqual([]);
   });
 });
 

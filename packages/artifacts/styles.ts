@@ -18,7 +18,7 @@ import { CONFIG } from './config.js';
  * extension load. `createRequire` is the fallback where `import.meta.resolve`
  * doesn't exist (vitest).
  */
-const D2H_BASE_CSS = (() => {
+function d2hBaseCss(): string {
   for (const resolve of [
     () => fileURLToPath(import.meta.resolve('diff2html/bundles/css/diff2html.min.css')),
     () => createRequire(import.meta.url).resolve('diff2html/bundles/css/diff2html.min.css'),
@@ -28,7 +28,7 @@ const D2H_BASE_CSS = (() => {
     } catch {}
   }
   return '';
-})();
+}
 
 // ─── Design tokens ─────────────────────────────────────────────────────────────
 // One scheme = one flat token set. The accent is user-configurable; everything
@@ -305,8 +305,14 @@ const D2H_OVERRIDES_CSS = `
 .d2h-info { background: var(--code-bg); color: var(--muted); border-color: var(--border); }
 `;
 
-/** diff2html stylesheet (base + document-matched overrides). Inlined only when a diff fence is present. */
-export const D2H_CSS = `${D2H_BASE_CSS}\n${D2H_OVERRIDES_CSS}`;
+let d2hCss: string | undefined;
+/**
+ * diff2html stylesheet (base + document-matched overrides). Inlined only when a diff fence is present;
+ * read from disk on first diff render rather than at module load.
+ */
+export function getD2hCss(): string {
+  return (d2hCss ??= `${d2hBaseCss()}\n${D2H_OVERRIDES_CSS}`);
+}
 
 // ─── highlight.js theme, driven by the scheme tokens ──────────────────────────
 

@@ -136,6 +136,29 @@ function attachRequestHooks(
 
 export default function fastExtension(pi: ExtensionAPI) {
   let state: SessionState | undefined;
+  // Clears the `fast (cooldown)` footer once the rate-limit cooldown ends.
+  let cooldownTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function clearCooldownTimer(): void {
+    if (cooldownTimer) clearTimeout(cooldownTimer);
+    cooldownTimer = undefined;
+  }
+
+  // Re-arms while the cooldown is extended (e.g. a subagent child hit another 429).
+  function scheduleCooldownEnd(current: SessionState, ctx: ExtensionContext): void {
+    clearCooldownTimer();
+    if (current.cooldownUntil === undefined) return;
+    cooldownTimer = setTimeout(
+      () => {
+        cooldownTimer = undefined;
+        if (state !== current) return;
+        updateStatus(ctx, current);
+        if (isCoolingDown(current)) scheduleCooldownEnd(current, ctx);
+      },
+      Math.max(0, current.cooldownUntil - Date.now()),
+    );
+    cooldownTimer.unref?.();
+  }
 
   function getState(ctx: ExtensionContext): SessionState {
     state ??= createState(ctx);
@@ -143,6 +166,7 @@ export default function fastExtension(pi: ExtensionAPI) {
   }
 
   pi.on('session_start', (_event, ctx) => {
+    clearCooldownTimer();
     state = createState(ctx);
     updateStatus(ctx, state);
   });
@@ -152,9 +176,16 @@ export default function fastExtension(pi: ExtensionAPI) {
   });
 
   attachRequestHooks(pi, (ctx) => getState(ctx), {
-    afterRequest: (ctx) => updateStatus(ctx, getState(ctx)),
+    afterRequest: (ctx) => {
+      const current = getState(ctx);
+      updateStatus(ctx, current);
+      // A child may have started the shared cooldown without arming the parent's timer.
+      if (!cooldownTimer && isCoolingDown(current)) scheduleCooldownEnd(current, ctx);
+    },
     onCooldown: (until, ctx) => {
-      updateStatus(ctx, getState(ctx));
+      const current = getState(ctx);
+      updateStatus(ctx, current);
+      scheduleCooldownEnd(current, ctx);
       if (ctx.hasUI) {
         ctx.ui.notify(
           `Fast mode rate limited; using standard speed until ${new Date(until).toLocaleTimeString()}.`,
@@ -180,6 +211,7 @@ export default function fastExtension(pi: ExtensionAPI) {
     childExtensions().set(EXTENSION_ID, childFactory);
   });
   pi.on('session_shutdown', () => {
+    clearCooldownTimer();
     if (childExtensions().get(EXTENSION_ID) === childFactory) childExtensions().delete(EXTENSION_ID);
   });
 

@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULTS, load, loadFrom, spinnerFrames } from './config.js';
 import { cacheDirIsPrivate, computeTotals, countDiffLines, parseUsage } from './data.js';
 import { randomVerb, VERBS } from './verbs.js';
-import { streamedChars } from './index.js';
+import { deltaChars, streamedChars } from './index.js';
 import { fitRow, type Piece } from './layout.js';
 
 describe('loadFrom', () => {
@@ -137,6 +137,17 @@ describe('streamedChars', () => {
       ]),
     ).toBe(3 + 5 + 7);
     expect(streamedChars(undefined)).toBe(0);
+  });
+});
+
+describe('deltaChars', () => {
+  it('counts only text, thinking and tool-call deltas', () => {
+    expect(deltaChars({ type: 'text_delta', delta: 'abc' })).toBe(3);
+    expect(deltaChars({ type: 'thinking_delta', delta: 'hm' })).toBe(2);
+    expect(deltaChars({ type: 'toolcall_delta', delta: '{"a":' })).toBe(5);
+    expect(deltaChars({ type: 'text_end', content: 'abc' })).toBe(0);
+    expect(deltaChars({ type: 'text_delta' })).toBe(0);
+    expect(deltaChars(undefined)).toBe(0);
   });
 });
 

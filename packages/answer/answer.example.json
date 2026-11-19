@@ -1,3 +1,4 @@
 {
-  "extractionModels": ["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-5"]
+  "extractionModels": ["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-5"],
+  "hintModels": ["typesafe/jev-latest", "openrouter/typesafe/jev-1.14"]
 }

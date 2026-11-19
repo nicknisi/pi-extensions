@@ -94,4 +94,10 @@ describe('isHeredocParseFailure', () => {
     if (!output.includes("it's broken")) expect(isHeredocParseFailure(command, output)).toBe(true);
     expect(isHeredocParseFailure('echo hi', output)).toBe(false);
   });
+
+  it('matches the no-space cat<< form', () => {
+    const output = 'bash: -c: line 1: unexpected EOF while looking for matching `"\'';
+    expect(isHeredocParseFailure("echo \"$(cat<<'EOF'\nit's broken\nEOF\n)\"", output)).toBe(true);
+    expect(isHeredocParseFailure('echo "$(catalog <<\'EOF\'\nx\nEOF\n)"', output)).toBe(false);
+  });
 });

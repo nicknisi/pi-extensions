@@ -47,12 +47,18 @@ pi -e /abs/path/packages/checkpoint/extensions/self-compact/self-compact.ts
 
 ## Flags and thresholds
 
-| Flag                | Default | Meaning                                                                     |
-| ------------------- | ------- | --------------------------------------------------------------------------- |
-| `--compact-soft-at` | `225k`  | Advisory heads-up threshold: emits soft guidance to the model.              |
-| `--compact-at`      | `250k`  | Warning threshold: emits stern guidance to self-compact.                    |
-| `--compact-buffer`  | `20k`   | Extra tokens past `--compact-at` before ordinary tools are hard-paused.     |
-| `--compact-prompt`  | (unset) | Literal summary system instruction that replaces the editable default file. |
+| Flag                | Default        | Meaning                                                                     |
+| ------------------- | -------------- | --------------------------------------------------------------------------- |
+| `--compact-soft-at` | `225k` / `60%` | Advisory heads-up threshold: emits soft guidance to the model.              |
+| `--compact-at`      | `250k` / `70%` | Warning threshold: emits stern guidance to self-compact.                    |
+| `--compact-buffer`  | `20k` / `10%`  | Extra tokens past `--compact-at` before ordinary tools are hard-paused.     |
+| `--compact-prompt`  | (unset)        | Literal summary system instruction that replaces the editable default file. |
+
+**Defaults.** Flags you don't pass use the token defaults (`225k`/`250k`/`20k`)
+when they fit the model window (roughly 278k tokens or more). On smaller windows
+(e.g. 200k or 272k models), unpassed flags fall back to the window-relative
+defaults `60%`/`70%`/`10%` (hard cutoff at 80%), so a no-flag install works on
+any model. Flags you pass explicitly are never replaced.
 
 **Value parsing.** A value is a whole token count (`250000`), a `k`/`m`
 shorthand (`250k`, `0.5m`), or a window percentage (`70%`). Fractions are
@@ -66,8 +72,8 @@ window `W`. The hard cutoff is `hard = min(compact-at + buffer, floor(0.9 * W))`
 and the configuration must satisfy `0 < soft < warning <= hard <= floor(0.9 * W)`.
 Percentages round half up.
 
-**Invalid / small-model guidance.** If the thresholds cannot fit the model
-window (e.g. the `225k`/`250k` token defaults on a 200k-token model), the
+**Invalid / small-model guidance.** If explicitly passed thresholds cannot fit
+the model window (e.g. `--compact-at 250k` on a 200k-token model), the
 configuration fails closed: ordinary tool calls are blocked with an actionable
 error, and `/self-compact-info` shows the reason. Use window-independent
 percentages instead, e.g. `--compact-soft-at 20% --compact-at 50% --compact-buffer 10%`.
@@ -77,10 +83,10 @@ usage, they are restored (unless a `self_compact` handoff is pending).
 
 ## Launch variants
 
-Token thresholds (the defaults) require a model window of at least ~300k tokens:
+Explicit token thresholds require a window large enough to fit them:
 
 ```bash
-# Defaults (225k / 250k / 20k) — needs a >=300k-token window.
+# Defaults: 225k / 250k / 20k, or 60% / 70% / 10% on windows too small for those.
 pi -e "$PACKAGE/extensions/self-compact/self-compact.ts"
 
 # Explicit token thresholds.
@@ -210,11 +216,13 @@ are fixtures used by those tests.
 
 SDK hosts using in-memory settings can supply the extension factory's optional
 second argument, `(ctx) => settingsManager.getCompactionKeepRecentTokens(ctx.model)`,
-so eligibility uses those same settings. Normal Pi loading reads its global and
-trusted project settings; the extension never modifies them.
+so eligibility uses those same settings. By default the extension reads the
+session's effective settings via `pi.getSettings()` (falling back to the global
+and trusted project settings files on hosts without it); it never modifies them.
 
 ## Dependencies
 
 - **Peer:** `@earendil-works/pi-coding-agent` (`>=0.87.0`) and `@earendil-works/pi-ai`
   (`>=0.87.0`). Uses only the public extension API.
-- **Runtime:** `typebox` (tool schema). No workspace or sibling-extension deps.
+- **Peer (host-provided):** `typebox` (tool schema), declared as a `"*"` peer so
+  Pi's own copy is used. No runtime, workspace, or sibling-extension deps.

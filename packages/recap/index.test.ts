@@ -47,7 +47,18 @@ function harness(entries: BranchEntry[] = messages(4)) {
     id: 'custom-model',
     api: 'custom-stream-api',
   } as Model<Api>;
-  const complete = vi.fn<ExtensionContext['modelRegistry']['complete']>();
+  // generateSummary uses streamSimple(...).result(); `complete` stands in for the result.
+  const complete =
+    vi.fn<
+      (
+        model: Model<Api>,
+        context: Parameters<ExtensionContext['modelRegistry']['complete']>[1],
+        options?: { signal?: AbortSignal },
+      ) => Promise<AssistantMessage>
+    >();
+  const streamSimple = vi.fn((m: Model<Api>, c: Parameters<typeof complete>[1], o?: { signal?: AbortSignal }) => ({
+    result: () => complete(m, c, o),
+  }));
   const branch = chain(entries);
   const pi = {
     appendEntry,
@@ -63,7 +74,7 @@ function harness(entries: BranchEntry[] = messages(4)) {
     mode: 'tui',
     model,
     isIdle: () => true,
-    modelRegistry: { complete, find: () => undefined, getAvailableOfType: vi.fn(async () => []) },
+    modelRegistry: { streamSimple, find: () => undefined, getAvailableOfType: vi.fn(async () => []) },
     sessionManager: { getBranch: () => branch },
     ui: { notify },
   } as unknown as ExtensionContext;
@@ -157,12 +168,107 @@ describe('recap extension', () => {
   it('reports background recap failures without an unhandled rejection', async () => {
     const { complete, ctx, handlers, notify } = harness();
     complete.mockRejectedValue(new Error('provider unavailable'));
+    notify.mockImplementation((msg: string) => {
+      if (msg.startsWith('recap:')) throw new Error('stale ctx');
+    });
 
     await handlers.get('session_start')!({}, ctx);
     await vi.advanceTimersByTimeAsync(180_000);
 
     expect(notify).toHaveBeenCalledWith('recap: provider unavailable', 'warning');
     await handlers.get('session_shutdown')!({}, ctx);
+  });
+
+  it('reports provider errors returned as stopReason error', async () => {
+    const { appendEntry, complete, ctx, handlers, notify } = harness();
+    complete.mockResolvedValue({
+      stopReason: 'error',
+      errorMessage: 'provider unavailable',
+      content: [],
+    } as unknown as AssistantMessage);
+
+    await handlers.get('session_start')!({}, ctx);
+    await vi.advanceTimersByTimeAsync(180_000);
+
+    expect(notify).toHaveBeenCalledWith('recap: provider unavailable', 'warning');
+    expect(appendEntry).not.toHaveBeenCalled();
+    await handlers.get('session_shutdown')!({}, ctx);
+  });
+
+  it('warns when the model returns an empty summary', async () => {
+    const { appendEntry, commands, complete, ctx, notify } = harness();
+    complete.mockResolvedValue({ stopReason: 'stop', content: [] } as unknown as AssistantMessage);
+
+    await commands.get('recap')!('', ctx);
+
+    expect(notify).toHaveBeenCalledWith('recap: model returned an empty summary', 'warning');
+    expect(appendEntry).not.toHaveBeenCalled();
+  });
+
+  it('does not warn about an empty summary when generation is skipped', async () => {
+    const noModel = harness();
+    noModel.ctx.model = undefined;
+    await noModel.commands.get('recap')!('', noModel.ctx);
+    expect(noModel.notify).toHaveBeenCalledWith('recap: no model available', 'warning');
+    expect(noModel.notify).not.toHaveBeenCalledWith('recap: model returned an empty summary', 'warning');
+
+    const empty = harness([]);
+    await empty.commands.get('recap')!('', empty.ctx);
+    expect(empty.notify).toHaveBeenCalledWith('recap: nothing to summarize yet', 'info');
+    expect(empty.notify).not.toHaveBeenCalledWith('recap: model returned an empty summary', 'warning');
+    expect(empty.complete).not.toHaveBeenCalled();
+  });
+
+  it('passes provider-neutral low reasoning', async () => {
+    const { commands, complete, ctx } = harness();
+    complete.mockResolvedValue({ content: [{ type: 'text', text: 'r' }] } as AssistantMessage);
+
+    await commands.get('recap')!('', ctx);
+
+    expect(complete.mock.calls[0]![2]).toMatchObject({ reasoning: 'low', cacheRetention: 'none' });
+  });
+
+  it.each(['session_shutdown', 'before_agent_start'])('aborts an in-flight recap on %s', async (event) => {
+    const { appendEntry, commands, complete, ctx, handlers, notify } = harness();
+    let resolve!: (m: AssistantMessage) => void;
+    complete.mockImplementation(() => new Promise((r) => (resolve = r)));
+
+    const pending = commands.get('recap')!('', ctx);
+    await vi.waitFor(() => expect(complete).toHaveBeenCalled());
+    const signal = complete.mock.calls[0]![2]!.signal!;
+    await handlers.get(event)!({}, ctx);
+    expect(signal.aborted).toBe(true);
+    resolve({ stopReason: 'aborted', errorMessage: 'aborted', content: [] } as unknown as AssistantMessage);
+    await pending;
+
+    expect(appendEntry).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalledWith(expect.stringContaining('aborted'), expect.anything());
+  });
+
+  it('stops silently when aborted during model selection', async () => {
+    mkdirSync(join(agentDir, 'configs'));
+    writeFileSync(join(agentDir, 'configs/recap.json'), JSON.stringify({ model: { provider: 'opt', id: 'm' } }));
+    const h = harness();
+    let release!: () => void;
+    let lookupSignal: AbortSignal | undefined;
+    vi.mocked(h.ctx.modelRegistry.getAvailableOfType).mockImplementation(
+      async (_type: unknown, _provider: unknown, options?: { signal?: AbortSignal }) => {
+        lookupSignal = options?.signal;
+        await new Promise<void>((r) => (release = r));
+        return [];
+      },
+    );
+
+    const pending = h.commands.get('recap')!('', h.ctx);
+    await vi.waitFor(() => expect(lookupSignal).toBeDefined());
+    await h.handlers.get('before_agent_start')!({}, h.ctx);
+    expect(lookupSignal!.aborted).toBe(true);
+    release();
+    await pending;
+
+    expect(h.complete).not.toHaveBeenCalled();
+    expect(h.notify).not.toHaveBeenCalledWith(expect.stringMatching(/^recap:/), expect.anything());
+    expect(h.appendEntry).not.toHaveBeenCalled();
   });
 
   it('summarizes the compacted context, not history before compaction', async () => {

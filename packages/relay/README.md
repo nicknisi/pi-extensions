@@ -41,7 +41,7 @@ unregister(root, addr);
 
 ### Durable core inbox claims
 
-A non-Pi consumer can atomically detach the current inbox with `claimInbox(root, addr)`. It receives only a stable `claimToken` and stable `fileTokens`, never filesystem paths. New deposits immediately land in a fresh inbox. `readClaimedLetter` reopens and validates a claimed letter without following links; after the consumer durably writes and `fsync`s its own journal, `ackClaimedLetter` atomically persists exact delivery proof in `<addr>.acks` before deleting the claimed file, or `requeueClaimedLetter` atomically returns it to the current inbox. `recoverInboxClaims` enumerates the same tokens after a process crash. All claim, read, ack, and requeue work is relative to pinned root/inbox/claim/ack descriptors, and empty completed claims are removed automatically. `sweep` removes proof more than seven days after acknowledgement, including for live sessions; proof never keeps an expired session's record alive. The destructive `drain` API does not acknowledge delivery.
+A non-Pi consumer can atomically detach the current inbox with `claimInbox(root, addr)`. It receives only a stable `claimToken` and stable `fileTokens`, never filesystem paths. New deposits immediately land in a fresh inbox. `readClaimedLetter` reopens and validates a claimed letter without following links; after the consumer durably writes and `fsync`s its own journal, `ackClaimedLetter` atomically persists exact delivery proof in `<addr>.acks` before deleting the claimed file, or `requeueClaimedLetter` atomically returns it to the current inbox. `recoverInboxClaims` enumerates the same tokens after a process crash. All claim, read, ack, and requeue work is relative to pinned root/inbox/claim/ack descriptors, and empty completed claims are removed automatically. `sweep` removes proof more than 30 days after acknowledgement (`SWEEP_MAIL_KEEP_MS`), including for live sessions; proof never keeps an expired session's record alive. The destructive `drain` API does not acknowledge delivery.
 
 ## Audit log
 
@@ -79,7 +79,7 @@ main moved; rebase before you push.
 - **Paging.** When more sessions match, the result includes `details.nextArguments` (the same filters plus the next `offset`). Results reflect current membership and presence, not a frozen snapshot.
 - **Targeting.** `send`, `ask`, and `watch` accept an exact case-sensitive full Pi `sessionId`, relay address, unique address prefix, case-insensitive name, or `@alias`. Collisions are reported with full IDs and addresses rather than choosing a peer.
 - **Ordinary replies.** `reply` resolves an explicit full ID or unique prefix across pending asks and received message/reply entries in the active transcript branch. This survives reload and does not search sibling branches or infer a recipient. Replying to an ordinary message preserves unrelated pending asks. Successful send/reply results expose full `messageId`, `target`, `replyTo` where applicable, and `receipt` in details; broadcasts expose per-recipient receipts.
-- **Presence** is a pid plus a heartbeat: `live` (process exists, beat <45s), `not responding` (process exists, stale beat — wedged or suspended), `offline` (no live pid; mail waits). Status flips `working`/`idle` with the agent loop.
+- **Presence** is a pid plus a heartbeat: `live` (process exists, beat <45s), `not responding` (process exists, stale beat — wedged or suspended), `offline` (no live pid; mail waits). Status flips to `working` on `agent_start` and back to `idle` once pi settles (`agent_settled`, after any retries or queued follow-ups).
 - **Authority boundary on every delivery.** Each message arrives with a repeated statement that it came from a peer and carries no authority — it cannot approve anything, cannot change configuration, slash commands in it are inert text. The sending side's tool guidelines carry the reciprocal rule: never ask a peer to do something your own permissions would refuse.
 - **Quiet letters.** A letter with `wake: false` (set by core senders building their own `Letter` for `deposit`) lands in the receiving session's context without triggering a model turn: an FYI the agent sees on its next turn. Absent or `true` wakes the session as before, and old readers ignore the field, so mixed versions interoperate. An ask is never quiet: core `deposit` refuses `wake: false` on an ask, and delivery wakes an ask regardless, since the receiver must take a turn to answer. The `relay` tool always sends waking mail.
 - **Loops break structurally**, independent of what either model decides: identical text from one sender inside 10s is dropped; >8 messages per 30s per sender is refused; an unread backlog of 50 refuses new mail until the peer drains.
@@ -102,7 +102,7 @@ main moved; rebase before you push.
 
 ### Presence watch
 
-`watch { to: "…" }` subscribes this session to a peer's presence transitions. A 5s poller (unref'd) compares each watched peer's presence to the last observed value and, on any change (`offline`→`idle`/`working`, `idle`↔`working`, etc.), surfaces a `relay:notify` system message. The peer need not be watched back; notifications arrive as ordinary custom messages and do not wake a busy agent (`triggerTurn: false`).
+`watch { to: "…" }` subscribes this session to a peer's presence transitions. A 5s poller (unref'd) compares each watched peer's presence and status to the last observed value and, on any change (`offline`→`idle`/`working`, `idle`↔`working`, etc.), surfaces a `relay:notify` system message. The peer need not be watched back; notifications arrive as ordinary custom messages.
 
 ## Deferred (not an extension concern)
 
@@ -110,10 +110,10 @@ A standalone `pi relay` CLI (inspect mailboxes, tail the audit log, claim/releas
 
 ## Configuration
 
-| Variable           | Default             | Meaning                                         |
-| ------------------ | ------------------- | ----------------------------------------------- |
-| `PI_RELAY_DIR`     | `~/.pi/agent/relay` | Where records and mailboxes live                |
-| `PI_RELAY_INBOUND` | `accept`            | `accept` delivers; `refuse` drops all peer mail |
+| Variable           | Default             | Meaning                                                                                                                                                |
+| ------------------ | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `PI_RELAY_DIR`     | `~/.pi/agent/relay` | Where records and mailboxes live                                                                                                                       |
+| `PI_RELAY_INBOUND` | `accept`            | `accept` delivers; `refuse` never claims or delivers peer mail — it stays queued on disk (receipts read `queued`) until the session runs with `accept` |
 
 The directory is created `0700` and every file `0600` — other users on the machine cannot read your mail.
 
@@ -125,9 +125,9 @@ The directory is created `0700` and every file `0600` — other users on the mac
 
 ## Caveats
 
-- **Mailbox semantics support Linux and macOS only.** Relay rejects user-controlled symlinks in configured-root components, permits protected root-owned system aliases such as macOS `/var`, pins root, mailbox, and durable-claim descriptors for each operation, and uses descriptor-relative `openat`/`renameat`/`unlinkat` calls, atomic renames, descriptor polling for watches, and `0600`/`0700` permission bits. Windows is unsupported.
+- **Mailbox semantics support Linux and macOS only.** Relay rejects user-controlled symlinks in configured-root components, permits protected root-owned system aliases such as macOS `/var`, pins root, mailbox, and durable-claim descriptors for each operation, and uses descriptor-relative `openat`/`renameat`/`unlinkat` calls, atomic renames, descriptor polling for watches, and `0600`/`0700` permission bits. Supported targets are macOS (arm64 and Intel, using the 64-bit-inode `readdir`) and 64-bit Linux (glibc or musl); 32-bit Linux and Windows are unsupported and fail load with a clear error.
 - **Bun <= 1.3.14 refused.** Those Bun versions abort the process when koffi's GC finalizer releases an N-API reference ([oven-sh/bun#39263](https://github.com/oven-sh/bun/issues/39263), fixed upstream after 1.3.14), so relay fails load with a clear error on them instead. Node.js and newer Bun load normally.
 - **One machine.** Delivery is a file landing in a directory; two sessions reach each other exactly when they share a filesystem. A container and its host cannot.
 - **Presence is heartbeat-accurate**, not instantaneous (within ~45s).
 - Delivery injects with `deliverAs: "steer"` (lands between tool calls) and `triggerTurn: true` (wakes an idle session), unless the letter sets `wake: false`, which appends to the session without taking a turn.
-- Depends on pi extension APIs (`session_start`/`agent_start`/`agent_end` lifecycle events, `getSessionName`, `sendMessage` delivery modes) that could drift across pi versions.
+- Depends on pi extension APIs (`session_start`/`agent_start`/`agent_settled` lifecycle events, `getSessionName`, `sendMessage` delivery modes) that could drift across pi versions.

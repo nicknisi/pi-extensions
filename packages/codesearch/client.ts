@@ -1,5 +1,5 @@
 // Adapted from dot-pi at 73fe0529c38f9a66fbf9a1b71c88d0d4980afceb. See THIRD_PARTY_NOTICES.md.
-import { truncateHead, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { truncateHead, type ExtensionAPI, type TruncationResult } from '@earendil-works/pi-coding-agent';
 
 export const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const TIMEOUT = 30_000;
@@ -181,8 +181,9 @@ export function sliceLines(text: string, startLine = 1, endLine?: number) {
   validateRange(startLine, endLine);
   const lines = text === '' ? [] : text.replace(/\r\n/g, '\n').split('\n');
   if (lines.at(-1) === '') lines.pop();
-  if (startLine > lines.length && !(lines.length === 0 && startLine === 1 && endLine === undefined))
-    throw new Error(`startLine ${startLine} exceeds file length (${lines.length} lines)`);
+  // An empty file has no lines to range over; report it as empty rather than as an out-of-range start.
+  if (lines.length === 0) return { text: '', startLine, endLine: 0, totalLines: 0 };
+  if (startLine > lines.length) throw new Error(`startLine ${startLine} exceeds file length (${lines.length} lines)`);
   const end = Math.min(endLine ?? lines.length, lines.length);
   return { text: lines.slice(startLine - 1, end).join('\n'), startLine, endLine: end, totalLines: lines.length };
 }
@@ -192,17 +193,22 @@ export async function fetchFile(pi: Pick<ExtensionAPI, 'exec'>, params: FetchPar
   signal?.throwIfAborted();
   const endpoint = `repos/${target.repo}/contents/${target.path.split('/').map(encodeURIComponent).join('/')}${target.ref ? `?ref=${encodeURIComponent(target.ref)}` : ''}`;
   let result: Awaited<ReturnType<ExtensionAPI['exec']>> | undefined;
+  let ghError: string;
   try {
     result = await pi.exec(
       'gh',
       ['api', '--hostname', 'github.com', endpoint, '--include', '-H', 'Accept: application/vnd.github.raw+json'],
-      { ...(signal ? { signal } : {}), timeout: TIMEOUT },
+      // Headers precede the body, so leave headroom above the body limit.
+      { ...(signal ? { signal } : {}), timeout: TIMEOUT, maxBuffer: MAX_BODY_BYTES + 64 * 1024 },
     );
-  } catch {
+    ghError = `exit ${result.code}${result.stderr.trim() ? `: ${result.stderr.trim().slice(0, 500)}` : ''}`;
+  } catch (error) {
     signal?.throwIfAborted();
     // Missing gh, authentication failures, and command failures use the public API.
+    ghError = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500);
   }
   signal?.throwIfAborted();
+  if (result?.truncated) throw new Error('GitHub file exceeds body limit');
   let body: { text: string; contentType: string };
   if (result?.code === 0 && !result.killed) {
     const boundary = /\r?\n\r?\n/.exec(result.stdout);
@@ -213,11 +219,17 @@ export async function fetchFile(pi: Pick<ExtensionAPI, 'exec'>, params: FetchPar
       contentType: /^Content-Type:\s*([^\r\n]+)/im.exec(headers)?.[1] ?? '',
     };
   } else {
-    body = await fetchText(
-      `https://api.github.com/${endpoint}`,
-      { headers: { Accept: 'application/vnd.github.raw+json', 'User-Agent': 'pi-codesearch' } },
-      signal,
-    );
+    try {
+      body = await fetchText(
+        `https://api.github.com/${endpoint}`,
+        { headers: { Accept: 'application/vnd.github.raw+json', 'User-Agent': 'pi-codesearch' } },
+        signal,
+      );
+    } catch (error) {
+      signal?.throwIfAborted();
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`${message} (public GitHub API; gh api failed with ${ghError})`, { cause: error });
+    }
   }
   signal?.throwIfAborted();
   if (body.contentType.split(';')[0]?.trim().toLowerCase() !== 'application/vnd.github.raw+json')
@@ -228,14 +240,23 @@ export async function fetchFile(pi: Pick<ExtensionAPI, 'exec'>, params: FetchPar
   return { ...target, ...sliceLines(text, params.startLine, params.endLine) };
 }
 
-export function bounded(text: string, advice: string) {
+/** Continuation hint for a truncated codefetch slice starting at `startLine`. */
+export function fetchAdvice(startLine: number, truncation: TruncationResult) {
+  if (truncation.firstLineExceedsLimit)
+    return `Line ${startLine} alone exceeds the output limit and cannot be returned by line slicing.`;
+  const next = startLine + truncation.outputLines;
+  return `Returned lines ${startLine}-${next - 1}. Use codefetch with startLine=${next} (and a narrower endLine) to continue. A single oversized line cannot be returned.`;
+}
+
+export function bounded(text: string, advice: string | ((truncation: TruncationResult) => string)) {
   // Reserve space for the notice within Pi's 50 KiB / 2000 line output budget.
   const truncation = truncateHead(text, { maxBytes: 50 * 1024 - 512, maxLines: 1998 });
+  const notice = typeof advice === 'function' ? advice(truncation) : advice;
   return {
     content: [
       {
         type: 'text' as const,
-        text: truncation.content + (truncation.truncated ? `\n\n[Output truncated. ${advice}]` : ''),
+        text: truncation.content + (truncation.truncated ? `\n\n[Output truncated. ${notice}]` : ''),
       },
     ],
     details: { truncation },

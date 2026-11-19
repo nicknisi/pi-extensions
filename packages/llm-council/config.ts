@@ -98,27 +98,52 @@ function projectConfigPath(cwd: string): string {
   return join(cwd, '.pi', 'configs', 'llm-council.json');
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Missing, malformed, or non-object config files read as `{}`. */
 function readJson(path: string): Partial<LlmCouncilUserConfig> {
   try {
-    return JSON.parse(readFileSync(path, 'utf8'));
+    const value: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    return isPlainObject(value) ? (value as Partial<LlmCouncilUserConfig>) : {};
   } catch {
     return {};
   }
 }
 
-// ── Global config (shared + display + default council) ─────────────────────
+/**
+ * Keep only council entries with a non-empty string `model`. Non-arrays and
+ * arrays with no valid entries return `undefined` so the next layer applies.
+ */
+function validCouncil(value: unknown, source: string): CouncilMemberUserConfig[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    console.error(`[llm-council] ignoring member.council in ${source}: expected an array`);
+    return undefined;
+  }
+  const valid = value.filter(
+    (entry): entry is CouncilMemberUserConfig =>
+      isPlainObject(entry) && typeof entry.model === 'string' && entry.model.trim() !== '',
+  );
+  if (valid.length < value.length) {
+    console.error(
+      `[llm-council] ignoring ${value.length - valid.length} member.council entr${value.length - valid.length === 1 ? 'y' : 'ies'} in ${source}: each needs a non-empty string "model"`,
+    );
+  }
+  return valid.length > 0 ? valid : undefined;
+}
+
+// ── Global config (shared + display) ───────────────────────────────────────
 // Loaded once at module load. Rendering uses this for shared/display settings
 // (which don't vary per project). The council lineup + exec config is resolved
-// per-call via loadCouncil(cwd) so project-local overrides take effect.
+// per-call via loadCouncil() so project-local overrides take effect.
 
 const userConfig = loadUserConfig();
 
 function loadUserConfig(): LlmCouncilUserConfig {
   return readJson(councilConfigPath());
 }
-
-const memberCouncil = userConfig.member?.council ?? DEFAULT_CONFIG.MEMBER.COUNCIL;
-const memberDefaultSystemPrompt = userConfig.member?.defaultSystemPrompt ?? DEFAULT_CONFIG.MEMBER.DEFAULT_SYSTEM_PROMPT;
 
 export const CONFIG = {
   shared: {
@@ -166,39 +191,18 @@ export const CONFIG = {
   },
 
   member: {
-    council: memberCouncil.map((m: CouncilMemberUserConfig, i: number) => ({
-      model: m.model,
-      displayName: m.displayName,
-      label: m.label ?? String(i + 1),
-      systemPrompt: m.systemPrompt ?? memberDefaultSystemPrompt,
-    })),
-    defaultSystemPrompt: memberDefaultSystemPrompt,
     display: {
       labelColor: userConfig.member?.display?.labelColor ?? DEFAULT_CONFIG.MEMBER.DISPLAY.LABEL_COLOR,
       modelColor: userConfig.member?.display?.modelColor ?? DEFAULT_CONFIG.MEMBER.DISPLAY.MODEL_COLOR,
     },
-    tools: userConfig.member?.tools ?? DEFAULT_CONFIG.MEMBER.TOOLS,
-    thinking: userConfig.member?.thinking ?? DEFAULT_CONFIG.MEMBER.THINKING,
-    extensions: userConfig.member?.extensions ?? DEFAULT_CONFIG.MEMBER.EXTENSIONS,
-    skills: userConfig.member?.skills ?? DEFAULT_CONFIG.MEMBER.SKILLS,
-    contextFiles: userConfig.member?.contextFiles ?? DEFAULT_CONFIG.MEMBER.CONTEXT_FILES,
   },
 
   chairman: {
-    model: userConfig.chairman?.model ?? DEFAULT_CONFIG.CHAIRMAN.MODEL,
-    displayName: userConfig.chairman?.displayName ?? DEFAULT_CONFIG.CHAIRMAN.DISPLAY_NAME,
-    systemPrompt: userConfig.chairman?.systemPrompt ?? DEFAULT_CONFIG.CHAIRMAN.SYSTEM_PROMPT,
-    exposePersonas: userConfig.chairman?.exposePersonas ?? DEFAULT_CONFIG.CHAIRMAN.EXPOSE_PERSONAS,
     display: {
       icon: userConfig.chairman?.display?.icon ?? DEFAULT_CONFIG.CHAIRMAN.DISPLAY.ICON,
       labelColor: userConfig.chairman?.display?.labelColor ?? DEFAULT_CONFIG.CHAIRMAN.DISPLAY.LABEL_COLOR,
       modelColor: userConfig.chairman?.display?.modelColor ?? DEFAULT_CONFIG.CHAIRMAN.DISPLAY.MODEL_COLOR,
     },
-    tools: userConfig.chairman?.tools ?? DEFAULT_CONFIG.CHAIRMAN.TOOLS,
-    thinking: userConfig.chairman?.thinking ?? DEFAULT_CONFIG.CHAIRMAN.THINKING,
-    extensions: userConfig.chairman?.extensions ?? DEFAULT_CONFIG.CHAIRMAN.EXTENSIONS,
-    skills: userConfig.chairman?.skills ?? DEFAULT_CONFIG.CHAIRMAN.SKILLS,
-    contextFiles: userConfig.chairman?.contextFiles ?? DEFAULT_CONFIG.CHAIRMAN.CONTEXT_FILES,
   },
 };
 
@@ -227,24 +231,31 @@ export interface ResolvedCouncil {
   };
 }
 
-/** Execution settings reload per call. Display settings remain module-scoped. */
-export function loadCouncil(cwd: string): ResolvedCouncil {
+/**
+ * Execution settings reload per call. Display settings remain module-scoped.
+ * The project file can grant child sessions tools and prompts, so it is only
+ * read when the project is trusted (`ctx.isProjectTrusted()`).
+ */
+export function loadCouncil(cwd: string, projectTrusted: boolean): ResolvedCouncil {
   const global = loadUserConfig();
-  const proj = readJson(projectConfigPath(cwd));
+  const projectPath = projectConfigPath(cwd);
+  const proj = projectTrusted ? readJson(projectPath) : {};
   const gm = global.member;
   const gc = global.chairman;
   const pm = proj.member;
   const pc = proj.chairman;
   const defaultSystemPrompt =
     pm?.defaultSystemPrompt ?? gm?.defaultSystemPrompt ?? DEFAULT_CONFIG.MEMBER.DEFAULT_SYSTEM_PROMPT;
-  const council = (pm?.council ?? gm?.council ?? DEFAULT_CONFIG.MEMBER.COUNCIL).map(
-    (m: CouncilMemberUserConfig, i) => ({
-      model: m.model,
-      displayName: m.displayName,
-      label: m.label ?? String(i + 1),
-      systemPrompt: m.systemPrompt ?? defaultSystemPrompt,
-    }),
-  );
+  const council = (
+    validCouncil(pm?.council, projectPath) ??
+    validCouncil(gm?.council, councilConfigPath()) ??
+    DEFAULT_CONFIG.MEMBER.COUNCIL
+  ).map((m: CouncilMemberUserConfig, i) => ({
+    model: m.model,
+    displayName: m.displayName,
+    label: m.label ?? String(i + 1),
+    systemPrompt: m.systemPrompt ?? defaultSystemPrompt,
+  }));
   const chairmanModel = pc?.model ?? gc?.model ?? DEFAULT_CONFIG.CHAIRMAN.MODEL;
 
   return {
@@ -296,7 +307,7 @@ export async function saveCouncilDefaults(selection: CouncilSelection): Promise<
         throw new Error(`Invalid council config at ${path}. Expected objects. File left unchanged.`);
       }
     }
-    const previous = value.member?.council as CouncilMemberUserConfig[] | undefined;
+    const previous = validCouncil(value.member?.council, path);
     value.member = {
       ...value.member,
       council: selection.models.map((model) => ({

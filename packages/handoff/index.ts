@@ -13,8 +13,9 @@
  * The generated prompt appears as a draft in the editor for review/editing.
  */
 
+import { open } from 'node:fs/promises';
 import type { Message } from '@earendil-works/pi-ai';
-import type { ExtensionAPI, SessionEntry } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, ExtensionCommandContext, SessionEntry } from '@earendil-works/pi-coding-agent';
 import { BorderedLoader, convertToLlm, serializeConversation } from '@earendil-works/pi-coding-agent';
 
 const SYSTEM_PROMPT = `You are a context transfer assistant. Given a conversation history and the user's goal for a new thread, generate a focused prompt that:
@@ -44,6 +45,10 @@ const CONVERSATION_SHARE = 0.7;
 const RECENT_REQUESTS = 5;
 const REQUEST_MAX_CHARS = 2000;
 
+const TRUNCATED = '… [truncated]';
+const MAX_CHAIN_DEPTH = 20;
+const HEADER_READ_BYTES = 64 * 1024;
+
 /** Serialize newest-first until the char budget is spent, so long sessions can't overflow the model. */
 export function fitConversation(messages: Message[], maxChars: number): string {
   const kept: string[] = [];
@@ -52,7 +57,14 @@ export function fitConversation(messages: Message[], maxChars: number): string {
     const text = serializeConversation([message]);
     if (!text) continue;
     if (used + text.length > maxChars) {
-      return [`[${i + 1} earlier messages omitted to fit the context window]`, ...kept.reverse()].join('\n\n');
+      // A newest message bigger than the whole budget would otherwise leave the model nothing at all.
+      let omitted = i + 1;
+      if (kept.length === 0) {
+        kept.push(`${text.slice(0, Math.max(0, maxChars - TRUNCATED.length))}${TRUNCATED}`);
+        omitted = i;
+      }
+      if (omitted === 0) return kept.reverse().join('\n\n');
+      return [`[${omitted} earlier messages omitted to fit the context window]`, ...kept.reverse()].join('\n\n');
     }
     kept.push(text);
     used += text.length + 2;
@@ -76,8 +88,131 @@ export function recentRequests(messages: readonly { role: string; content?: unkn
     .map((m) => textOf(m.content).trim())
     .filter((text) => text !== '')
     .slice(-RECENT_REQUESTS)
-    .map((text) => (text.length > REQUEST_MAX_CHARS ? `${text.slice(0, REQUEST_MAX_CHARS)}… [truncated]` : text));
+    .map((text) => (text.length > REQUEST_MAX_CHARS ? `${text.slice(0, REQUEST_MAX_CHARS)}${TRUNCATED}` : text));
 }
+
+type ContextMessage = Parameters<typeof convertToLlm>[0][number];
+
+/**
+ * Turn branch entries into the messages the agent saw: plain messages plus
+ * compaction summaries, /tree branch summaries and extension custom messages.
+ */
+export function entriesToMessages(entries: readonly SessionEntry[]): ContextMessage[] {
+  return entries.flatMap((entry): ContextMessage[] => {
+    const timestamp = new Date(entry.timestamp).getTime();
+    switch (entry.type) {
+      case 'message':
+        return [entry.message];
+      case 'compaction':
+        return [{ role: 'compactionSummary', summary: entry.summary, tokensBefore: entry.tokensBefore, timestamp }];
+      case 'branch_summary':
+        return entry.summary
+          ? [{ role: 'branchSummary', summary: entry.summary, fromId: entry.fromId, timestamp }]
+          : [];
+      case 'custom_message':
+        return [
+          {
+            role: 'custom',
+            customType: entry.customType,
+            content: entry.content ?? [],
+            display: entry.display,
+            details: entry.details,
+            timestamp,
+          },
+        ];
+      default:
+        return [];
+    }
+  });
+}
+
+/** Read and parse the JSONL header (first line) of a session file, or undefined if unreadable. */
+async function readSessionHeader(file: string): Promise<{ parentSession?: unknown } | undefined> {
+  try {
+    const handle = await open(file, 'r');
+    try {
+      const buffer = Buffer.alloc(HEADER_READ_BYTES);
+      const { bytesRead } = await handle.read(buffer, 0, HEADER_READ_BYTES, 0);
+      const firstLine = buffer.toString('utf8', 0, bytesRead).split('\n', 1)[0] ?? '';
+      const header: unknown = JSON.parse(firstLine);
+      return header && typeof header === 'object' ? header : undefined;
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+/** The current session followed by its ancestors, stopping at unreadable files, cycles, or MAX_CHAIN_DEPTH. */
+export async function buildSessionChain(
+  currentFile: string | undefined,
+  parent: string | undefined,
+): Promise<string[]> {
+  const chain: string[] = currentFile ? [currentFile] : [];
+  const seen = new Set(chain);
+  let next = parent;
+  while (next && !seen.has(next) && chain.length < MAX_CHAIN_DEPTH) {
+    chain.push(next);
+    seen.add(next);
+    const header = await readSessionHeader(next);
+    next = typeof header?.parentSession === 'string' ? header.parentSession : undefined;
+  }
+  return chain;
+}
+
+type GenerateResult = { text: string | null; error?: string };
+
+async function generatePrompt(
+  ctx: ExtensionCommandContext,
+  conversationText: string,
+  goal: string,
+  signal: AbortSignal | undefined,
+): Promise<GenerateResult> {
+  const model = ctx.model!;
+  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+  if (!auth.ok) {
+    return { text: null, error: `No API key for ${model.provider}/${model.id}: ${auth.error}` };
+  }
+
+  const userMessage: Message = {
+    role: 'user',
+    content: [
+      {
+        type: 'text',
+        text: `## Conversation History\n\n${conversationText}\n\n## User's Goal for New Thread\n\n${goal}`,
+      },
+    ],
+    timestamp: Date.now(),
+  };
+
+  const response = await ctx.modelRegistry.complete(
+    model,
+    { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
+    { signal },
+  );
+
+  if (response.stopReason === 'aborted') return { text: null };
+  if (response.stopReason === 'error') return { text: null, error: response.errorMessage || 'Unknown error' };
+
+  const textContent = response.content
+    .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
+    .map((c) => c.text)
+    .join('\n');
+
+  if (!textContent) {
+    return {
+      text: null,
+      error: `No text in response. Stop reason: ${response.stopReason}, content types: ${response.content.map((c) => c.type).join(', ')}`,
+    };
+  }
+  return { text: textContent };
+}
+
+const toError = (err: unknown): GenerateResult => ({
+  text: null,
+  error: (err instanceof Error && err.message) || String(err),
+});
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand('handoff', {
@@ -99,11 +234,9 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // Gather conversation context from current branch
+      // Gather what the agent saw on the current branch, including summaries and custom messages
       const branch = ctx.sessionManager.getBranch();
-      const messages = branch
-        .filter((entry): entry is SessionEntry & { type: 'message' } => entry.type === 'message')
-        .map((entry) => entry.message);
+      const messages = entriesToMessages(branch);
 
       if (messages.length === 0) {
         ctx.ui.notify('No conversation to hand off', 'error');
@@ -117,85 +250,24 @@ export default function (pi: ExtensionAPI) {
         Math.floor((ctx.model.contextWindow || 128_000) * CONVERSATION_SHARE) * 4,
       );
       const currentSessionFile = ctx.sessionManager.getSessionFile();
+      const sessionChain = await buildSessionChain(currentSessionFile, ctx.sessionManager.getHeader()?.parentSession);
 
-      // Build the chain of parent sessions
-      const sessionChain: string[] = currentSessionFile ? [currentSessionFile] : [];
-      const header = ctx.sessionManager.getHeader();
-      let parentSession = header?.parentSession;
-      while (parentSession) {
-        sessionChain.push(parentSession);
-        // Try to read parent's header to find its parent
-        try {
-          const { stdout } = await pi.exec('head', ['-1', parentSession]);
-          const parentHeader = JSON.parse(stdout);
-          parentSession = parentHeader.parentSession;
-        } catch {
-          break;
-        }
+      // Generate the handoff prompt: abortable loader in the TUI; RPC has no custom components, so run it directly.
+      let result: GenerateResult | undefined;
+      if (ctx.mode === 'tui') {
+        result = await ctx.ui.custom<GenerateResult>((tui, theme, _kb, done) => {
+          const loader = new BorderedLoader(tui, theme, `Generating handoff prompt...`);
+          loader.onAbort = () => done({ text: null });
+          generatePrompt(ctx, conversationText, goal, loader.signal)
+            .then(done)
+            .catch((err) => done(toError(err)));
+          return loader;
+        });
+      } else {
+        ctx.ui.notify('Generating handoff prompt...', 'info');
+        result = await generatePrompt(ctx, conversationText, goal, undefined).catch(toError);
       }
-
-      // Generate the handoff prompt with loader UI
-      const result = await ctx.ui.custom<{ text: string | null; error?: string }>((tui, theme, _kb, done) => {
-        const loader = new BorderedLoader(tui, theme, `Generating handoff prompt...`);
-        loader.onAbort = () => done({ text: null });
-
-        const doGenerate = async () => {
-          const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model!);
-          if (!auth.ok) {
-            return {
-              text: null,
-              error: `No API key for ${ctx.model!.provider}/${ctx.model!.id}: ${auth.error}`,
-            };
-          }
-
-          const userMessage: Message = {
-            role: 'user',
-            content: [
-              {
-                type: 'text',
-                text: `## Conversation History\n\n${conversationText}\n\n## User's Goal for New Thread\n\n${goal}`,
-              },
-            ],
-            timestamp: Date.now(),
-          };
-
-          const response = await ctx.modelRegistry.complete(
-            ctx.model!,
-            { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-            { signal: loader.signal },
-          );
-
-          if (response.stopReason === 'aborted') {
-            return { text: null };
-          }
-
-          if (response.stopReason === 'error') {
-            return { text: null, error: response.errorMessage || 'Unknown error' };
-          }
-
-          const textContent = response.content
-            .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
-            .map((c) => c.text)
-            .join('\n');
-
-          if (!textContent) {
-            return {
-              text: null,
-              error: `No text in response. Stop reason: ${response.stopReason}, content types: ${response.content.map((c) => c.type).join(', ')}`,
-            };
-          }
-
-          return { text: textContent };
-        };
-
-        doGenerate()
-          .then(done)
-          .catch((err) => {
-            done({ text: null, error: err.message || String(err) });
-          });
-
-        return loader;
-      });
+      result ??= { text: null };
 
       if (result.error) {
         ctx.ui.notify(`Handoff failed: ${result.error}`, 'error');

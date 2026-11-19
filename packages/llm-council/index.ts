@@ -48,6 +48,7 @@ import { applyColor, formatElapsed, getVisibleWidth } from './utils.js';
 
 const SPINNER_FRAMES = [...CONFIG.shared.spinner.prefixChars, ...[...CONFIG.shared.spinner.prefixChars].reverse()];
 const INDENT_WIDTH = getVisibleWidth(CONFIG.shared.branch.prefix) + 1;
+const CHAIRMAN_SKIPPED_LABEL = 'Not run: no member answers';
 
 // ── Styling helpers ──────────────────────────────────────────────────────
 
@@ -170,22 +171,45 @@ function renderMemberTree(
   return lines;
 }
 
+// Tool calls whose execute() is still running. pi gives tool components no
+// dispose hook, so a spinner whose component was dropped (chat rebuild,
+// /resume, restored call without a result) would tick forever; instead each
+// interval stops itself once its call is no longer running here.
+const runningCalls = new Set<string>();
+const spinnerIntervals = new Set<ReturnType<typeof setInterval>>();
+
 function ensureSpinner(ctx: any): number {
-  if (ctx?.state?.spinnerInterval) return ctx.state.spinnerFrame ?? 0;
-  if (!ctx?.state) ctx.state = {};
-  ctx.state.spinnerFrame = 0;
-  ctx.state.spinnerInterval = setInterval(() => {
-    ctx.state.spinnerFrame = (ctx.state.spinnerFrame + 1) % SPINNER_FRAMES.length;
-    ctx.invalidate?.();
+  if (!ctx?.state) return 0;
+  if (ctx.state.spinnerInterval || !runningCalls.has(ctx.toolCallId)) return ctx.state.spinnerFrame ?? 0;
+  const state = ctx.state;
+  const toolCallId: string = ctx.toolCallId;
+  const invalidate: (() => void) | undefined = ctx.invalidate;
+  state.spinnerFrame = 0;
+  const interval = setInterval(() => {
+    if (!runningCalls.has(toolCallId)) {
+      clearSpinner({ state });
+      invalidate?.();
+      return;
+    }
+    state.spinnerFrame = (state.spinnerFrame + 1) % SPINNER_FRAMES.length;
+    invalidate?.();
   }, CONFIG.shared.spinner.interval);
+  state.spinnerInterval = interval;
+  spinnerIntervals.add(interval);
   return 0;
 }
 
 function clearSpinner(ctx: any) {
   if (ctx?.state?.spinnerInterval) {
     clearInterval(ctx.state.spinnerInterval);
+    spinnerIntervals.delete(ctx.state.spinnerInterval);
     ctx.state.spinnerInterval = undefined;
   }
+}
+
+function clearAllSpinners() {
+  for (const interval of spinnerIntervals) clearInterval(interval);
+  spinnerIntervals.clear();
 }
 
 function spinnerDot(theme: Theme, frame: number): string {
@@ -297,8 +321,9 @@ interface CouncilDetails {
 
 // Council `extensions`/`skills` entries are bare resource names resolved under
 // the user's own agent dir. Project-local config (<cwd>/.pi/configs/llm-council.json)
-// is untrusted repository input, so names are containment-checked by the shared
-// resolver before reaching the child's resource loader.
+// is only read for trusted projects, but it is still repository input, so names
+// are containment-checked by the shared resolver before reaching the child's
+// resource loader.
 function resolveResourceNames(kind: 'extensions' | 'skills', names: string[] | null, leaf: string): string[] {
   if (!names?.length) return [];
   const out: string[] = [];
@@ -327,7 +352,7 @@ async function runCouncil(
   // The chairman synthesizes member answers; it only needs the bare question,
   // not the conversation context members were given.
   chairmanQuestion = question,
-): Promise<{ content: { type: 'text'; text: string }[]; details: CouncilDetails }> {
+): Promise<{ content: { type: 'text'; text: string }[]; details: CouncilDetails; isError?: boolean }> {
   signal?.throwIfAborted();
   const memberSpawn = {
     tools: council.member.tools ?? [],
@@ -401,6 +426,7 @@ async function runCouncil(
     return {
       content: [{ type: 'text', text: `Council failed: no models returned valid responses.` }],
       details,
+      isError: true,
     };
   }
 
@@ -469,6 +495,7 @@ async function runCouncil(
   return {
     content: [{ type: 'text', text: finalText }],
     details,
+    ...(chairman.status === 'error' ? { isError: true } : {}),
   };
 }
 
@@ -497,7 +524,8 @@ export default function (pi: ExtensionAPI) {
     );
     return pending;
   };
-  const currentCouncil = (ctx: ExtensionContext) => applySelection(loadCouncil(ctx.cwd), restoreSelection(ctx) ?? {});
+  const currentCouncil = (ctx: ExtensionContext) =>
+    applySelection(loadCouncil(ctx.cwd, ctx.isProjectTrusted()), restoreSelection(ctx) ?? {});
   const refreshStatus = (ctx: ExtensionContext) =>
     updateCouncilStatus(ctx, currentCouncil(ctx), !!restoreSelection(ctx));
   pi.on('session_start', (_event, ctx) => {
@@ -506,6 +534,7 @@ export default function (pi: ExtensionAPI) {
     refreshStatus(ctx);
   });
   pi.on('session_tree', (_event, ctx) => refreshStatus(ctx));
+  pi.on('session_shutdown', () => clearAllSpinners());
 
   pi.registerMessageRenderer<CouncilDetails>('llm-council-result', (message, options, theme) => {
     const container = new Container();
@@ -710,28 +739,33 @@ export default function (pi: ExtensionAPI) {
       ),
     }),
 
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      const overrides = await resolveModels(params, ctx, signal);
-      const council = applySelection(currentCouncil(ctx), overrides);
-      signal?.throwIfAborted();
-      return runCouncil(subagents, params.question, ctx.cwd, council, signal, (details) => {
-        const stageLabels: Record<string, string> = {
-          members: CONFIG.shared.status.waitingLabel,
-          chairman: CONFIG.shared.status.synthesizingLabel,
-          complete: CONFIG.shared.status.doneLabel,
-          error: CONFIG.shared.status.errorLabel,
-        };
-        const doneCount = details.members.filter((m) => m.status === 'done' || m.status === 'error').length;
-        const stageText = stageLabels[details.stage] || details.stage;
-        let text = `[Council] ${stageText}`;
-        if (details.stage === 'members') {
-          text += ` ${doneCount}/${details.members.length} done`;
-        }
-        onUpdate?.({
-          content: [{ type: 'text', text }],
-          details,
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      runningCalls.add(toolCallId);
+      try {
+        const overrides = await resolveModels(params, ctx, signal);
+        const council = applySelection(currentCouncil(ctx), overrides);
+        signal?.throwIfAborted();
+        return await runCouncil(subagents, params.question, ctx.cwd, council, signal, (details) => {
+          const stageLabels: Record<string, string> = {
+            members: CONFIG.shared.status.waitingLabel,
+            chairman: CONFIG.shared.status.synthesizingLabel,
+            complete: CONFIG.shared.status.doneLabel,
+            error: CONFIG.shared.status.errorLabel,
+          };
+          const doneCount = details.members.filter((m) => m.status === 'done' || m.status === 'error').length;
+          const stageText = stageLabels[details.stage] || details.stage;
+          let text = `[Council] ${stageText}`;
+          if (details.stage === 'members') {
+            text += ` ${doneCount}/${details.members.length} done`;
+          }
+          onUpdate?.({
+            content: [{ type: 'text', text }],
+            details,
+          });
         });
-      });
+      } finally {
+        runningCalls.delete(toolCallId);
+      }
     },
 
     renderCall(args, theme, ctx) {
@@ -743,7 +777,7 @@ export default function (pi: ExtensionAPI) {
 
       if (!ctx?.isPartial) {
         clearSpinner(ctx);
-        return makeText(ctx?.lastComponent, toolHeader('LLM Council', summary, theme));
+        return makeText(ctx?.lastComponent, toolHeader('LLM Council', summary, theme, undefined, ctx?.isError));
       }
 
       // Header only: the tree is rendered solely by renderResult. pi keeps the
@@ -776,7 +810,7 @@ export default function (pi: ExtensionAPI) {
                 CONFIG.shared.status.errorColor,
                 m.error?.slice(0, 60) || CONFIG.shared.status.errorLabel,
               ),
-            chairmanSubLine: applyColor(theme, CONFIG.shared.status.workingColor, CONFIG.shared.status.waitingLabel),
+            chairmanSubLine: applyColor(theme, CONFIG.shared.status.workingColor, CHAIRMAN_SKIPPED_LABEL),
           }),
         ];
         return makeText(ctx?.lastComponent, lines.join('\n'));

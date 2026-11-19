@@ -269,6 +269,8 @@ export default function headsUp(pi: ExtensionAPI) {
   let inflight: AbortController | undefined;
   // Resolved once per session; undefined means no classifier, so checks run ungated.
   let gate: Promise<Classifier | undefined> | undefined;
+  // While heads-up is off, tick re-reads the store at most once per cooldown.
+  let disabledUntil = 0;
 
   const isLong = (now: number) => turn.tools >= config.minTools || now - turn.startedAt >= minMs;
 
@@ -401,23 +403,30 @@ export default function headsUp(pi: ExtensionAPI) {
   const tick = (ctx: ExtensionContext) => {
     const now = Date.now();
     const due = checkWanted || (turn.running && isLong(now));
-    if (!due || checking || now - lastCheckAt < cooldownMs) return;
+    if (!due || checking || now - lastCheckAt < cooldownMs || now < disabledUntil) return;
     checkWanted = false;
-    if (shown || readStore().disabled) return;
+    if (shown) return;
+    if (readStore().disabled) {
+      disabledUntil = now + cooldownMs;
+      return;
+    }
     void runCheck(ctx);
   };
 
   pi.on('session_start', async (_event, ctx) => {
     gate = undefined;
+    disabledUntil = 0;
     for (const warning of warnings) ctx.ui.notify(warning, 'warning');
     if (ctx.mode !== 'tui') return;
     if (timer) clearInterval(timer);
     timer = setInterval(() => tick(ctx), TICK_MS);
   });
 
-  pi.on('session_tree', () => {
+  // The note is about the old branch's work, so it goes with it.
+  pi.on('session_tree', (_event, ctx) => {
     inflight?.abort();
     checkWanted = false;
+    clearNote(ctx);
   });
 
   pi.on('session_shutdown', async () => {
@@ -474,13 +483,20 @@ export default function headsUp(pi: ExtensionAPI) {
             theme,
             current,
             async (variant, signal) => {
-              const reply = await ask(
-                ctx,
-                variantSystem,
-                variantPrompt(sessionDigest(ctx), current.note, variant),
-                signal,
-              );
-              return reply?.text || null;
+              try {
+                const reply = await ask(
+                  ctx,
+                  variantSystem,
+                  variantPrompt(sessionDigest(ctx), current.note, variant),
+                  signal,
+                );
+                return reply?.text || null;
+              } catch (error) {
+                if (signal.aborted) return null;
+                const message = error instanceof Error ? error.message : String(error);
+                ctx.ui.notify(`heads-up: rewrite failed: ${message}`, 'warning');
+                return null;
+              }
             },
             () => logEvent('explained', current.note.learn),
             done,
@@ -527,9 +543,13 @@ export default function headsUp(pi: ExtensionAPI) {
         updateStore((s) => {
           s.disabled = arg === 'off';
         });
+        disabledUntil = 0;
         if (arg === 'off') clearNote(ctx);
         ctx.ui.notify(`heads-up is ${arg}.`, 'info');
         return;
+      }
+      if ((arg === 'show' || arg === 'check') && ctx.mode !== 'tui') {
+        return ctx.ui.notify('heads-up only runs in the TUI', 'info');
       }
       if (arg === 'show') return openPanel(ctx);
       if (arg === 'check') {

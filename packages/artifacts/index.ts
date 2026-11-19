@@ -29,10 +29,12 @@ import {
   listArtifacts,
   openInBrowser,
   artifactPath,
+  artifactKind,
+  readArtifact,
   revealFile,
   sourcePath,
 } from './utils.js';
-import { renderMarkdownDocument, renderHtmlDocument } from './templates.js';
+import { loadTemplates } from './render.js';
 
 interface ArtifactDetails {
   action: string;
@@ -122,7 +124,9 @@ export default function artifacts(pi: ExtensionAPI) {
     } catch {
       return undefined;
     }
-    const local = target.hostname === '127.0.0.1' || target.hostname === 'localhost';
+    // Content is also served from per-artifact `<label>.localhost` origins.
+    const local =
+      target.hostname === '127.0.0.1' || target.hostname === 'localhost' || target.hostname.endsWith('.localhost');
     if (!local || target.port !== String(port)) return undefined;
     return {
       block: true,
@@ -300,7 +304,7 @@ export default function artifacts(pi: ExtensionAPI) {
         }),
       ),
     }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const action = params.action;
 
       // ── list ──────────────────────────────────────────────────────────────
@@ -352,7 +356,8 @@ export default function artifacts(pi: ExtensionAPI) {
 
       // ── open ───────────────────────────────────────────────────────────────
       if (action === 'open') {
-        if (!artifactExists(slug)) {
+        const stored = readArtifact(slug);
+        if (stored == null) {
           return errResult(`no artifact with slug "${slug}" — create it first.`, { slug, title });
         }
         const url = await artifactUrl(slug);
@@ -362,7 +367,7 @@ export default function artifacts(pi: ExtensionAPI) {
           action,
           slug,
           title,
-          kind: kind ?? 'markdown',
+          kind: artifactKind(stored),
           url,
           absPath,
         };
@@ -381,7 +386,7 @@ export default function artifacts(pi: ExtensionAPI) {
         const bake = params.annotations !== false;
         try {
           if (method === 'clipboard') {
-            const res = await shareBaked(slug, title, 'copy', { bake });
+            const res = await shareBaked(slug, title, 'copy', { bake, signal });
             const note = res.count ? ` — ${res.count} comment${res.count === 1 ? '' : 's'} baked in` : '';
             return {
               content: [
@@ -405,6 +410,7 @@ export default function artifacts(pi: ExtensionAPI) {
             const res = await shareBaked(slug, title, method, {
               baseUrl,
               bake,
+              signal,
               ...(params.width !== undefined ? { width: params.width } : {}),
               ...(params.height !== undefined ? { height: params.height } : {}),
             });
@@ -424,7 +430,7 @@ export default function artifacts(pi: ExtensionAPI) {
             };
           }
           // gist
-          const res = await shareBaked(slug, title, 'gist', { public: params.public ?? false, bake });
+          const res = await shareBaked(slug, title, 'gist', { public: params.public ?? false, bake, signal });
           const url = res.url!;
           const note = res.count ? ` — ${res.count} comment${res.count === 1 ? '' : 's'} baked in` : '';
           openInBrowser(url);
@@ -455,6 +461,8 @@ export default function artifacts(pi: ExtensionAPI) {
       }
       const content = resolved.content;
 
+      const { renderHtmlDocument, renderMarkdownDocument } = await loadTemplates();
+      if (signal?.aborted) return errResult(`${action} was cancelled`, { slug, title, kind });
       const html =
         kind === 'html' ? renderHtmlDocument(title, slug, content) : renderMarkdownDocument(title, slug, content);
 

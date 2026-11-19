@@ -10,10 +10,10 @@
  */
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { matchesKey } from '@earendil-works/pi-tui';
+import { matchesKey, truncateToWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import type { ChildProcess } from 'node:child_process';
 import type { RGB } from './sprite.js';
-import { getSpriteGrid, stampFlyer, stampWalker, MG_TRANSPARENT, MG_PALETTE } from './sprite.js';
+import { getSpriteGrid, stampFlyer, stampSprite, stampWalker, SPRITE_W, SPRITE_H } from './sprite.js';
 import { playTone, playNoise, playFanfare, playWhoosh, playClick, speak, killProc } from './sound.js';
 
 // === Constants ===
@@ -26,12 +26,14 @@ const T_BURST_END = 3500;
 const T_LANDSCAPE_END = 4500;
 const T_WALK_END = 6500; // pixel guy walks in
 const T_ADDRESS_START = T_WALK_END;
-const T_ADDRESS_END = 26000; // fallback if `say` doesn't finish
-const T_DEPARTURE_END = 30000;
-const T_FINALE_END = 33000;
-
-const SPRITE_W = 32;
-const SPRITE_H = 32;
+// The monologue runs ~22s with `say -v Daniel -r 120`; this is the fallback when `say`
+// is unavailable or never reports completion, long enough for every subtitle to show.
+const T_ADDRESS_END = T_ADDRESS_START + 24000;
+const MIN_ADDRESS_MS = 1000;
+// Departure and finale run for fixed durations after the address actually ends.
+const DEPARTURE_MS = 5000;
+const FINALE_MS = 3000;
+const OUTRO_MS = 2000;
 
 // === Helpers ===
 
@@ -183,7 +185,7 @@ function renderMDR(width: number, height: number, progress: number, tick: number
 
   // Progress bar
   lines.push('');
-  const barWidth = Math.min(40, width - 20);
+  const barWidth = clamp(width - 20, 0, 40);
   const filled = Math.floor(barWidth * progress);
   const bar = '█'.repeat(filled) + '░'.repeat(barWidth - filled);
   const pct = Math.floor(progress * 100);
@@ -296,13 +298,14 @@ function renderExplosion(particles: Particle[], pw: number, ph: number, progress
 const MONOLOGUE = (name: string) =>
   `I knew you could do it, ${name}. ... Even in your darkest moments, I could see you arriving here. ... In refining your code, you have brought glory to this company and to me. ... I, Michael Grinich, love you. ... But now I must away, for there are other developers who need me around the world. ... Goodbye, ${name}. ... And thank you.`;
 
+// Offsets (ms from address start) measured from `say -v Daniel -r 120` sentence durations.
 const SUBTITLES = (name: string): { t: number; text: string }[] => [
   { t: 0, text: `I knew you could do it, ${name}.` },
-  { t: 3500, text: `Even in your darkest moments, I could see you arriving here.` },
-  { t: 7500, text: `In refining your code, you have brought glory to this company and to me.` },
-  { t: 12500, text: `I, Michael Grinich, love you.` },
-  { t: 16000, text: `But now I must away, for there are others who need me around the world.` },
-  { t: 20000, text: `Goodbye, ${name}. And thank you.` },
+  { t: 2100, text: `Even in your darkest moments, I could see you arriving here.` },
+  { t: 6300, text: `In refining your code, you have brought glory to this company and to me.` },
+  { t: 10900, text: `I, Michael Grinich, love you.` },
+  { t: 13700, text: `But now I must away, for there are other developers who need me around the world.` },
+  { t: 18800, text: `Goodbye, ${name}. And thank you.` },
 ];
 
 // === Animation Component ===
@@ -317,13 +320,15 @@ class HundredPercentComponent {
   private mouthOpen = false;
   private sayProc: ChildProcess | null = null;
   private sayDone = false;
+  /** Elapsed time when `say` exited; null until speech finishes (or forever if it never runs). */
+  private sayDoneAt: number | null = null;
   private soundsTriggered = new Set<string>();
   private particles: Particle[] = [];
   private cachedLandscape: RGB[][] | null = null;
   private cachedLandscapeW = 0;
   private cachedLandscapeH = 0;
   private disposed = false;
-  private clickTimer: ReturnType<typeof setInterval> | null = null;
+  private clickTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(tui: { requestRender: () => void }, onClose: () => void, name: string) {
     this.tui = tui;
@@ -337,6 +342,27 @@ class HundredPercentComponent {
     return Date.now() - this.startTime;
   }
 
+  /** When the address phase ends: when speech finished, bounded by the fallback timeout. */
+  private addressEnd(): number {
+    if (this.sayDoneAt === null) return T_ADDRESS_END;
+    return clamp(this.sayDoneAt, T_ADDRESS_START + MIN_ADDRESS_MS, T_ADDRESS_END);
+  }
+
+  /** Self-rescheduling click so the beeps accelerate as the MDR progress bar fills. */
+  private scheduleClick(): void {
+    const e = this.elapsed();
+    const delay = Math.max(30, 200 - (e / T_MDR_END) * 150);
+    this.clickTimer = setTimeout(() => {
+      this.clickTimer = null;
+      if (this.disposed) return;
+      const now = this.elapsed();
+      if (now > T_MDR_END) return;
+      const progress = now / T_MDR_END;
+      this.procs.push(playClick(800 + progress * 600, 30));
+      this.scheduleClick();
+    }, delay);
+  }
+
   private tick(): void {
     if (this.disposed) return;
     const t = this.elapsed();
@@ -345,24 +371,8 @@ class HundredPercentComponent {
     // Trigger sounds at specific times
     if (!this.soundsTriggered.has('first_click') && t > 100) {
       this.soundsTriggered.add('first_click');
-      // Start rapid clicks during MDR phase
-      this.clickTimer = setInterval(
-        () => {
-          if (this.disposed) return;
-          const e = this.elapsed();
-          if (e > T_MDR_END) {
-            if (this.clickTimer) {
-              clearInterval(this.clickTimer);
-              this.clickTimer = null;
-            }
-            return;
-          }
-          const progress = e / T_MDR_END;
-          const freq = 800 + progress * 600;
-          this.procs.push(playClick(freq, 30));
-        },
-        Math.max(30, 200 - (t / T_MDR_END) * 150),
-      );
+      // Start accelerating clicks during MDR phase
+      this.scheduleClick();
     }
 
     if (!this.soundsTriggered.has('explosion') && t > T_MDR_END) {
@@ -381,6 +391,7 @@ class HundredPercentComponent {
       this.soundsTriggered.add('speak');
       this.sayProc = speak(MONOLOGUE(this.name), 120, () => {
         this.sayDone = true;
+        this.sayDoneAt = this.elapsed();
       });
       this.procs.push(this.sayProc);
 
@@ -395,19 +406,20 @@ class HundredPercentComponent {
       }, 180);
     }
 
-    if (!this.soundsTriggered.has('whoosh') && (this.sayDone || t > T_ADDRESS_END)) {
+    const departureEnd = this.addressEnd() + DEPARTURE_MS;
+    if (!this.soundsTriggered.has('whoosh') && t >= this.addressEnd()) {
       this.soundsTriggered.add('whoosh');
       this.procs.push(playWhoosh());
     }
 
-    if (!this.soundsTriggered.has('finale') && t > T_DEPARTURE_END) {
+    if (!this.soundsTriggered.has('finale') && t > departureEnd) {
       this.soundsTriggered.add('finale');
       this.procs.push(playFanfare());
       this.procs.push(playTone(523, 600, 0.3));
     }
 
     // Auto-end
-    if (t > T_FINALE_END + 2000) {
+    if (t > departureEnd + FINALE_MS + OUTRO_MS) {
       this.dispose();
       this.onClose();
     }
@@ -426,7 +438,11 @@ class HundredPercentComponent {
 
   render(width: number): string[] {
     if (this.disposed) return [''];
+    // Every line must fit the terminal width, including subtitles and the user-supplied name.
+    return this.renderFrame(width).map((line) => truncateToWidth(line, width));
+  }
 
+  private renderFrame(width: number): string[] {
     const t = this.elapsed();
 
     // Determine terminal area (pixel dimensions for half-block rendering)
@@ -488,24 +504,22 @@ class HundredPercentComponent {
       return this.renderWalkIn(pw, ph, contentWidth, walkProgress, t);
     }
 
-    // Phase 4: Michael's Address
-    // Ensure at least 5s of departure time after speaking finishes
-    const addressEnd = this.sayDone
-      ? Math.min(t, Math.max(T_ADDRESS_START + 1000, T_DEPARTURE_END - 5000))
-      : T_ADDRESS_END;
+    // Phase 4: Michael's Address (ends when speech finishes, or at the fallback timeout)
+    const addressEnd = this.addressEnd();
     if (t < addressEnd) {
       return this.renderAddress(pw, ph, contentWidth, t - T_ADDRESS_START);
     }
 
     // Phase 5: The Departure
-    if (t < T_DEPARTURE_END) {
-      const depProgress = (t - addressEnd) / (T_DEPARTURE_END - addressEnd);
+    const departureEnd = addressEnd + DEPARTURE_MS;
+    if (t < departureEnd) {
+      const depProgress = (t - addressEnd) / DEPARTURE_MS;
       return this.renderDeparture(pw, ph, contentWidth, depProgress, t);
     }
 
     // Phase 6: Finale
-    if (t < T_FINALE_END) {
-      const finProgress = (t - T_DEPARTURE_END) / (T_FINALE_END - T_DEPARTURE_END);
+    if (t < departureEnd + FINALE_MS) {
+      const finProgress = (t - departureEnd) / FINALE_MS;
       return this.renderFinale(contentWidth, finProgress, t);
     }
 
@@ -546,30 +560,9 @@ class HundredPercentComponent {
     // Fade in the face sprite during first 500ms
     const fadeIn = clamp(at / 500, 0, 1);
     if (fadeIn > 0) {
-      const sprite = getSpriteGrid(this.mouthOpen);
       const ox = Math.floor((pw - SPRITE_W) / 2);
       const oy = Math.floor((ph - SPRITE_H) / 2 - 2); // slightly above center
-
-      // Stamp sprite with fade
-      const palette = MG_PALETTE;
-      for (let y = 0; y < sprite.length; y++) {
-        for (let x = 0; x < sprite[y]!.length; x++) {
-          const idx = (() => {
-            const code = sprite[y]![x]!.charCodeAt(0);
-            if (code >= 48 && code <= 57) return code - 48;
-            if (code >= 97 && code <= 122) return code - 97 + 10;
-            return 0;
-          })();
-          if (MG_TRANSPARENT.has(idx)) continue;
-          const bx = ox + x;
-          const by = oy + y;
-          if (by >= 0 && by < grid.length && bx >= 0 && bx < grid[0]!.length) {
-            const spriteColor = palette[idx]!;
-            const bgColor = grid[by]![bx]!;
-            grid[by]![bx] = lerpRGB(bgColor, spriteColor, fadeIn);
-          }
-        }
-      }
+      stampSprite(grid, getSpriteGrid(this.mouthOpen), ox, oy, fadeIn);
     }
 
     const gridLines = renderColorGrid(grid);
@@ -583,9 +576,10 @@ class HundredPercentComponent {
     if (subtitle) {
       const subColor = '\x1b[38;2;240;240;250m';
       const reset = '\x1b[0m';
-      const subLine = `${subColor}${subtitle}${reset}`;
       gridLines.push('');
-      gridLines.push(centerLines([subLine], contentWidth)[0]!);
+      for (const part of wrapTextWithAnsi(subtitle, contentWidth)) {
+        gridLines.push(centerLines([`${subColor}${part}${reset}`], contentWidth)[0]!);
+      }
     }
 
     return centerLines(gridLines, contentWidth);
@@ -692,7 +686,7 @@ class HundredPercentComponent {
       this.interval = null;
     }
     if (this.clickTimer) {
-      clearInterval(this.clickTimer);
+      clearTimeout(this.clickTimer);
       this.clickTimer = null;
     }
     for (const p of this.procs) killProc(p);

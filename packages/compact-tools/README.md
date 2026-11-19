@@ -50,10 +50,10 @@ None. The default is two content lines. Use Pi's existing expansion controls whe
 ## Dependencies and caveats
 
 - Pi supplies `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` as peer dependencies. `@nicknisi/pi-shared` supplies terminal-label sanitization.
-- Needs Pi 1.0.1 or newer (`pi.registerToolRenderer`). Regular terminal mode leaves mouse input to terminal scrollback, so use Ctrl+O there.
+- Needs Pi 1.5.0 or newer (`pi.registerToolRenderer`, `outputPad` in the render context). Regular terminal mode leaves mouse input to terminal scrollback, so use Ctrl+O there.
 - Uses Pi's public `pi.registerToolRenderer()` hook, wrapping whatever renderer the tool (or a later extension) provides. Rows draw their own shell so collapsed rows stay two lines; expanded rows re-create Pi's default box around the original renderer.
 - Pi draws inline images for a result regardless of the row's renderer, so collapsed rows with images are not fully compact.
-- Previews use the tool's existing result renderer when available, falling back to the first nonempty output line. JSON-only output shows an item or field count instead of serialized data. No model call is made. Custom controls and detailed progress displays are available when expanded.
+- Previews use the tool's existing result renderer when available, falling back to the first nonempty output line. Pi's own `... (N earlier/more lines)` truncation hints are skipped, so long bash output previews its first visible output line (bash keeps the tail). Collapsed rows use the same `outputPad` indent as expanded rows. JSON-only output shows an item or field count instead of serialized data; results over 64 KB of text only show `Structured output`. No model call is made. Custom controls and detailed progress displays are available when expanded.
 - Expanded displays retain each tool's own limits. This extension cannot recover output already truncated by a tool.
 - User shell commands entered with `!` or `!!` use a separate Pi component and are unchanged.
 

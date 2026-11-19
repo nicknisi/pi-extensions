@@ -483,8 +483,11 @@ export async function runScript(opts: RunScriptOptions): Promise<RunScriptResult
   // Compile + run. compileScript is extracted so callers (tests, future
   // tooling) can compile + read `meta` without a real spawn.
   const compiled = compileScript(script);
+  // Starting fn runs the script up to its first await, which assigns `meta`
+  // for well-formed scripts; report the script's own value when it has one.
+  const pending = compiled.fn(args, agent, parallel, pipeline, phase, log, budget, cwd, checkpoint, ask);
   opts.onMeta?.(compiled.meta);
-  const value = await compiled.fn(args, agent, parallel, pipeline, phase, log, budget, cwd, checkpoint, ask);
+  const value = await pending;
   return { value, meta: compiled.meta, logs, usage, durationMs: Date.now() - startedAt };
 }
 
@@ -505,7 +508,7 @@ export type CompiledFn = (
 ) => Promise<unknown>;
 
 export interface CompiledScript {
-  /** The script's `meta` export, read via a stub dry-run (no real spawn). */
+  /** The script's `meta` export: its static initializer, or the value a run of `fn` assigned. */
   meta: ScriptMeta | undefined;
   /** Invoke to run the script; spawn-backed globals must be supplied. */
   fn: CompiledFn;
@@ -517,10 +520,10 @@ export interface CompiledScript {
  * `export const meta =` is rewritten to an outer-binding assignment so the vm
  * compiles (a stranded `export` fails loudly) and `meta` is captured into a
  * holder. The body is wrapped in an async function so a top-level `return`
- * compiles. `meta` is populated by a stub dry-run — `agent` returns `null`,
- * `parallel`/`pipeline` are `Promise.all`-style folds over those stubs — so the
- * script's `meta` declaration (which well-formed scripts place first) is read
- * without spawning any child sessions. A syntax error throws here.
+ * compiles. Before the script runs, `meta` is read by evaluating only the
+ * `export const meta = …` initializer (see readStaticMeta); once `fn` runs,
+ * the value the script itself assigned wins. The script body is never
+ * executed here. A syntax error throws here.
  */
 export function compileScript(script: string): CompiledScript {
   const metaHolder: { value: ScriptMeta | undefined } = { value: undefined };
@@ -544,38 +547,63 @@ export function compileScript(script: string): CompiledScript {
   const fn: CompiledFn = (args, agent, parallel, pipeline, phase, log, budget, cwd, checkpoint, ask) =>
     raw(args, agent, parallel, pipeline, phase, log, budget, cwd, checkpoint, ask, metaHolder);
 
-  // Stub dry-run to read `meta`. Well-formed scripts declare `meta` first, so
-  // it is assigned synchronously before the first `await`; we await the whole
-  // stubbed body anyway so a script that computes meta from `args` works too.
-  // Any throw is swallowed — we only care that it compiled + set meta.
-  const stubAgent = async (): Promise<null> => null;
-  const stubParallel = <T>(thunks: Array<() => Promise<T>>): Promise<T[]> => Promise.all(thunks.map((t) => t()));
-  const stubPipeline = async <T, U>(items: T[], ...stages: Array<(item: T) => Promise<U>>): Promise<U[]> => {
-    let values: unknown[] = [...items];
-    for (const stage of stages) values = await stubParallel((values as T[]).map((v) => () => stage(v)));
-    return values as U[];
-  };
-  const stubBudget = { total: Infinity, spent: 0, remaining: Infinity };
-  const stubCheckpoint = async (): Promise<void> => {};
-  const stubAsk = async (): Promise<undefined> => undefined;
-  void fn(
-    undefined,
-    stubAgent,
-    stubParallel,
-    stubPipeline,
-    () => {},
-    () => {},
-    stubBudget,
-    '/tmp',
-    stubCheckpoint,
-    stubAsk,
-  ).catch(() => {});
+  // Read `meta` statically: evaluate ONLY its initializer expression, in a
+  // fresh context with a time cap. The script body never runs here — a stub
+  // dry-run would repeat its side effects, skip its checkpoints, and could
+  // spin forever on a retry loop over stubbed agent() calls.
+  const staticMeta = readStaticMeta(script);
 
-  // `meta` is a getter so a caller that re-runs `fn` with real globals sees
-  // the post-run meta (the stub dry-run may have thrown on args-derived meta;
-  // the real run sets it). For static meta the stub already populated it.
+  // `meta` is a getter so a caller that runs `fn` sees the real run's meta
+  // (e.g. meta derived from `args`, which the static read cannot evaluate).
   return Object.defineProperty({ fn }, 'meta', {
-    get: () => metaHolder.value,
+    get: () => metaHolder.value ?? staticMeta,
     enumerable: true,
   }) as CompiledScript;
+}
+
+/** Longest meta initializer we try to parse, and the evaluation time cap. */
+const MAX_META_CHARS = 16 * 1024;
+const META_EVAL_TIMEOUT_MS = 50;
+
+/**
+ * Evaluate the `export const meta = <expr>` initializer on its own, without
+ * running the rest of the script. The expression ends at the first `;` or
+ * newline after which the text so far parses as a complete expression. It is
+ * evaluated in an empty vm context (no script globals, no Node APIs) with a
+ * time cap, so meta that depends on `args` or other globals reads as
+ * undefined here and is filled in by the real run instead.
+ */
+export function readStaticMeta(script: string): ScriptMeta | undefined {
+  const m = STRIP_META.exec(script);
+  if (!m) return undefined;
+  const start = m.index + m[0].length;
+  const limit = Math.min(script.length, start + MAX_META_CHARS);
+  let exprSource: string | undefined;
+  for (let i = start; i <= limit && exprSource === undefined; i++) {
+    if (i < limit && script[i] !== ';' && script[i] !== '\n') continue;
+    const candidate = script.slice(start, i);
+    if (!candidate.trim()) continue;
+    try {
+      new vm.Script(`(${candidate}\n)`, { filename: 'workflow-meta.js' });
+      exprSource = `(${candidate}\n)`;
+    } catch {
+      // not a complete expression yet — keep scanning
+    }
+  }
+  if (exprSource === undefined) return undefined;
+  try {
+    // Serialize inside the timed evaluation so getters/toJSON can't run
+    // untimed in this realm, and drain the context's own microtask queue
+    // before the timeout ends ('afterEvaluate') so queued promise jobs can't
+    // escape it. The JSON string is then parsed into a plain object here.
+    const context = vm.createContext(Object.create(null), { microtaskMode: 'afterEvaluate' });
+    const json: unknown = new vm.Script(
+      `((v) => (v !== null && typeof v === 'object' ? JSON.stringify(v) : undefined))${exprSource}`,
+      { filename: 'workflow-meta.js' },
+    ).runInContext(context, { timeout: META_EVAL_TIMEOUT_MS });
+    if (typeof json !== 'string') return undefined;
+    return JSON.parse(json) as ScriptMeta;
+  } catch {
+    return undefined;
+  }
 }

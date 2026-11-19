@@ -119,13 +119,18 @@ export class SectionPicker implements Component {
     if (
       kb.matches(data, 'tui.select.up') ||
       kb.matches(data, 'tui.select.down') ||
+      kb.matches(data, 'tui.select.pageUp') ||
+      kb.matches(data, 'tui.select.pageDown') ||
       kb.matches(data, 'tui.select.confirm') ||
       kb.matches(data, 'tui.select.cancel')
     ) {
       this.selectList.handleInput(data);
     } else {
+      const before = this.searchInput.getValue();
       this.searchInput.handleInput(data);
-      this.rebuildList();
+      // Only rebuild (which resets the highlight) when the query changed, so
+      // cursor movement inside the search box keeps the current selection.
+      if (this.searchInput.getValue() !== before) this.rebuildList();
     }
   }
 }

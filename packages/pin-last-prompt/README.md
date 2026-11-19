@@ -12,7 +12,8 @@ No slash commands, tools, keybindings, or custom entry types.
 
 ## Requirements
 
-- pi `>= 0.84` — the pinned bar relies on the fullscreen transcript renderer (`TuiAltScreen`) and its `isFollowingOutput` / `getPrimaryScrollView` internals, which only exist in fullscreen mode. In inline mode the extension loads but never shows anything.
+- pi `>= 0.84` (not enforced by `peerDependencies`, which accept any version) — the pinned bar relies on the fullscreen transcript renderer (`TuiAltScreen`) and its `isFollowingOutput` / `getPrimaryScrollView` internals, which only exist in fullscreen mode. In inline mode the extension loads but never shows anything.
+- A [Nerd Font](https://www.nerdfonts.com/) in your terminal for the bar's `\uf007` (user) icon. Without one the icon renders as a missing-glyph box; the prompt text is unaffected.
 
 ## Usage
 
@@ -31,8 +32,10 @@ None. No config files, options, or environment variables.
 ## Install
 
 ```bash
-pi install /Users/nicknisi/Developer/pi-extensions/packages/pin-last-prompt
+pi install npm:@nicknisi/pi-pin-last-prompt
 ```
+
+For a local checkout, use `pi install ./packages/pin-last-prompt`.
 
 ## Dependencies
 

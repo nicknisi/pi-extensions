@@ -187,10 +187,13 @@ export interface ProfileDir {
   scope: AgentProfile['scope'];
 }
 
-/** Ordered search dirs, highest precedence first. Missing dirs are fine. */
-export function profileSearchDirs(cwd: string, agentDir: string, extraDirs: string[]): ProfileDir[] {
+/**
+ * Ordered search dirs, highest precedence first. Missing dirs are fine.
+ * `cwd` undefined skips the project dir (used before a session ctx exists).
+ */
+export function profileSearchDirs(cwd: string | undefined, agentDir: string, extraDirs: string[]): ProfileDir[] {
   return [
-    { dir: path.join(cwd, '.pi', 'agents'), scope: 'project' as const },
+    ...(cwd === undefined ? [] : [{ dir: path.join(cwd, '.pi', 'agents'), scope: 'project' as const }]),
     { dir: path.join(agentDir, 'agents'), scope: 'user' as const },
     ...extraDirs.map((dir) => ({ dir, scope: 'extra' as const })),
   ];

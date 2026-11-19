@@ -62,7 +62,7 @@ export async function refusal(command: string): Promise<string | undefined> {
 
 /** True for the bash 3.2 parse failure on a heredoc inside $(...). */
 export function isHeredocParseFailure(command: string, output: string): boolean {
-  return /\$\(\s*cat\s+<</.test(command) && output.includes('unexpected EOF while looking for matching');
+  return /\$\(\s*cat\s*<</.test(command) && output.includes('unexpected EOF while looking for matching');
 }
 
 export default function backtickGuard(pi: ExtensionAPI) {

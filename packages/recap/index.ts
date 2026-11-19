@@ -113,7 +113,17 @@ export default function (pi: ExtensionAPI) {
   let timer: ReturnType<typeof setInterval> | null = null;
   let lastModel: ExtensionContext['model'];
 
-  async function generateSummary(ctx: ExtensionContext): Promise<string> {
+  // In-flight generation, aborted on shutdown and when a new agent run starts so a
+  // stale recap never lands on a replaced session or mid-run.
+  let inflight: AbortController | null = null;
+
+  function abortInflight() {
+    inflight?.abort();
+    inflight = null;
+  }
+
+  // Resolves null when generation was skipped (no model / nothing to summarize; already notified).
+  async function generateSummary(ctx: ExtensionContext, signal: AbortSignal): Promise<string | null> {
     const cfg = readConfig();
     const preferences =
       cfg.model && typeof cfg.model.provider === 'string' && typeof cfg.model.id === 'string'
@@ -127,31 +137,45 @@ export default function (pi: ExtensionAPI) {
         modelRegistry: ctx.modelRegistry,
       },
       preferences,
+      signal,
     );
+    if (signal.aborted) return null;
     if (!model) {
       ctx.ui.notify('recap: no model available', 'warning');
-      return '';
+      return null;
     }
     // Active context only: compaction summary + kept messages, not pre-compaction history.
     const conversation = buildConversation(convertToLlm(buildSessionContext(ctx.sessionManager.getBranch()).messages));
-    if (!conversation.trim()) return '';
-    const response = await ctx.modelRegistry.complete(
-      model,
-      {
-        messages: [
-          {
-            role: 'user',
-            content: [{ type: 'text', text: summaryPrompt(conversation) }],
-            timestamp: Date.now(),
-          },
-        ],
-      },
-      {
-        reasoningEffort: 'low',
-        cacheRetention: 'none',
-        sessionId: uuidv7(),
-      },
-    );
+    if (!conversation.trim()) {
+      ctx.ui.notify('recap: nothing to summarize yet', 'info');
+      return null;
+    }
+    // streamSimple takes provider-neutral options, so `reasoning` applies to every API.
+    const response = await ctx.modelRegistry
+      .streamSimple(
+        model,
+        {
+          messages: [
+            {
+              role: 'user',
+              content: [{ type: 'text', text: summaryPrompt(conversation) }],
+              timestamp: Date.now(),
+            },
+          ],
+        },
+        {
+          reasoning: 'low',
+          cacheRetention: 'none',
+          sessionId: uuidv7(),
+          signal,
+        },
+      )
+      .result();
+    if (signal.aborted) return '';
+    // Provider/auth failures resolve with stopReason 'error'/'aborted' rather than throwing.
+    if (response.stopReason === 'error' || response.stopReason === 'aborted') {
+      throw new Error(response.errorMessage || `request ${response.stopReason}`);
+    }
     return response.content
       .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
       .map((c) => c.text)
@@ -159,9 +183,24 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function injectRecap(ctx: ExtensionContext) {
-    const summary = await generateSummary(ctx);
-    if (!summary) return;
-    pi.appendEntry(ENTRY_TYPE, { summary, ts: Date.now() });
+    abortInflight();
+    const controller = new AbortController();
+    inflight = controller;
+    try {
+      const summary = await generateSummary(ctx, controller.signal);
+      if (controller.signal.aborted || summary === null) return;
+      if (!summary.trim()) {
+        ctx.ui.notify('recap: model returned an empty summary', 'warning');
+        return;
+      }
+      pi.appendEntry(ENTRY_TYPE, { summary, ts: Date.now() });
+    } catch (error) {
+      // An aborted request (shutdown, new turn) is expected; don't surface it.
+      if (controller.signal.aborted) return;
+      throw error;
+    } finally {
+      if (inflight === controller) inflight = null;
+    }
   }
 
   async function maybeFire(ctx: ExtensionContext) {
@@ -188,7 +227,7 @@ export default function (pi: ExtensionAPI) {
     lastActivity = Date.now();
     firedThisIdle = false;
 
-    pi.registerEntryRenderer(ENTRY_TYPE, (entry, _opts, theme) => {
+    pi.registerEntryRenderer(ENTRY_TYPE, (entry, opts, theme) => {
       const data = entry.data as { summary: string; ts: number };
       const dim = (s: string) => theme.fg('dim', s);
       // Theme-aware bg: same token pi's own summary cards (compaction, branch)
@@ -196,19 +235,26 @@ export default function (pi: ExtensionAPI) {
       const bg = (s: string) => theme.bg('customMessageBg', s);
       const box = new Box(1, 0, (s) => bg(dim(s)));
       box.addChild(new Text(dim(theme.bold('Recap')) + dim(` · ${new Date(data.ts).toLocaleTimeString()}`), 0, 0));
-      box.addChild(new Markdown(capLines(data.summary, MAX_CARD_LINES), 0, 0, getMarkdownTheme()));
+      box.addChild(
+        new Markdown(opts.expanded ? data.summary : capLines(data.summary, MAX_CARD_LINES), 0, 0, getMarkdownTheme()),
+      );
       return box;
     });
 
     timer = setInterval(() => {
       void maybeFire(ctx).catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
-        ctx.ui.notify(`recap: ${message}`, 'warning');
+        try {
+          ctx.ui.notify(`recap: ${message}`, 'warning');
+        } catch {
+          // ctx went stale (session replaced); nothing left to report to.
+        }
       });
     }, TICK_MS);
   });
 
   pi.on('before_agent_start', async (_e, ctx) => {
+    abortInflight();
     lastActivity = Date.now();
     firedThisIdle = false;
     lastModel = ctx.model ?? lastModel;
@@ -224,6 +270,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on('session_shutdown', async () => {
+    abortInflight();
     lastModel = undefined;
     if (timer) {
       clearInterval(timer);

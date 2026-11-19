@@ -55,6 +55,8 @@ interface StoredRun {
   id: string;
   label: string;
   args?: unknown;
+  /** Directory the run's agents work in; a relaunch runs there too. Absent in runs saved before 0.7.5. */
+  cwd?: string;
   status: WorkflowStatus;
   meta?: ScriptMeta | undefined;
   startedAt: number;
@@ -315,6 +317,7 @@ export function startRun(runs: WorkflowRuns, opts: StartRunOptions): WorkflowRun
       id,
       label: run.label,
       args: opts.args,
+      cwd: opts.cwd,
       status: run.status,
       meta: run.meta,
       startedAt: run.startedAt,

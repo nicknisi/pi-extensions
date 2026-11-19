@@ -1,0 +1,3 @@
+# The docs/ folder is linked from README.md and shipped in the npm package: keep it
+# tracked even when a broader ignore rule (e.g. a local `docs/` exclude) matches it.
+!docs/

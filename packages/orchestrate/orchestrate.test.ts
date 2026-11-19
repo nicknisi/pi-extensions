@@ -479,3 +479,161 @@ describe('per-session persistence', () => {
     expect(resumed.notifications.at(-1)).toContain('Goal: all tests pass');
   });
 });
+
+describe('loop intervals and timer cadence', () => {
+  it.each(['0s', '0m', '500ms', '999ms'])(
+    'rejects sub-second interval %s without starting a loop',
+    async (interval) => {
+      vi.useFakeTimers();
+      const h = makeHarness();
+      await h.commands.get('loop')!(`${interval} check deploy`, h.ctx);
+      expect(h.notifications.at(-1)).toContain('at least 1s');
+      expect(h.sent).toEqual([]);
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(h.sent).toEqual([]);
+      await h.commands.get('loop')!('', h.ctx);
+      expect(h.notifications.at(-1)).toBe('No loop running');
+    },
+  );
+
+  it('treats a malformed interval token as part of a self-paced prompt', async () => {
+    const h = makeHarness();
+    await h.commands.get('loop')!('5x check deploy', h.ctx);
+    expect(h.sent).toEqual(['5x check deploy']);
+    expect(h.notifications.at(-1)).toContain('self-paced');
+  });
+
+  it('accepts millisecond intervals of at least one second and labels them as timed', async () => {
+    vi.useFakeTimers();
+    const h = makeHarness();
+    await h.commands.get('loop')!('1500ms check deploy', h.ctx);
+    expect(h.notifications.at(-1)).toContain('every 1s');
+    expect(h.statuses.at(-1)).toContain('every 1s');
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(h.sent).toEqual(['check deploy', 'check deploy']);
+  });
+
+  it('keeps firing timer ticks on schedule while the agent is busy', async () => {
+    vi.useFakeTimers();
+    const h = makeHarness();
+    await h.commands.get('loop')!('1m check deploy', h.ctx);
+    expect(h.sent).toHaveLength(1);
+    h.ctx.isIdle = () => false;
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    expect(h.sent).toHaveLength(3);
+  });
+
+  it('re-arms a timer loop on session_start after --resume', async () => {
+    vi.useFakeTimers();
+    const a = makeHarness('a.jsonl');
+    await a.commands.get('loop')!('1m check deploy', a.ctx);
+    cleanup?.();
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(a.sent).toHaveLength(1);
+
+    const resumed = makeHarness('a.jsonl');
+    expect(resumed.statuses.at(-1)).toContain('every 1m');
+    await vi.advanceTimersByTimeAsync(59_000);
+    expect(resumed.sent).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(resumed.sent).toEqual(['check deploy']);
+    expect(saved('a').loop.iterations).toBe(2);
+  });
+});
+
+describe('agent_end lifecycle', () => {
+  const errorEnd = { messages: [{ role: 'assistant', stopReason: 'error' }] };
+
+  it('does not pause on an errored run that pi retries successfully', async () => {
+    const h = makeHarness();
+    evaluator(verdict('not_met'));
+    await h.command('all tests pass');
+    await h.event('agent_end', errorEnd);
+    expect(saved().goal.pausedReason).toBeUndefined();
+    expect(modelStream).not.toHaveBeenCalled();
+    // The retry's agent_end supersedes the error.
+    await h.event('agent_end');
+    await h.event('agent_settled');
+    expect(saved().goal.pausedReason).toBeUndefined();
+    expect(modelStream).toHaveBeenCalledOnce();
+    expect(h.sent.at(-1)).toContain('not yet met');
+  });
+
+  it('pauses on an errored run once pi settles without a retry', async () => {
+    const h = makeHarness();
+    await h.command('all tests pass');
+    await h.event('agent_end', errorEnd);
+    await h.event('agent_settled');
+    expect(saved().goal.pausedReason).toContain('Agent stopped: error');
+    expect(modelStream).not.toHaveBeenCalled();
+    expect(h.sent).toHaveLength(1);
+  });
+
+  it('cancels evaluation and pauses when the user aborts the run (Escape)', async () => {
+    const h = makeHarness();
+    const run = new AbortController();
+    (h.ctx as Record<string, unknown>).signal = run.signal;
+    const e = evaluator(verdict('not_met'));
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    e.result.mockImplementation(async () => {
+      started();
+      return new Promise(() => {});
+    });
+    await h.command('all tests pass');
+    const pending = h.event('agent_end');
+    await ready;
+    run.abort();
+    await pending;
+    expect(e.signal().aborted).toBe(true);
+    expect(saved().goal.pausedReason).toContain('Agent stopped: aborted');
+    expect(h.sent).toHaveLength(1);
+  });
+
+  it('resumes a self-paced loop after the goal it was waiting on is achieved', async () => {
+    const h = makeHarness('a.jsonl');
+    await h.commands.get('loop')!('keep going', h.ctx);
+    await h.command('all tests pass');
+    expect(h.sent).toEqual(['keep going', 'all tests pass']);
+    expect(h.statuses.at(-1)).toContain('↻ loop');
+    evaluator(verdict('not_met'));
+    await h.event('agent_end');
+    await h.event('agent_settled');
+    // Goal still active: the loop waits, only the goal continuation is sent.
+    expect(h.sent).toHaveLength(3);
+    expect(h.sent.at(-1)).toContain('not yet met');
+    evaluator(verdict('met', ['result']));
+    await h.event('agent_end');
+    expect(h.notifications.some((n) => n.includes('Goal achieved'))).toBe(true);
+    await h.event('agent_settled');
+    expect(h.sent).toHaveLength(4);
+    expect(h.sent.at(-1)).toBe('keep going');
+    expect(saved('a').goal).toBeNull();
+  });
+
+  it('does not resume a self-paced loop when a replacement goal starts before settlement', async () => {
+    const h = makeHarness('b.jsonl');
+    await h.commands.get('loop')!('keep going', h.ctx);
+    await h.command('all tests pass');
+    evaluator(verdict('met', ['result']));
+    await h.event('agent_end');
+    expect(h.notifications.some((n) => n.includes('Goal achieved'))).toBe(true);
+    await h.command('lint is clean');
+    expect(h.sent.at(-1)).toBe('lint is clean');
+    await h.event('agent_settled');
+    expect(h.sent).toEqual(['keep going', 'all tests pass', 'lint is clean']);
+    expect(saved('b').goal.condition).toBe('lint is clean');
+  });
+
+  it('does not abort an unrelated turn when clearing an already-paused goal', async () => {
+    const h = makeHarness();
+    await h.command('all tests pass');
+    await h.event('agent_end', { messages: [{ role: 'assistant', stopReason: 'aborted' }] });
+    expect(saved().goal.pausedReason).toBeDefined();
+    await h.command('clear');
+    expect(h.notifications.at(-1)).toContain('Goal cleared');
+    expect(h.abort).not.toHaveBeenCalled();
+  });
+});

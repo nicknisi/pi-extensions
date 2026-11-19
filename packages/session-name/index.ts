@@ -135,16 +135,35 @@ export function cleanName(text: string): string {
     .trim();
 }
 
+/**
+ * The part of a prompt worth naming a session after, or undefined if it states
+ * no task. `/skill:name args` reaches extensions already expanded into a
+ * `<skill name=… location=…>` block followed by the args; name from the args,
+ * or the skill name when the args are missing or too short. Mirrors pi's
+ * `parseSkillBlock`, which older supported hosts don't export.
+ */
+export function taskText(text: string): string | undefined {
+  const skill = text.match(/^<skill name="([^"]+)" location="[^"]+">\n[\s\S]*?\n<\/skill>(?:\n\n([\s\S]+))?$/);
+  if (skill) {
+    const args = skill[2]?.trim();
+    return args && hasTask(args) ? args : skill[1];
+  }
+  return hasTask(text) ? text : undefined;
+}
+
 /** First user message in the branch (oldest first) that states a task. */
 function firstTaskText(branch: SessionEntry[]): string | undefined {
   for (const entry of branch) {
     if (entry.type === 'message' && entry.message.role === 'user') {
-      const text = contentToText(entry.message.content);
-      if (hasTask(text)) return text;
+      const text = taskText(contentToText(entry.message.content));
+      if (text) return text;
     }
   }
   return undefined;
 }
+
+/** Custom entry recording that the user cleared the name via `/sn clear`. */
+const CLEARED_ENTRY = 'session-name-cleared';
 
 /** Derive a name from the first user message: first non-empty line, trimmed. */
 function deriveHeuristicName(text: string, maxLen: number): string | null {
@@ -188,16 +207,25 @@ function formatSessionLine(s: SessionInfo): string {
  * same manifest it reads. `getPackageDir()` honours `PI_PACKAGE_DIR`, which is
  * how rebranded distributions point pi at their own manifest.
  */
+const appTitleCache = new Map<string, string>();
+
 function appTitle(): string {
+  // Cached per package dir: titles are rebuilt on every name change.
+  const dir = getPackageDir();
+  const cached = appTitleCache.get(dir);
+  if (cached !== undefined) return cached;
+  let title = 'π';
   try {
-    const manifest = JSON.parse(readFileSync(join(getPackageDir(), 'package.json'), 'utf8')) as {
+    const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as {
       piConfig?: { name?: unknown };
     };
     const name = manifest.piConfig?.name;
-    return typeof name === 'string' && name.length > 0 ? name : 'π';
+    if (typeof name === 'string' && name.length > 0) title = name;
   } catch {
-    return 'π';
+    // Unreadable manifest: keep the default glyph.
   }
+  appTitleCache.set(dir, title);
+  return title;
 }
 
 /** Build a terminal title from the session summary and working directory. */
@@ -205,12 +233,10 @@ export function buildTitle(name: string | undefined, cwd: string, format: string
   const dir = basename(cwd) || cwd;
   const app = appTitle();
   if (!name) return cleanName(`${app} — ${dir}`);
-  return cleanName(
-    format
-      .replace(/\{summary\}/g, name)
-      .replace(/\{dir\}/g, dir)
-      .replace(/\{app\}/g, app),
-  );
+  // One pass with a function replacer: `$&`-style patterns or placeholders
+  // inside the name itself must come through literally.
+  const values: Record<string, string> = { summary: name, dir, app };
+  return cleanName(format.replace(/\{(summary|dir|app)\}/g, (_, key: string) => values[key]!));
 }
 
 // ── Extension ─────────────────────────────────────────────────────────────
@@ -228,7 +254,10 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
   let shutDown = false;
 
   pi.on('session_start', (_event, ctx) => {
-    autoNamed = false;
+    // A `/sn clear` from an earlier runtime still opts this session out.
+    autoNamed = ctx.sessionManager
+      .getEntries()
+      .some((entry) => entry.type === 'custom' && entry.customType === CLEARED_ENTRY);
     if (config.setTitle && ctx.hasUI) {
       // Defer so we run after pi's built-in updateTerminalTitle() on startup,
       // which otherwise sets a "Pi - <name> - <dir>" title right after this event.
@@ -273,8 +302,7 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
 
     // A resumed unnamed session is named from its first prompt, not this one.
     // Prompts like "ok" or "hello" are skipped; the next prompt gets another try.
-    const userText =
-      firstTaskText(ctx.sessionManager.getBranch()) ?? (hasTask(event.prompt) ? event.prompt : undefined);
+    const userText = firstTaskText(ctx.sessionManager.getBranch()) ?? taskText(event.prompt);
     if (!userText) return;
 
     autoNamed = true;
@@ -392,11 +420,17 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
       if (arg === 'clear' || arg === '-c' || arg === '--clear') {
         pi.setSessionName('');
         autoNamed = true; // user intentionally cleared; don't re-auto-name
+        // Persist the opt-out so a reload or resume doesn't re-auto-name either.
+        pi.appendEntry(CLEARED_ENTRY);
         ctx.ui.notify('Session name cleared', 'info');
         return;
       }
 
       const name = cleanName(arg);
+      if (!name) {
+        ctx.ui.notify('Session name is empty after removing control characters', 'error');
+        return;
+      }
       pi.setSessionName(name);
       autoNamed = true; // user named manually; don't overwrite later
       ctx.ui.notify(`Session named: ${name}`, 'info');

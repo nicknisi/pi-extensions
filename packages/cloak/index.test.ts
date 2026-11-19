@@ -26,7 +26,12 @@ function writeConfig(config: unknown): string {
 const envRule = { filePattern: '**/.env*', cloakPattern: '^([A-Z0-9_]+)=(.+)$', replace: '$1=' };
 
 type ToolResultHandler = (
-  event: { toolName: string; input: Record<string, unknown>; content: { type: string; text?: string }[] },
+  event: {
+    toolName: string;
+    input: Record<string, unknown>;
+    content: { type: string; text?: string }[];
+    details?: unknown;
+  },
   ctx: { cwd: string },
 ) => Promise<{ content: { type: string; text?: string }[] } | undefined>;
 
@@ -41,8 +46,8 @@ async function loadExtension(): Promise<ToolResultHandler> {
   return handlers.get('tool_result')! as ToolResultHandler;
 }
 
-function result(toolName: string, text: string, input: Record<string, unknown> = {}) {
-  return { toolName, input, content: [{ type: 'text', text }] };
+function result(toolName: string, text: string, input: Record<string, unknown> = {}, details?: unknown) {
+  return { toolName, input, content: [{ type: 'text', text }], details };
 }
 
 describe('tool_result hook', () => {
@@ -62,23 +67,110 @@ describe('tool_result hook', () => {
     writeConfig({ patterns: [envRule] });
     let onToolResult = await loadExtension();
     expect(await onToolResult(result('bash', 'COUNT=3', { command: 'node script.js' }), { cwd: dir })).toBeUndefined();
-    expect(await onToolResult(result('grep', 'SECRET=hunter2', { pattern: 'SECRET' }), { cwd: dir })).toBeUndefined();
+    expect(
+      await onToolResult(result('grep', 'notes.md:1: SECRET=hunter2', { pattern: 'SECRET' }), { cwd: dir }),
+    ).toBeUndefined();
 
     writeConfig({ patterns: [{ ...envRule, global: true }] });
     onToolResult = await loadExtension();
     const bash = await onToolResult(result('bash', 'COUNT=3', { command: 'node script.js' }), { cwd: dir });
     expect(bash?.content[0]!.text).toBe('COUNT=*');
-    const grep = await onToolResult(result('grep', 'SECRET=hunter2', { pattern: 'SECRET' }), { cwd: dir });
-    expect(grep?.content[0]!.text).toBe('SECRET=*******');
+    const grep = await onToolResult(result('grep', 'notes.md:1: SECRET=hunter2', { pattern: 'SECRET' }), { cwd: dir });
+    expect(grep?.content[0]!.text).toBe('notes.md:1: SECRET=*******');
   });
 
   it('redacts grep output when its path or glob names files the rule covers', async () => {
     writeConfig({ patterns: [envRule] });
     const onToolResult = await loadExtension();
-    const grep = await onToolResult(result('grep', 'SECRET=hunter2', { pattern: 'SECRET', path: '.env' }), {
+    const grep = await onToolResult(result('grep', '.env:1: SECRET=hunter2', { pattern: 'SECRET', path: '.env' }), {
       cwd: dir,
     });
-    expect(grep?.content[0]!.text).toBe('SECRET=*******');
+    expect(grep?.content[0]!.text).toBe('.env:1: SECRET=*******');
+  });
+
+  it('redacts grep lines from matching files in a directory search, including context lines', async () => {
+    writeConfig({
+      patterns: [envRule, { filePattern: 'config/secrets.env', cloakPattern: '^TOKEN=(.+)$', replace: 'TOKEN=' }],
+    });
+    const onToolResult = await loadExtension();
+    const output = [
+      'src/app.ts:3: const KEY=process.env.KEY',
+      'app/.env-1- # comment',
+      'app/.env:2: API_KEY=sk-abc123',
+      'secrets.env:4: TOKEN=abc',
+      '',
+      '[100 matches limit reached]',
+    ].join('\n');
+    const grep = await onToolResult(result('grep', output, { pattern: 'KEY|TOKEN', path: 'config' }), { cwd: dir });
+    expect(grep?.content[0]!.text).toBe(
+      [
+        'src/app.ts:3: const KEY=process.env.KEY',
+        'app/.env-1- # comment',
+        'app/.env:2: API_KEY=*********',
+        'secrets.env:4: TOKEN=***',
+        '',
+        '[100 matches limit reached]',
+      ].join('\n'),
+    );
+  });
+
+  it('cloaks powershell output like bash', async () => {
+    writeConfig({ patterns: [envRule] });
+    const onToolResult = await loadExtension();
+    const ps = await onToolResult(result('powershell', 'API_KEY=sk-abc123', { command: 'Get-Content .env' }), {
+      cwd: dir,
+    });
+    expect(ps?.content[0]!.text).toBe('API_KEY=*********');
+  });
+
+  it('cloaks a later read of truncated bash output saved to a temp file', async () => {
+    writeConfig({ patterns: [envRule] });
+    const onToolResult = await loadExtension();
+    const fullOutputPath = join(dir, 'pi-bash-123.log');
+    await onToolResult(result('bash', 'API_KEY=sk-abc123', { command: 'cat .env' }, { fullOutputPath }), { cwd: dir });
+
+    const read = await onToolResult(result('read', 'API_KEY=sk-abc123', { path: fullOutputPath }), { cwd: '/' });
+    expect(read?.content[0]!.text).toBe('API_KEY=*********');
+    const other = await onToolResult(result('read', 'API_KEY=sk-abc123', { path: join(dir, 'other.log') }), {
+      cwd: dir,
+    });
+    expect(other).toBeUndefined();
+  });
+
+  it('resolves saved shell-output sources against the original command cwd', async () => {
+    writeConfig({
+      patterns: [{ filePattern: join(dir, 'config/*.env'), cloakPattern: '^TOKEN=(.+)$', replace: 'TOKEN=' }],
+    });
+    const onToolResult = await loadExtension();
+    const fullOutputPath = join(dir, 'pi-bash-456.log');
+    await onToolResult(result('bash', 'TOKEN=abc', { command: 'cat config/app.env' }, { fullOutputPath }), {
+      cwd: dir,
+    });
+
+    const read = await onToolResult(result('read', 'TOKEN=abc', { path: fullOutputPath }), { cwd: '/' });
+    expect(read?.content[0]!.text).toBe('TOKEN=***');
+  });
+
+  it('cloaks multi-line patterns across consecutive grep lines from the same file', async () => {
+    writeConfig({
+      patterns: [
+        {
+          filePattern: '**/*.pem',
+          cloakPattern: { pattern: '-----BEGIN [A-Z ]+-----.*?-----END [A-Z ]+-----', flags: 's' },
+        },
+      ],
+    });
+    const onToolResult = await loadExtension();
+    const output = [
+      'keys/id.pem-1- -----BEGIN PRIVATE KEY-----',
+      'keys/id.pem:2: MIIEvSECRET',
+      'keys/id.pem-3- -----END PRIVATE KEY-----',
+      'src/a.ts:1: MIIEvSECRET',
+    ].join('\n');
+    const grep = await onToolResult(result('grep', output, { pattern: 'MIIEv', context: 1 }), { cwd: dir });
+    const text = grep?.content[0]!.text ?? '';
+    const block = '-----BEGIN PRIVATE KEY-----\nMIIEvSECRET\n-----END PRIVATE KEY-----';
+    expect(text.split('\n')).toEqual([`keys/id.pem-1- -${'*'.repeat(block.length - 1)}`, 'src/a.ts:1: MIIEvSECRET']);
   });
 
   it('keeps read scoped to the rule file glob', async () => {
@@ -88,6 +180,18 @@ describe('tool_result hook', () => {
     expect(await onToolResult(result('read', 'API_KEY=x', { path: 'src/config.ts' }), { cwd: dir })).toBeUndefined();
     const read = await onToolResult(result('read', 'API_KEY=x', { path: '.env' }), { cwd: dir });
     expect(read?.content[0]!.text).toBe('API_KEY=*');
+  });
+
+  it('matches directory globs against absolute and ./-prefixed read paths', async () => {
+    writeConfig({ patterns: [{ filePattern: 'config/secrets.json', cloakPattern: 'hunter2' }] });
+    const onToolResult = await loadExtension();
+    for (const path of [join(dir, 'config/secrets.json'), './config/secrets.json', 'config/secrets.json']) {
+      const read = await onToolResult(result('read', 'pw: hunter2', { path }), { cwd: dir });
+      expect(read?.content[0]!.text).toBe('pw: h******');
+    }
+    expect(
+      await onToolResult(result('read', 'pw: hunter2', { path: join(dir, 'other/config/secrets.json') }), { cwd: dir }),
+    ).toBeUndefined();
   });
 
   it('fails closed when the config file exists but cannot be parsed', async () => {

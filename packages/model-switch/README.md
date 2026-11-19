@@ -76,10 +76,10 @@ The file is read on every interaction, so edits take effect without reloading Pi
 
 ### Config schema
 
-| Field      | Type                       | Default | Description                                                                        |
-| ---------- | -------------------------- | ------- | ---------------------------------------------------------------------------------- |
-| `sections` | `Record<string, string[]>` | —       | Named sections of ordered `provider/model-id` references. Preferred over `models`. |
-| `models`   | `string[]`                 | —       | Legacy flat list. Treated as a single unnamed section when `sections` is absent.   |
+| Field      | Type                       | Default | Description                                                                             |
+| ---------- | -------------------------- | ------- | --------------------------------------------------------------------------------------- |
+| `sections` | `Record<string, string[]>` | —       | Named sections of ordered `provider/model-id` references. Preferred over `models`.      |
+| `models`   | `string[]`                 | —       | Legacy flat list. Treated as a single section named `models` when `sections` is absent. |
 
 The first `/` separates the provider from the model ID. Additional slashes belong to the model ID, so references such as `fireworks/accounts/fireworks/models/kimi-k3` work as expected.
 
@@ -94,11 +94,13 @@ Keep this config machine-local and untracked. A personal machine and work machin
 - The active section is the one containing the current model. If the current model is not in any section, the first section is used.
 - Cycling wraps at both ends within the active section.
 
-### Fuzzy picker
+### Picker
 
-- **Ctrl+Shift+L** or `/model-switch` opens a fuzzy-searchable TUI picker.
+- **Ctrl+Shift+L** or `/model-switch` opens a searchable TUI picker.
 - **Tab** cycles between sections within the picker.
-- Type to fuzzy-filter models within the active section.
+- Type to filter by case-insensitive substring match on `provider/modelId` across **all** sections. Each match is labelled with its section name, and a model listed in several sections appears once. Clearing the query returns to the active section.
+- **PageUp/PageDown** page through the list.
+- The picker requires the interactive terminal UI; in RPC mode it shows a warning instead.
 - The picker preserves config order, marks the current model with `●`, switches the chosen entry, and treats cancellation as a no-op.
 - Sections with no usable models are hidden from the picker.
 

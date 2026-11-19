@@ -154,6 +154,11 @@ describe('profileSearchDirs', () => {
     ]);
     expect(dirs.map((d) => d.scope)).toEqual(['project', 'user', 'extra']);
   });
+
+  it('skips the project dir when no project cwd is given', () => {
+    const dirs = profileSearchDirs(undefined, '/home/agent', ['/bundled/profiles']);
+    expect(dirs.map((d) => d.scope)).toEqual(['user', 'extra']);
+  });
 });
 
 describe('resolveProfileSkills', () => {

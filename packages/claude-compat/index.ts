@@ -32,11 +32,19 @@ const packageRoots: string[] = [];
  * So the package root is two levels up from the skill directory:
  *   SKILL.md → <skill-name>/ → skills/ → <package-root>/
  */
-function derivePackageRoot(skillFilePath: string): string {
+export function derivePackageRoot(skillFilePath: string): string {
   const baseDir = dirname(skillFilePath);
   const skillsDir = dirname(baseDir);
   return dirname(skillsDir);
 }
+
+/**
+ * Matches `${CLAUDE_PLUGIN_ROOT}` or `$CLAUDE_PLUGIN_ROOT` (whole word), with
+ * an optional directly-attached `/path`. Parameter-expansion forms such as
+ * `${CLAUDE_PLUGIN_ROOT:-x}` and longer names like `$CLAUDE_PLUGIN_ROOTX` are
+ * left untouched.
+ */
+const ROOT_REF_RE = /\$(?:\{CLAUDE_PLUGIN_ROOT\}|CLAUDE_PLUGIN_ROOT\b)(?:\/([^\s;|&"'()]+))?/g;
 
 /**
  * Rewrite ${CLAUDE_PLUGIN_ROOT} references in a string to actual paths.
@@ -47,30 +55,34 @@ function derivePackageRoot(skillFilePath: string): string {
  * Handles: ${CLAUDE_PLUGIN_ROOT}/path, $CLAUDE_PLUGIN_ROOT/path,
  *          and bare ${CLAUDE_PLUGIN_ROOT} (no path).
  */
-function rewriteRootRef(text: string): string {
+export function rewriteRootRef(text: string, roots: readonly string[]): string {
   if (!text.includes('CLAUDE_PLUGIN_ROOT')) return text;
-  if (packageRoots.length === 0) return text;
+  const first = roots[0];
+  if (first === undefined) return text;
 
-  return text.replace(/\$\{?CLAUDE_PLUGIN_ROOT\}?(?:\s*\/([^\s;|&"'()]+))?/g, (fullMatch, relativePath?: string) => {
+  return text.replace(ROOT_REF_RE, (_fullMatch, relativePath?: string) => {
     // No path after the root ref — return first root
-    if (!relativePath) {
-      return packageRoots[0] ?? fullMatch;
-    }
+    if (!relativePath) return first;
 
     // Try each root to find one where the file exists
-    for (const root of packageRoots) {
-      const candidate = join(root, relativePath);
-      if (existsSync(candidate)) {
-        return `${root}/${relativePath}`;
-      }
+    for (const root of roots) {
+      if (existsSync(join(root, relativePath))) return `${root}/${relativePath}`;
     }
 
     // No match — use first root as fallback
-    return `${packageRoots[0]}/${relativePath}`;
+    return `${first}/${relativePath}`;
   });
 }
 
 export default function (pi: ExtensionAPI) {
+  // Value of CLAUDE_PLUGIN_ROOT before this extension touched it, restored
+  // whenever there is no root to export so a stale root never leaks.
+  const inheritedRoot = process.env.CLAUDE_PLUGIN_ROOT;
+  const restoreEnv = () => {
+    if (inheritedRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+    else process.env.CLAUDE_PLUGIN_ROOT = inheritedRoot;
+  };
+
   // Discover package roots from loaded skills at session start.
   pi.on('session_start', async (_event, _ctx) => {
     packageRoots.length = 0;
@@ -95,7 +107,14 @@ export default function (pi: ExtensionAPI) {
     // For multi-package, the tool_call interceptor handles it.
     if (packageRoots.length > 0) {
       process.env.CLAUDE_PLUGIN_ROOT = packageRoots[0];
+    } else {
+      restoreEnv();
     }
+  });
+
+  pi.on('session_shutdown', async () => {
+    packageRoots.length = 0;
+    restoreEnv();
   });
 
   // Intercept tool calls and rewrite CLAUDE_PLUGIN_ROOT references.
@@ -105,7 +124,7 @@ export default function (pi: ExtensionAPI) {
     // Bash tool: rewrite command string
     if (event.toolName === 'bash' && event.input?.command) {
       const original = event.input.command as string;
-      const rewritten = rewriteRootRef(original);
+      const rewritten = rewriteRootRef(original, packageRoots);
       if (rewritten !== original) {
         event.input.command = rewritten;
       }
@@ -114,7 +133,7 @@ export default function (pi: ExtensionAPI) {
     // Read tool: rewrite path
     if (event.toolName === 'read' && event.input?.path) {
       const original = event.input.path as string;
-      const rewritten = rewriteRootRef(original);
+      const rewritten = rewriteRootRef(original, packageRoots);
       if (rewritten !== original) {
         event.input.path = rewritten;
       }

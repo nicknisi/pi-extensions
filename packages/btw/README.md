@@ -1,6 +1,6 @@
 # @nicknisi/pi-btw
 
-Side-channel LLM chat in a floating window. `/btw <question>` opens an overlay backed by a configurable one-off `streamSimple` thread that sees the current branch's conversation context plus your questions. Answers stream live into the window, follow-ups can be typed in place, and the thread never touches the main agent's context no matter how deep it goes. On close, the thread persists as a custom session entry that renders in the transcript but never enters LLM context or triggers a turn.
+Side-channel LLM chat in a window. `/btw <question>` opens an inline window (it temporarily replaces the editor) backed by a configurable one-off `streamSimple` thread that sees the current branch's conversation context plus your questions. Answers stream live into the window, follow-ups can be typed in place, and the thread never touches the main agent's context no matter how deep it goes. On close, the thread persists as a custom session entry that renders in the transcript but never enters LLM context or triggers a turn.
 
 Use it for the "quick question while the agent works" case: explanations, alternatives, sanity checks — without polluting the main conversation or spending a steer/follow-up turn on it.
 
@@ -9,13 +9,13 @@ Use it for the "quick question while the agent works" case: explanations, altern
 | Surface                    | Name                              | Notes                                                                                      |
 | -------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------ |
 | Slash command              | `/btw <question>`                 | Uses the configured model override or the current session model                            |
-| Overlay window             | `BtwWindow` via `ctx.ui.custom()` | Streaming markdown thread + follow-up editor                                               |
+| Inline window              | `BtwWindow` via `ctx.ui.custom()` | Streaming markdown thread + follow-up editor                                               |
 | Custom entry type          | `btw-answer`                      | Persisted via `pi.appendEntry()`, rendered by `pi.registerEntryRenderer()`                 |
 | Legacy custom message type | `btw-answer`                      | Old sessions stored answers as custom messages; still rendered and filtered out of context |
 | Event hook                 | `context`                         | Filters legacy `btw-answer` custom messages out of the LLM context                         |
 | Env var                    | `PI_BTW_SPLIT`                    | `h` or `v` to force tmux split direction on fork                                           |
 
-No keybindings are registered globally; all keys below are handled by the overlay itself.
+No keybindings are registered globally; all keys below are handled by the window itself. `/btw` requires the interactive TUI; in RPC, JSON and print modes it reports an error and does nothing.
 
 ## Usage
 
@@ -55,19 +55,19 @@ If the agent is mid-turn it is delivered as a steer message (`deliverAs: "steer"
 
 ### Fork (`ctrl+f`)
 
-Writes the current branch plus the btw thread (as real user/assistant messages) to a **new** session file in the session directory, leaving the live session untouched. The forked session is named `btw: <first question>` and records `parentSession` pointing at the live session file. It is then opened on the best available surface:
+Writes the current branch plus the btw thread (as real user/assistant messages) to a **new** session file in the session directory (the OS temp dir for in-memory `--no-session` sessions, which also have no `parentSession`), leaving the live session untouched. The forked session is named `btw: <first question>` and records `parentSession` pointing at the live session file. It is then opened on the best available surface:
 
 1. **tmux split** — if `$TMUX` is set. Direction is `-h` when the pane is ≥ 160 columns wide, otherwise `-v`; override with `PI_BTW_SPLIT=h|v`.
-2. **New Ghostty window** (macOS) — via `open -na Ghostty --args --working-directory=<cwd> -e /bin/zsh -ilc 'exec pi --session ...'`. Runs through a login+interactive zsh because GUI apps launched by `open` only inherit launchd's minimal `PATH`, which typically lacks `pi`.
-3. **Clipboard + printed command** — `pi --session <file>` copied via `pbcopy` (macOS only) and shown in a notification.
+2. **New Ghostty window** (macOS) — via `open -na Ghostty --args --working-directory=<cwd> -e /bin/zsh -ilc 'exec pi --session "$1"' btw <file>`; the path is passed as a positional argument so it is never parsed by the shell. Runs through a login+interactive zsh because GUI apps launched by `open` only inherit launchd's minimal `PATH`, which typically lacks `pi`.
+3. **Clipboard + printed command** — `pi --session '<file>'` (shell-quoted) copied via `pbcopy` (macOS only) and shown in a notification.
 
 Fork happens _before_ the transcript card is persisted, so the forked session does not contain the card entry.
 
 ## How it works
 
-- On `/btw`, the current branch (`ctx.sessionManager.getBranch()`) is converted to LLM messages with `convertToLlm()`. Assistant tool calls with no matching `toolResult` are dropped first, because `/btw` can run mid-turn when tool calls are still unanswered, and Anthropic rejects `tool_use` blocks without a matching `tool_result`.
+- On `/btw`, pi's canonical context projection (`ctx.sessionManager.buildSessionProjection().messages` — newest compaction summary, branch summaries, custom messages and context edits applied, i.e. what the main agent sees) is converted to LLM messages with `convertToLlm()`, minus legacy `btw-answer` messages. Assistant tool calls with no matching `toolResult` are dropped first, because `/btw` can run mid-turn when tool calls are still unanswered, and Anthropic rejects `tool_use` blocks without a matching `tool_result`.
 - The side thread starts from that snapshot. Each question is sent to the configured model override, or the current session model if no override is configured or it cannot be resolved, with a fixed system prompt (concise, no tool suggestions) via `ctx.modelRegistry.streamSimple(...)` with the configured `thinking` level, or the current session thinking level if unset (`off` maps to `undefined`). The registry applies `models.json` overrides and extension-registered providers and resolves auth per request; a `getApiKeyAndHeaders()` pre-check only produces a friendly error when no key is configured. Completed Q&A pairs are appended to the side thread, so follow-ups have full side-thread history plus the original branch snapshot.
-- The overlay is a `Component`/`Focusable` from `@earendil-works/pi-tui`, rendering a bordered box (max width 100, body capped at 30 rows or `terminal.rows - 14`) with a spinner while streaming and markdown-rendered answers.
+- The window is a `Component`/`Focusable` from `@earendil-works/pi-tui`, rendering a bordered box (max width 100, body capped at 30 rows or `terminal.rows - 14`) with a spinner while streaming and markdown-rendered answers.
 - On close with at least one completed turn, the thread is persisted via `pi.appendEntry<BtwEntryData>("btw-answer", { model, turns })`.
 
 ### Why custom entries instead of `pi.sendMessage()`
@@ -99,7 +99,7 @@ Invalid values emit a warning and are ignored; other valid keys still apply. See
 
 ## Dependencies
 
-Runtime dependency: `@nicknisi/pi-shared` for optional side-model selection. Requires pi `>=0.86.0` (`streamSimple()`); hosts without `getAvailableOfType()` use `find()` plus `getApiKeyAndHeaders()` to check preferred models.
+Runtime dependency: `@nicknisi/pi-shared` for optional side-model selection. Requires pi `>=0.87.0` (`streamSimple()`, `buildSessionProjection()`); hosts without `getAvailableOfType()` use `find()` plus `getApiKeyAndHeaders()` to check preferred models.
 
 Peer (pi APIs):
 

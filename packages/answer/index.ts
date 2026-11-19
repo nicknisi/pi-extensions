@@ -75,7 +75,7 @@ function getTextParts(content: Array<{ type: string; text?: string }>): string[]
     .map((part) => part.text);
 }
 
-function getJsonCandidates(text: string): string[] {
+export function getJsonCandidates(text: string): string[] {
   const candidates = new Set<string>();
   const trimmed = text.trim();
 
@@ -102,13 +102,17 @@ function getJsonCandidates(text: string): string[] {
   return [...candidates];
 }
 
-function normalizeExtractedQuestions(result: ExtractionResult): ExtractionResult {
+function normalizeExtractedQuestions(result: { questions: readonly unknown[] }): ExtractionResult {
   const seen = new Set<string>();
   const questions: ExtractedQuestion[] = [];
 
   for (const item of result.questions) {
-    const question = item.question.trim();
-    const context = item.context?.trim() || undefined;
+    // Model output is untrusted: skip malformed items instead of throwing.
+    if (!item || typeof item !== 'object') continue;
+    const raw = item as { question?: unknown; context?: unknown };
+    if (typeof raw.question !== 'string') continue;
+    const question = raw.question.trim();
+    const context = (typeof raw.context === 'string' && raw.context.trim()) || undefined;
     if (!question) continue;
 
     const key = question.toLowerCase();
@@ -121,14 +125,14 @@ function normalizeExtractedQuestions(result: ExtractionResult): ExtractionResult
   return { questions };
 }
 
-function parseExtractionResult(text: string): ExtractionOutcome {
+export function parseExtractionResult(text: string): ExtractionOutcome {
   for (const candidate of getJsonCandidates(text)) {
     try {
-      const parsed = JSON.parse(candidate) as ExtractionResult;
+      const parsed = JSON.parse(candidate) as { questions?: unknown } | null;
       if (parsed && Array.isArray(parsed.questions)) {
         return {
           type: 'success',
-          result: normalizeExtractedQuestions(parsed),
+          result: normalizeExtractedQuestions({ questions: parsed.questions }),
         };
       }
     } catch {
@@ -142,18 +146,33 @@ function parseExtractionResult(text: string): ExtractionOutcome {
   };
 }
 
-function fallbackExtractQuestions(text: string): ExtractionResult {
-  const normalized = text.replace(/\r\n?/g, '\n').trim();
-  const questionMatches = normalized.match(/[^\n.!?]*\?+(?:["')\]]+)?/g) ?? [];
-  const questions = questionMatches
-    .map((question) => question.replace(/^[\s>*-]+/, '').trim())
-    .filter((question) => question.length > 0)
-    .map((question) => ({ question }));
+export function fallbackExtractQuestions(text: string): ExtractionResult {
+  // "?" inside fenced code is not a question; drop those blocks entirely.
+  const prose = text.replace(/\r\n?/g, '\n').replace(/```[\s\S]*?(?:```|$)/g, '\n');
+  // "?" inside inline code or URLs is not a question either. Mask them with same-length filler
+  // so sentence boundaries found in the masked text map back onto the original prose.
+  const mask = (match: string) => 'x'.repeat(match.length);
+  // Trailing sentence punctuation stays outside the URL mask so "use https://x.dev?" is a question.
+  const masked = prose.replace(/`[^`\n]*`/g, mask).replace(/\bhttps?:\/\/\S+?(?=[.,;:!?"')\]*_]*(?:\s|$))/g, mask);
+  // Sentences end at punctuation (optionally followed by closing quotes/brackets/emphasis) and
+  // whitespace, so "v1.2" or "foo.ts" do not split a question.
+  const boundaries = [...masked.matchAll(/\n|(?<=[.!?]["')\]*_]*)[^\S\n]+/g)];
+  const questions: { question: string }[] = [];
+  let start = 0;
+  for (const { index: end, 0: separator } of [...boundaries, { index: masked.length, 0: '' }]) {
+    const isQuestion = /\?+["')\]*_]*\s*$/.test(masked.slice(start, end));
+    const question = prose
+      .slice(start, end)
+      .replace(/^[\s>*_-]+/, '')
+      .replace(/[\s*_]+$/, '');
+    start = end + separator.length;
+    if (isQuestion && question) questions.push({ question });
+  }
 
   return normalizeExtractedQuestions({ questions });
 }
 
-function findLastCompletedAssistantMessage(ctx: ExtensionContext): {
+export function findLastCompletedAssistantMessage(ctx: Pick<ExtensionContext, 'sessionManager'>): {
   text?: string;
   skippedIncomplete: boolean;
 } {
@@ -180,7 +199,7 @@ function findLastCompletedAssistantMessage(ctx: ExtensionContext): {
   return { skippedIncomplete };
 }
 
-function buildAnswerMessage(questions: ExtractedQuestion[], answers: string[]): string {
+export function buildAnswerMessage(questions: ExtractedQuestion[], answers: string[]): string {
   const lines = ['Here are my answers to your questions:', ''];
 
   for (let i = 0; i < questions.length; i++) {
@@ -201,7 +220,7 @@ function buildAnswerMessage(questions: ExtractedQuestion[], answers: string[]): 
   return lines.join('\n');
 }
 
-class AnswerComponent implements Component, Focusable {
+export class AnswerComponent implements Component, Focusable {
   private _focused = false;
 
   get focused(): boolean {
@@ -441,6 +460,11 @@ class AnswerComponent implements Component, Focusable {
   }
 }
 
+/** Terminal-only UI (custom components) needs the TUI; older pi without `ctx.mode` falls back to `hasUI`. */
+function isTui(ctx: ExtensionContext): boolean {
+  return ctx.hasUI && (ctx.mode ?? 'tui') === 'tui';
+}
+
 export default function (pi: ExtensionAPI) {
   const { config, warnings } = loadAnswerConfig();
   const extractionModelPreferences = config.extractionModels.map((model) => parseModelPreference(model)!);
@@ -450,14 +474,35 @@ export default function (pi: ExtensionAPI) {
   let hintClassifier: Promise<Classifier | undefined> | undefined;
   // Bumped by each new prompt, so a slow classifier cannot show a stale hint.
   let hintTurn = 0;
-  const clearHint = (ctx: ExtensionContext) => {
+  let hintAbort: AbortController | undefined;
+  const cancelHint = () => {
     hintTurn += 1;
+    hintAbort?.abort();
+    hintAbort = undefined;
+  };
+  const clearHint = (ctx: ExtensionContext) => {
+    cancelHint();
     if (ctx.hasUI) ctx.ui.setStatus(HINT_KEY, undefined);
+  };
+  const findHintClassifier = (ctx: ExtensionContext) => {
+    if (hintClassifier) return hintClassifier;
+    const lookup = findClassifier(ctx.modelRegistry, config.hintModels).then((model) => {
+      // Cache only a found classifier, so logging in later turns the hint on.
+      if (!model && hintClassifier === lookup) hintClassifier = undefined;
+      return model;
+    });
+    hintClassifier = lookup;
+    return lookup;
   };
 
   pi.on('session_start', async (_event, ctx) => {
     hintClassifier = undefined;
     for (const warning of warnings) ctx.ui.notify(warning, 'warning');
+  });
+
+  pi.on('session_shutdown', async () => {
+    cancelHint();
+    hintClassifier = undefined;
   });
 
   pi.on('input', async (_event, ctx) => {
@@ -466,21 +511,26 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on('agent_end', async (event, ctx) => {
-    if (!ctx.hasUI || config.hintModels.length === 0) return;
+    // The hint names a TUI shortcut, so it only makes sense in the TUI.
+    if (!isTui(ctx) || config.hintModels.length === 0) return;
     const last = [...event.messages].reverse().find((message) => message.role === 'assistant');
     if (!last || last.role !== 'assistant' || last.stopReason !== 'stop') return;
     const text = getTextParts(last.content).join('\n').trim();
     // shortcut: a reply without "?" gets no hint, which skips the classifier on most turns; drop this if hints go missing.
     if (!text.includes('?')) return;
+    cancelHint();
     const turn = hintTurn;
+    const abort = new AbortController();
+    hintAbort = abort;
     void (async () => {
-      const model = await (hintClassifier ??= findClassifier(ctx.modelRegistry, config.hintModels));
-      if (!model) return;
+      const model = await findHintClassifier(ctx);
+      if (!model || abort.signal.aborted) return;
       const probability = await classifyBool(
         ctx.modelRegistry,
         model,
         { message: text.slice(-HINT_CHARS) },
         HINT_QUESTION,
+        abort.signal,
       );
       if (probability !== undefined && probability >= 0.5 && turn === hintTurn)
         ctx.ui.setStatus(HINT_KEY, ctx.ui.theme.fg('accent', '? ctrl+. to answer'));
@@ -489,8 +539,9 @@ export default function (pi: ExtensionAPI) {
 
   const answerHandler = async (ctx: ExtensionContext) => {
     clearHint(ctx);
-    if (!ctx.hasUI) {
-      ctx.ui.notify('answer requires interactive mode', 'error');
+    // custom() components only render in the TUI; RPC mode resolves them with undefined.
+    if (!isTui(ctx)) {
+      if (ctx.hasUI) ctx.ui.notify('answer requires the interactive TUI', 'error');
       return;
     }
 
@@ -541,6 +592,11 @@ export default function (pi: ExtensionAPI) {
           return { type: 'cancelled' } as ExtractionOutcome;
         }
 
+        // complete() reports provider failures (auth, rate limit, network) in the message instead of throwing.
+        if (response.stopReason === 'error') {
+          return { type: 'error', message: response.errorMessage ?? 'Question extraction failed' } as ExtractionOutcome;
+        }
+
         const responseText = getTextParts(response.content).join('\n').trim();
         if (!responseText) {
           const fallback = fallbackExtractQuestions(lastAssistantText);
@@ -576,7 +632,7 @@ export default function (pi: ExtensionAPI) {
       return loader;
     });
 
-    if (extractionOutcome.type === 'cancelled') {
+    if (!extractionOutcome || extractionOutcome.type === 'cancelled') {
       ctx.ui.notify('Cancelled', 'info');
       return;
     }
@@ -596,7 +652,7 @@ export default function (pi: ExtensionAPI) {
       { blocked: { kind: 'question', message: 'Answer the questions' } },
     );
 
-    if (answersResult === null) {
+    if (answersResult === null || answersResult === undefined) {
       ctx.ui.notify('Cancelled', 'info');
       return;
     }

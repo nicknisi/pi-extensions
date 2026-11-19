@@ -34,18 +34,29 @@ function generateWav(samples: Float32Array): Buffer {
   return buf;
 }
 
+/** afplay and say are macOS binaries; elsewhere audio is skipped entirely. */
+export const AUDIO_SUPPORTED = process.platform === 'darwin';
+
 function playWav(buf: Buffer): ChildProcess | null {
+  if (!AUDIO_SUPPORTED) return null;
+  const file = join(tmpdir(), `pi100_${Date.now()}_${Math.random().toString(36).slice(2)}.wav`);
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    try {
+      unlinkSync(file);
+    } catch {}
+  };
   try {
-    const file = join(tmpdir(), `pi100_${Date.now()}_${Math.random().toString(36).slice(2)}.wav`);
     writeFileSync(file, buf);
     const proc = spawn('afplay', [file], { stdio: 'ignore' });
-    proc.on('exit', () => {
-      try {
-        unlinkSync(file);
-      } catch {}
-    });
+    // A failed spawn (e.g. ENOENT) emits 'error', not 'exit'; unhandled it would crash pi.
+    proc.on('error', cleanup);
+    proc.on('exit', cleanup);
     return proc;
   } catch {
+    cleanup();
     return null;
   }
 }
@@ -118,16 +129,23 @@ export function playClick(freq = 1200, durationMs = 40): ChildProcess | null {
   return playTone(freq, durationMs, 0.15);
 }
 
-/** Speak the monologue using macOS `say` — slow and dramatic */
+/**
+ * Speak the monologue using macOS `say` — slow and dramatic.
+ * `onDone` fires only when speech actually finishes (exit code 0); if `say` is unavailable,
+ * fails to spawn, exits nonzero, or is killed it never fires, so the caller falls back to its fixed timeout.
+ */
 export function speak(text: string, rate = 120, onDone?: () => void): ChildProcess | null {
+  if (!AUDIO_SUPPORTED) return null;
   try {
     // Daniel = deep dramatic British male voice, slow rate for gravitas
     const args = ['-v', 'Daniel', '-r', String(rate)];
     const proc = spawn('say', [...args, text], { stdio: 'ignore' });
-    proc.on('exit', () => onDone?.());
+    proc.on('error', () => {});
+    proc.on('exit', (code, signal) => {
+      if (code === 0 && signal === null) onDone?.();
+    });
     return proc;
   } catch {
-    onDone?.();
     return null;
   }
 }

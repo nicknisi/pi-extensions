@@ -191,6 +191,62 @@ describe('runWorkflow', () => {
     expect(fake.calls).toHaveLength(1);
   });
 
+  it('settles a needs cycle (incl. a self-reference) as skipped instead of rejecting', async () => {
+    const fake = makeFake(() => ok('fine'));
+    const result = await run(
+      {
+        name: 'cycle',
+        stages: [
+          { id: 'free', needs: [], prompt: 'free' },
+          { id: 'self', needs: ['self'], prompt: 'self' },
+          { id: 'a', needs: ['b'], prompt: 'a' },
+          { id: 'b', needs: ['a'], prompt: 'b' },
+        ],
+      },
+      fake,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.outcomes['free']).toMatchObject({ ok: true });
+    for (const id of ['self', 'a', 'b']) {
+      expect(result.outcomes[id]).toMatchObject({ ok: false, kind: 'skipped', error: 'dependency cycle detected' });
+    }
+    expect(fake.calls).toHaveLength(1);
+  });
+
+  it('fails a foreach stage once when its prompt function throws for some items', async () => {
+    const events: string[] = [];
+    const fake = makeFake((opts) => ok(`out:${opts.prompt}`));
+    const result = await runWorkflow(
+      {
+        name: 'foreach-throw',
+        stages: [
+          {
+            id: 'fan',
+            needs: [],
+            foreach: [1, 2, 3],
+            prompt: (_ctx, item) => {
+              if (item !== 2) throw new Error(`bad item ${String(item)}`);
+              return `item-${item}`;
+            },
+          },
+        ],
+      },
+      fake,
+      {
+        cwd: '/tmp',
+        runDir: tmpRunDir(),
+        onProgress: (e) => events.push(`${e.type}:${'stageId' in e ? e.stageId : ''}`),
+      },
+    );
+    expect(result.outcomes['fan']).toMatchObject({
+      ok: false,
+      kind: 'crashed',
+      error: 'item 0: Prompt threw: bad item 1',
+    });
+    expect(events.filter((e) => e === 'stage_failed:fan')).toHaveLength(1);
+    expect(fake.calls).toHaveLength(1);
+  });
+
   it('expands foreach with per-item concurrency and aggregates output', async () => {
     const fake = makeFake(async (opts) => {
       await sleep(10);

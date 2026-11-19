@@ -22,7 +22,7 @@ Idle is tracked via `lastActivity`, reset by `before_agent_start` and `agent_set
 
 If all pass, it builds a plain-text transcript of the active context — the same compacted view pi sends the model (`buildSessionContext`), so history before a compaction is represented only by its summary. It includes user/assistant text plus one line per tool call: `Tool <name> called with <args JSON>`, with the args JSON capped at 200 characters. It sends it to the model with a "summarize tersely, 6-8 lines, short markdown headings" prompt, and appends the result as a `recap` entry via `pi.appendEntry`.
 
-The renderer draws a `Box` containing a bold "Recap · <time>" header and the summary as Markdown, capped at 5 lines (truncated with ` …`). The card is dimmed and uses the theme's `customMessageBg` background so it reads as distinct from user/assistant messages.
+The renderer draws a `Box` containing a bold "Recap · <time>" header and the summary as Markdown, capped at 5 lines (truncated with ` …`) when collapsed; expanding the transcript (pi's expand toggle) shows the full summary. The card is dimmed and uses the theme's `customMessageBg` background so it reads as distinct from user/assistant messages.
 
 ## Usage
 
@@ -57,15 +57,15 @@ No environment variables are read.
 - `TICK_MS = 30_000` — idle check interval
 - `MIN_BRANCH_LEN = 4` — minimum message entries before auto-firing
 - `MAX_TOOL_ARGS_CHARS = 200` — per-tool-call args cap in the transcript
-- `MAX_CARD_LINES = 5` — rendered summary line cap
-- Summarization call runs with `reasoningEffort: "low"`, `cacheRetention: "none"`
+- `MAX_CARD_LINES = 5` — rendered summary line cap (collapsed view only)
+- Summarization call runs via `ctx.modelRegistry.streamSimple` with provider-neutral `reasoning: "low"`, `cacheRetention: "none"`
 
 ## Dependencies
 
 Peer deps (all `@earendil-works/*`, provided by the pi host):
 
 - `@earendil-works/pi-ai` — `uuidv7` (session id for the completion call)
-- `@earendil-works/pi-coding-agent` — `ExtensionAPI`, `getMarkdownTheme`; uses `pi.registerCommand`, `pi.registerEntryRenderer`, `pi.appendEntry`, `pi.on`, `buildSessionContext`, `convertToLlm`, `ctx.sessionManager.getBranch`, `ctx.modelRegistry.complete`, `ctx.isIdle`, `ctx.ui.notify`
+- `@earendil-works/pi-coding-agent` — `ExtensionAPI`, `getMarkdownTheme`; uses `pi.registerCommand`, `pi.registerEntryRenderer`, `pi.appendEntry`, `pi.on`, `buildSessionContext`, `convertToLlm`, `ctx.sessionManager.getBranch`, `ctx.modelRegistry.streamSimple`, `ctx.isIdle`, `ctx.ui.notify`
 - `@earendil-works/pi-tui` — `Box`, `Text`, `Markdown` for the card renderer
 
 Workspace dependency: `@nicknisi/pi-shared` for optional side-model selection. Hosts without `getAvailableOfType()` use `find()` plus `getApiKeyAndHeaders()`.
@@ -73,9 +73,10 @@ Workspace dependency: `@nicknisi/pi-shared` for optional side-model selection. H
 ## Caveats
 
 - TUI only: the timer and renderer are installed in `session_start` only when `ctx.mode === "tui"`. `/recap` technically works in other modes but nothing renders the entry there.
-- Depends on several pi internals that could change across versions: `sessionManager.getBranch()`, `modelRegistry.complete()`, `ctx.isIdle()`, and the `session_start`/`before_agent_start`/`agent_settled` event names.
+- Depends on several pi internals that could change across versions: `sessionManager.getBranch()`, `modelRegistry.streamSimple()`, `ctx.isIdle()`, and the `session_start`/`before_agent_start`/`agent_settled` event names.
 - A configured model is resolved and completed through `ctx.modelRegistry`, so registered custom providers work. An omitted or unresolved override falls back to the current session model.
-- Background recap failures are reported as warnings and never terminate the pi process.
+- Recap failures (including provider/auth errors returned with `stopReason: "error"`) and empty model output are reported as warnings and never terminate the pi process. `/recap` on an empty conversation reports "nothing to summarize yet".
+- An in-flight recap request is aborted on `session_shutdown` and when a new agent run starts (`before_agent_start`), so a stale recap is never appended to a replaced session or mid-run.
 - Entry content extraction is structural (filters blocks by `type === "text"` / `type === "toolCall"`), so changes to pi's message block shape would silently empty the transcript it summarizes.
 - The timer is cleared on `session_shutdown`; if a session never shuts down cleanly the interval lives until process exit.
 

@@ -67,7 +67,18 @@ import {
 import { SearchableSelectList } from './searchable-select-list.js';
 import { Type } from 'typebox';
 import { backgroundNotice, MAX_TASK_OUTPUT_CHARS } from './background.js';
-import { scopeFleetRuns, type FleetScope } from './fleet.js';
+import { mergeFleet, scopeFleetRuns, type FleetScope } from './fleet.js';
+import { createCachedArtifactReader } from './artifact-cache.js';
+import { findLastDispatch, planDispatch } from './dispatch-plan.js';
+import {
+  buildHunkPatch,
+  loadPatchState,
+  mapLimit,
+  recordPatchDecision,
+  selectPendingPatches,
+  type PatchFileRef,
+  type PatchState,
+} from './patch-staging.js';
 import {
   applyProfile,
   discoverProfiles,
@@ -98,7 +109,6 @@ const RADAR_SHORTCUT = 'alt+ctrl+f';
 const STATUS_INTERVAL = 2000;
 const MAX_TASKS = 8;
 const DEFAULT_TOOLS = ['read', 'grep', 'find', 'ls'];
-const TREE_MUTATING_TOOLS = new Set(['edit', 'write', 'bash']);
 const MAX_FLEET_LIST = 20;
 /** How long session_shutdown waits for aborted runs to settle before letting pi exit. */
 const SHUTDOWN_SETTLE_MS = 5000;
@@ -148,13 +158,6 @@ type DispatchDetails = {
   settled: boolean;
 };
 
-function wantsTreeMutation(spec: TaskSpec): boolean {
-  // Worktree-isolated tasks never touch the caller's tree, so they need
-  // neither the allowTreeMutation declaration nor serialization.
-  if (spec.worktree) return false;
-  return (spec.tools ?? []).some((tool) => TREE_MUTATING_TOOLS.has(tool));
-}
-
 function toSpawnOptions(spec: TaskSpec, cwd: string, parentSession: string | undefined): SpawnOptions {
   const opts: SpawnOptions = {
     prompt: spec.task,
@@ -186,9 +189,12 @@ function skillRegistry(pi: ExtensionAPI): Map<string, string> {
   return registry;
 }
 
-/** Rescan profile dirs (cheap: a few readdirs) so edits apply without a restart. */
-function loadProfiles(cwd: string, extraDirs: string[]): DiscoveredProfiles {
-  return discoverProfiles(profileSearchDirs(cwd, getAgentDir(), extraDirs));
+/**
+ * Rescan profile dirs (cheap: a few readdirs) so edits apply without a restart.
+ * Pass `projectCwd` undefined to skip `<cwd>/.pi/agents` (no session ctx yet).
+ */
+function loadProfiles(projectCwd: string | undefined, extraDirs: string[]): DiscoveredProfiles {
+  return discoverProfiles(profileSearchDirs(projectCwd, getAgentDir(), extraDirs));
 }
 
 type ProfileMerge =
@@ -255,15 +261,10 @@ function formatRunLine(run: RunArtifact): string {
   return `- ${run.runId.slice(0, 8)} [${run.namespace}]${run.agent ? ` ${run.agent}` : ''} — ${bits.join(', ')}${tokens} · ${short(run.promptPreview ?? '', 60)}`;
 }
 
+const readArtifactsCached = createCachedArtifactReader();
+
 function collectFleet(live: RunArtifact[]): RunArtifact[] {
-  const byId = new Map<string, RunArtifact>();
-  for (const record of readRunArtifacts(artifactsRoot())) byId.set(record.runId, record);
-  // Live wins for status/timing, but live records carry no output — keep the artifact's.
-  for (const record of live) {
-    const persisted = byId.get(record.runId);
-    byId.set(record.runId, { ...persisted, ...record, output: record.output ?? persisted?.output });
-  }
-  return [...byId.values()].sort((a, b) => b.startedAt - a.startedAt);
+  return mergeFleet(readArtifactsCached(artifactsRoot()), live);
 }
 
 function collectFleetForScope(
@@ -274,7 +275,7 @@ function collectFleetForScope(
   return scopeFleetRuns(collectFleet(runtime.listRuns() as RunArtifact[]), scope, parentSession);
 }
 
-function postText(pi: ExtensionAPI, ctx: ExtensionCommandContext, text: string) {
+function postText(pi: ExtensionAPI, text: string) {
   pi.sendMessage({
     customType: 'subagents:fleet',
     content: text,
@@ -557,6 +558,11 @@ class FleetOverlay implements Component, Focusable {
     this.close();
   }
 
+  /** pi disposes custom components on every teardown path (reload, session replacement), not just Esc. */
+  dispose(): void {
+    clearInterval(this.tick);
+  }
+
   private openDetail(run: RunArtifact): void {
     this.detail = run;
     this.mode = 'detail';
@@ -693,7 +699,9 @@ class FleetOverlay implements Component, Focusable {
       );
       for (const line of this.list.render(contentWidth)) pushBoxLine(` ${line}`);
       pushBoxLine();
-      pushBoxLine(this.theme.fg('dim', ' type to filter • Enter inspect • c cancel • Esc close'));
+      pushBoxLine(
+        this.theme.fg('dim', ' type to filter (agent, model, prompt, id) • Enter inspect • c cancel • Esc close'),
+      );
     } else if (this.detail) {
       pushBoxLine(
         ` ${this.theme.fg('accent', this.theme.bold('Run'))}${this.theme.fg('dim', ` ${this.detail.runId.slice(0, 8)}`)}`,
@@ -736,16 +744,11 @@ class FleetOverlay implements Component, Focusable {
 // to ~/.pi/agent/subagent-patches/state.json (or $PI_SUBAGENTS_DIR/patches/) so
 // /patches survives restart.
 
-interface PatchState {
-  version: 1;
-  decisions: Record<string, { decision: 'applied' | 'discarded'; at: number }>;
-}
 interface PatchEntry {
   runId: string;
   patchPath: string;
   parsed: ParsedPatch;
   stamp: 'clean' | 'conflicts' | 'stale';
-  decision: 'applied' | 'discarded' | undefined;
   promptPreview: string;
   agent?: string | undefined;
   changedFiles: number;
@@ -753,29 +756,6 @@ interface PatchEntry {
 }
 
 const PATCH_DIFF_CAP = 2000;
-
-function loadPatchState(): PatchState {
-  try {
-    const j = JSON.parse(fs.readFileSync(path.join(patchesStateDir(), 'state.json'), 'utf8')) as Partial<PatchState>;
-    if (j && j.decisions) return { version: 1, decisions: j.decisions };
-  } catch {
-    // missing/corrupt state — start fresh
-  }
-  return { version: 1, decisions: {} };
-}
-
-function savePatchState(state: PatchState): void {
-  try {
-    const dir = patchesStateDir();
-    const file = path.join(dir, 'state.json');
-    fs.mkdirSync(dir, { recursive: true });
-    const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
-    fs.renameSync(tmp, file);
-  } catch {
-    // best-effort persistence; a lost decision just means the patch re-appears
-  }
-}
 
 /** Pre-flight WITHOUT applying: `git apply --check`. Stale = a modified (non-created) target no longer exists in the working tree. */
 async function stampPatch(
@@ -800,54 +780,63 @@ async function stampPatch(
   return 'conflicts';
 }
 
-async function collectPatches(pi: ExtensionAPI, runtime: SubagentRuntime, cwd: string): Promise<PatchEntry[]> {
-  const state = loadPatchState();
-  const artifacts = new Map<string, RunArtifact>();
+/** Concurrent `git apply --check` pre-flights while collecting /patches. */
+const PATCH_CHECK_CONCURRENCY = 4;
+
+/**
+ * Every undecided `.patch` handoff across all artifact namespaces (orphans
+ * without a run artifact included). Decided patches are dropped before the
+ * `git apply --check` pre-flight, which then runs with bounded parallelism.
+ */
+async function collectPatches(pi: ExtensionAPI, cwd: string, state: PatchState): Promise<PatchEntry[]> {
   const root = artifactsRoot();
-  for (const a of readRunArtifacts(root)) artifacts.set(a.runId, a);
-  const entries: PatchEntry[] = [];
   let namespaces: fs.Dirent[];
   try {
     namespaces = fs.readdirSync(root, { withFileTypes: true });
   } catch {
-    return entries;
+    return [];
   }
+  const files: PatchFileRef[] = [];
   for (const ns of namespaces) {
     if (!ns.isDirectory()) continue;
     const dir = path.join(root, ns.name);
-    let files: fs.Dirent[];
+    let entries: fs.Dirent[];
     try {
-      files = fs.readdirSync(dir, { withFileTypes: true });
+      entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch {
       continue;
     }
-    for (const f of files) {
+    for (const f of entries) {
       if (!f.isFile() || !f.name.endsWith('.patch')) continue;
-      const runId = f.name.slice(0, -'.patch'.length);
-      const patchPath = path.join(dir, f.name);
-      let diff: string;
-      try {
-        diff = fs.readFileSync(patchPath, 'utf8');
-      } catch {
-        continue;
-      }
-      const parsed = parseUnifiedDiff(diff);
-      const run = artifacts.get(runId);
-      const stamp = await stampPatch(pi, cwd, parsed, patchPath);
-      entries.push({
-        runId,
-        patchPath,
-        parsed,
-        stamp,
-        decision: state.decisions[patchPath]?.decision,
-        promptPreview: run?.promptPreview ?? '',
-        agent: run?.agent,
-        changedFiles: run?.worktree?.changedFiles ?? parsed.files.length,
-        startedAt: run?.startedAt ?? 0,
-      });
+      files.push({ runId: f.name.slice(0, -'.patch'.length), patchPath: path.join(dir, f.name) });
     }
   }
-  return entries.sort((a, b) => b.startedAt - a.startedAt);
+  if (files.length === 0) return [];
+  const artifacts = new Map<string, RunArtifact>();
+  for (const a of readRunArtifacts(root)) artifacts.set(a.runId, a);
+  const candidates = selectPendingPatches(files, artifacts, state.decisions);
+  const entries = await mapLimit(candidates, PATCH_CHECK_CONCURRENCY, async ({ runId, patchPath, run }) => {
+    let diff: string;
+    try {
+      diff = fs.readFileSync(patchPath, 'utf8');
+    } catch {
+      return undefined;
+    }
+    const parsed = parseUnifiedDiff(diff);
+    const stamp = await stampPatch(pi, cwd, parsed, patchPath);
+    const entry: PatchEntry = {
+      runId,
+      patchPath,
+      parsed,
+      stamp,
+      promptPreview: run?.promptPreview ?? '',
+      agent: run?.agent,
+      changedFiles: run?.worktree?.changedFiles ?? parsed.files.length,
+      startedAt: run?.startedAt ?? 0,
+    };
+    return entry;
+  });
+  return entries.filter((e): e is PatchEntry => e !== undefined).sort((a, b) => b.startedAt - a.startedAt);
 }
 
 async function applyWholePatch(
@@ -870,9 +859,8 @@ async function applySingleHunk(
   parsed: ParsedPatch,
   hunk: PatchHunk,
 ): Promise<{ ok: boolean; message: string }> {
-  const file = parsed.files[hunk.fileIndex];
-  if (!file) return { ok: false, message: 'hunk has no owning file' };
-  const sub = [...file.header, hunk.header, ...hunk.body].join('\n') + '\n';
+  const sub = buildHunkPatch(parsed, hunk);
+  if (sub === undefined) return { ok: false, message: 'hunk has no owning file' };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-patch-'));
   const tmp = path.join(dir, 'hunk.patch');
   try {
@@ -994,8 +982,7 @@ class PatchesOverlay implements Component, Focusable {
   }
 
   private setDecision(entry: PatchEntry, decision: 'applied' | 'discarded'): void {
-    this.state.decisions[entry.patchPath] = { decision, at: Date.now() };
-    savePatchState(this.state);
+    this.state = recordPatchDecision(patchesStateDir(), entry.patchPath, decision);
     this.patches = this.patches.filter((p) => p.patchPath !== entry.patchPath);
     if (this.diff?.patchPath === entry.patchPath) this.diff = null;
   }
@@ -1239,7 +1226,6 @@ function startCancellable(
  * into the live transcript.
  */
 function openFleetOverlay(
-  pi: ExtensionAPI,
   ctx: ExtensionCommandContext | ExtensionContext,
   runtime: SubagentRuntime,
   initial: RunArtifact | undefined,
@@ -1264,7 +1250,6 @@ function openFleetOverlay(
     controller.abort();
     ctx.ui.notify(`Cancelled run ${runId.slice(0, 8)}`, 'info');
   };
-  void pi;
   return ctx.ui.custom<void>(
     (tui, theme, _kb, done) => {
       widgetTheme = theme;
@@ -1318,21 +1303,27 @@ function inlineComponent(getLines: (width: number) => string[]): Component {
   };
 }
 
-function renderInlineWidget(ctx: ExtensionContext, details: DispatchDetails, frame: number): void {
-  if (!ctx.hasUI) return;
-  const theme = (ctx.ui as ExtensionUIContext).theme;
-  const task = details.tasks[0];
-  if (!task) return;
-  const spinner = theme
-    ? theme.fg('muted', SPINNER_FRAMES[frame % SPINNER_FRAMES.length]!)
-    : SPINNER_FRAMES[frame % SPINNER_FRAMES.length]!;
-  const header = theme ? dispatchHeader(task.label, theme, `${spinner} `) : `${spinner} ${task.label}`;
-  const lines = [header, ''];
-  if (theme) lines.push(...renderTaskTree(details.tasks, theme, frame));
+/**
+ * Returns false once the ctx is unusable (pi invalidates it after the session
+ * ends, and even `ctx.hasUI` then throws), so timer callers can stop.
+ */
+function renderInlineWidget(ctx: ExtensionContext, details: DispatchDetails, frame: number): boolean {
   try {
+    if (!ctx.hasUI) return true;
+    const theme = (ctx.ui as ExtensionUIContext).theme;
+    const task = details.tasks[0];
+    if (!task) return true;
+    const spinner = theme
+      ? theme.fg('muted', SPINNER_FRAMES[frame % SPINNER_FRAMES.length]!)
+      : SPINNER_FRAMES[frame % SPINNER_FRAMES.length]!;
+    const header = theme ? dispatchHeader(task.label, theme, `${spinner} `) : `${spinner} ${task.label}`;
+    const lines = [header, ''];
+    if (theme) lines.push(...renderTaskTree(details.tasks, theme, frame));
     ctx.ui.setWidget(INLINE_WIDGET_KEY, lines, { placement: 'aboveEditor' });
+    return true;
   } catch {
-    // best-effort; a lost widget update during shutdown is harmless
+    // stale ctx during/after shutdown — a lost widget update is harmless
+    return false;
   }
 }
 
@@ -1350,7 +1341,7 @@ async function dispatchInline(
   let frame = 0;
   const widgetTimer = setInterval(() => {
     frame = (frame + 1) % SPINNER_FRAMES.length;
-    renderInlineWidget(ctx, details, frame);
+    if (!renderInlineWidget(ctx, details, frame)) clearInterval(widgetTimer);
   }, SPINNER_INTERVAL);
   task.status = 'working';
   task.startedAt = Date.now();
@@ -1435,8 +1426,6 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
     parent: () => parentCtx,
   });
   const extraProfileDirs = options.profileDirs ?? [];
-  // Registration-time snapshot for the tool description; execution rescans.
-  const initialProfiles = loadProfiles(process.cwd(), extraProfileDirs);
 
   // Soft profile resolution for `&<name>` / `/again`: a matching profile is
   // applied; a non-matching name stays a plain label (back-compat with
@@ -1463,6 +1452,9 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
 
   pi.on('session_start', (_event, ctx) => {
     parentCtx = ctx;
+    // The catalog in dispatch's description reflects this session's cwd.
+    const catalog = profileCatalogLine(loadProfiles(ctx.cwd, extraProfileDirs).profiles);
+    if (catalog !== registeredCatalog) registerDispatch(catalog);
     declareUnlessSearchable(pi, ['fleet']);
     if (!ctx.hasUI) return;
     statusUi = ctx.ui;
@@ -1525,332 +1517,322 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
     clearTimeout(timer);
   });
 
-  pi.registerTool({
-    name: 'dispatch',
-    label: 'Dispatch Subagents',
-    // Children may run bash/edit/write (or builders in worktrees) and reach the network.
-    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-    description: [
-      'Fan out focused child agents in parallel: independent research questions, parallel reviews,',
-      'second opinions, or scoped file investigations. Each child runs hermetically (no user',
-      'extensions/skills/context files) with a read-only tool allowlist unless overridden, and',
-      'returns its final answer. Children cannot spawn children. Not for trivial questions or',
-      'sequential work — dispatch only when tasks are independent and parallel.',
-      'Tasks whose tools include edit, write, or bash mutate the shared working tree: they require',
-      'allowTreeMutation: true and run sequentially after the parallel batch. Prefer worktree: true',
-      'for builders instead — isolated worktrees stay parallel and hand off a patch for central integration.',
-      'A task may name a profile — a persona file bundling a skill basket, tool allowlist, model, and',
-      'system prompt — instead of assembling those per task; explicit task fields override profile values.',
-      profileCatalogLine(initialProfiles.profiles),
-    ]
-      .filter(Boolean)
-      .join(' '),
-    promptSnippet: 'Fan out parallel child agents for independent subtasks',
-    promptGuidelines: [
-      `Use dispatch for independent parallel subtasks (max ${MAX_TASKS}); never for sequential work or trivial questions.`,
-      'Children default to read-only tools (read, grep, find, ls). Pass tools explicitly for builders.',
-      'Prefer profile: "<name>" when a defined profile matches the work — it attaches the persona\'s skills, tools, and prompt.',
-      'Set background: true for long-running tasks; the result arrives as a message when the child finishes (starting a turn if idle), so do other work or end the turn instead of polling fleet.',
-      'Tasks with edit/write/bash tools need allowTreeMutation: true and serialize after the parallel batch — or set worktree: true to isolate them and keep them parallel.',
-    ],
-    parameters: Type.Object({
-      tasks: Type.Array(
-        Type.Object({
-          task: Type.String({ description: 'The full prompt for this child agent' }),
-          agent: Type.Optional(Type.String({ description: 'Label, e.g. "reviewer"' })),
-          profile: Type.Optional(
-            Type.String({
-              description:
-                'Profile (persona) name to launch as — attaches its skill basket, tools, model, and system prompt. Unknown names fail the task. Explicit task fields override profile values.',
-            }),
-          ),
-          model: Type.Optional(Type.String({ description: 'Model spec, e.g. "anthropic/claude-haiku-4-5"' })),
-          thinking: Type.Optional(
-            Type.Union(
-              THINKING_LEVELS.map((level) => Type.Literal(level)),
-              {
+  // Registered at load with a catalog of user + bundled profiles (no ctx yet,
+  // so project trust is unknown), then re-registered on session_start when
+  // the session's catalog differs. Re-registering replaces the definition in
+  // place without changing whether the tool is active.
+  let registeredCatalog: string | undefined;
+  const registerDispatch = (catalog: string) => {
+    registeredCatalog = catalog;
+    pi.registerTool({
+      name: 'dispatch',
+      label: 'Dispatch Subagents',
+      // Children may run bash/edit/write (or builders in worktrees) and reach the network.
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+      description: [
+        'Fan out focused child agents in parallel: independent research questions, parallel reviews,',
+        'second opinions, or scoped file investigations. Each child runs hermetically (no user',
+        'extensions/skills/context files) with a read-only tool allowlist unless overridden, and',
+        'returns its final answer. Children cannot spawn children. Not for trivial questions or',
+        'sequential work — dispatch only when tasks are independent and parallel.',
+        'Tasks whose tools include edit, write, or bash mutate the shared working tree: they require',
+        'allowTreeMutation: true and run sequentially after the parallel batch. Prefer worktree: true',
+        'for builders instead — isolated worktrees stay parallel and hand off a patch for central integration.',
+        'A task may name a profile — a persona file bundling a skill basket, tool allowlist, model, and',
+        'system prompt — instead of assembling those per task; explicit task fields override profile values.',
+        catalog,
+      ]
+        .filter(Boolean)
+        .join(' '),
+      promptSnippet: 'Fan out parallel child agents for independent subtasks',
+      promptGuidelines: [
+        `Use dispatch for independent parallel subtasks (max ${MAX_TASKS}); never for sequential work or trivial questions.`,
+        'Children default to read-only tools (read, grep, find, ls). Pass tools explicitly for builders.',
+        'Prefer profile: "<name>" when a defined profile matches the work — it attaches the persona\'s skills, tools, and prompt.',
+        'Set background: true for long-running tasks; the result arrives as a message when the child finishes (starting a turn if idle), so do other work or end the turn instead of polling fleet.',
+        'Tasks with edit/write/bash tools need allowTreeMutation: true and serialize after the parallel batch — or set worktree: true to isolate them and keep them parallel.',
+      ],
+      parameters: Type.Object({
+        tasks: Type.Array(
+          Type.Object({
+            task: Type.String({ description: 'The full prompt for this child agent' }),
+            agent: Type.Optional(Type.String({ description: 'Label, e.g. "reviewer"' })),
+            profile: Type.Optional(
+              Type.String({
                 description:
-                  'Thinking level for this child only, e.g. "low" for a quick scout. Works with or without model; omit for the model\'s default.',
-              },
+                  'Profile (persona) name to launch as — attaches its skill basket, tools, model, and system prompt. Unknown names fail the task. Explicit task fields override profile values.',
+              }),
             ),
-          ),
-          tools: Type.Optional(
-            Type.Array(Type.String(), { description: 'Tool allowlist; default read-only (read, grep, find, ls)' }),
-          ),
-          systemPrompt: Type.Optional(Type.String({ description: 'Appended to the child system prompt' })),
-          background: Type.Optional(
-            Type.Boolean({ description: 'Run detached; the result arrives as a message when the child finishes' }),
-          ),
-          allowTreeMutation: Type.Optional(
-            Type.Boolean({
-              description:
-                'Required when tools include edit/write/bash; such tasks run sequentially after the parallel batch',
-            }),
-          ),
-          worktree: Type.Optional(
-            Type.Boolean({
-              description:
-                'Run in an isolated git worktree; writes never touch your tree. The full change set (incl. new files) lands as a .patch next to the run artifact — integrate centrally. Mutating tools stay parallel and need no allowTreeMutation.',
-            }),
-          ),
-        }),
-      ),
-    }),
+            model: Type.Optional(Type.String({ description: 'Model spec, e.g. "anthropic/claude-haiku-4-5"' })),
+            thinking: Type.Optional(
+              Type.Union(
+                THINKING_LEVELS.map((level) => Type.Literal(level)),
+                {
+                  description:
+                    'Thinking level for this child only, e.g. "low" for a quick scout. Works with or without model; omit for the model\'s default.',
+                },
+              ),
+            ),
+            tools: Type.Optional(
+              Type.Array(Type.String(), { description: 'Tool allowlist; default read-only (read, grep, find, ls)' }),
+            ),
+            systemPrompt: Type.Optional(Type.String({ description: 'Appended to the child system prompt' })),
+            background: Type.Optional(
+              Type.Boolean({ description: 'Run detached; the result arrives as a message when the child finishes' }),
+            ),
+            allowTreeMutation: Type.Optional(
+              Type.Boolean({
+                description:
+                  'Required when tools include edit/write/bash; such tasks run sequentially after the parallel batch',
+              }),
+            ),
+            worktree: Type.Optional(
+              Type.Boolean({
+                description:
+                  'Run in an isolated git worktree; writes never touch your tree. The full change set (incl. new files) lands as a .patch next to the run artifact — integrate centrally. Mutating tools stay parallel and need no allowTreeMutation.',
+              }),
+            ),
+          }),
+        ),
+      }),
 
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const rawSpecs = params.tasks as TaskSpec[];
-      if (rawSpecs.length === 0) {
-        return toolResult('dispatch requires at least one task.');
-      }
-      if (rawSpecs.length > MAX_TASKS) {
-        return toolResult(
-          `Too many tasks (${rawSpecs.length}); max is ${MAX_TASKS}. Split into multiple dispatch calls.`,
-        );
-      }
-
-      // Strict profile resolution first, so progress rows, labels, and the
-      // mutation rules all see the merged spec. Unknown profile → that task
-      // is refused (like an undeclared mutating task); unresolved skills
-      // warn but never fail.
-      const profileFailures = new Map<TaskSpec, string>();
-      const profileWarnings: string[] = [];
-      let specs = rawSpecs;
-      if (rawSpecs.some((spec) => spec.profile)) {
-        const discovered = loadProfiles(ctx.cwd, extraProfileDirs);
-        const registry = skillRegistry(pi);
-        specs = rawSpecs.map((raw) => {
-          if (!raw.profile) return raw;
-          const merged = mergeProfile(raw, discovered, registry);
-          if (!merged.ok) {
-            profileFailures.set(raw, merged.error);
-            return raw;
-          }
-          if (merged.missingSkills.length > 0) {
-            profileWarnings.push(
-              `profile '${merged.profile.name}': skipped unresolved skills ${merged.missingSkills.join(', ')}`,
-            );
-          }
-          return merged.spec;
-        });
-      }
-
-      if (ctx.hasUI) widgetUi = ctx.ui;
-
-      // Owning pi session file path, for parentSession linkage on the
-      // dual-written standard session JSONL mirror. undefined in print /
-      // in-memory hosts — the mirror is still written, just unparented.
-      const parentSession = ctx.sessionManager?.getSessionFile();
-
-      const progress = new Map<TaskSpec, TaskProgress>();
-      const details: DispatchDetails = { tasks: [], settled: false };
-      for (const spec of specs) {
-        const task: TaskProgress = { label: spec.agent ?? short(spec.task, 40), status: 'pending' };
-        if (spec.model) task.model = spec.model;
-        progress.set(spec, task);
-        details.tasks.push(task);
-      }
-
-      const emit = () => {
-        liveDispatches.set(toolCallId, details);
-        const settledCount = details.tasks.filter((t) => t.status !== 'pending' && t.status !== 'working').length;
-        onUpdate?.({
-          content: [{ type: 'text', text: `[Dispatch] ${settledCount}/${details.tasks.length} done` }],
-          details,
-        });
-      };
-      emit();
-
-      const settle = (task: TaskProgress, result: SpawnResult) => {
-        task.doneAt = Date.now();
-        task.tokens = result.usage;
-        if (result.ok) {
-          task.status = 'done';
-          task.text = result.text;
-        } else {
-          task.status = 'error';
-          task.error = result.error;
-          if (result.text) task.text = result.text;
+      async execute(toolCallId, params, signal, onUpdate, ctx) {
+        const rawSpecs = params.tasks as TaskSpec[];
+        if (rawSpecs.length === 0) {
+          return toolResult('dispatch requires at least one task.');
         }
-      };
+        if (rawSpecs.length > MAX_TASKS) {
+          return toolResult(
+            `Too many tasks (${rawSpecs.length}); max is ${MAX_TASKS}. Split into multiple dispatch calls.`,
+          );
+        }
 
-      const lines: string[] = [];
-      if (profileWarnings.length > 0) {
-        lines.push(profileWarnings.map((w) => `> ⚠ ${w}`).join('\n'));
-      }
+        // Strict profile resolution first, so progress rows, labels, and the
+        // mutation rules all see the merged spec. Unknown profile → that task
+        // is refused (like an undeclared mutating task); unresolved skills
+        // warn but never fail.
+        const profileFailures = new Map<TaskSpec, string>();
+        const profileWarnings: string[] = [];
+        let specs = rawSpecs;
+        if (rawSpecs.some((spec) => spec.profile)) {
+          const discovered = loadProfiles(ctx.cwd, extraProfileDirs);
+          const registry = skillRegistry(pi);
+          specs = rawSpecs.map((raw) => {
+            if (!raw.profile) return raw;
+            const merged = mergeProfile(raw, discovered, registry);
+            if (!merged.ok) {
+              profileFailures.set(raw, merged.error);
+              return raw;
+            }
+            if (merged.missingSkills.length > 0) {
+              profileWarnings.push(
+                `profile '${merged.profile.name}': skipped unresolved skills ${merged.missingSkills.join(', ')}`,
+              );
+            }
+            return merged.spec;
+          });
+        }
 
-      // Refuse undeclared tree-mutating tasks outright; declared ones serialize after the parallel batch.
-      const runnable: TaskSpec[] = [];
-      const mutating: TaskSpec[] = [];
-      for (const spec of specs) {
-        const profileFailure = profileFailures.get(spec);
-        if (profileFailure) {
+        if (ctx.hasUI) widgetUi = ctx.ui;
+
+        // Owning pi session file path, for parentSession linkage on the
+        // dual-written standard session JSONL mirror. undefined in print /
+        // in-memory hosts — the mirror is still written, just unparented.
+        const parentSession = ctx.sessionManager?.getSessionFile();
+
+        const progress = new Map<TaskSpec, TaskProgress>();
+        const details: DispatchDetails = { tasks: [], settled: false };
+        for (const spec of specs) {
+          const task: TaskProgress = { label: spec.agent ?? short(spec.task, 40), status: 'pending' };
+          if (spec.model) task.model = spec.model;
+          progress.set(spec, task);
+          details.tasks.push(task);
+        }
+
+        const emit = () => {
+          liveDispatches.set(toolCallId, details);
+          const settledCount = details.tasks.filter((t) => t.status !== 'pending' && t.status !== 'working').length;
+          onUpdate?.({
+            content: [{ type: 'text', text: `[Dispatch] ${settledCount}/${details.tasks.length} done` }],
+            details,
+          });
+        };
+        emit();
+
+        const settle = (task: TaskProgress, result: SpawnResult) => {
+          task.doneAt = Date.now();
+          task.tokens = result.usage;
+          if (result.ok) {
+            task.status = 'done';
+            task.text = result.text;
+          } else {
+            task.status = 'error';
+            task.error = result.error;
+            if (result.text) task.text = result.text;
+          }
+        };
+
+        const lines: string[] = [];
+        if (profileWarnings.length > 0) {
+          lines.push(profileWarnings.map((w) => `> ⚠ ${w}`).join('\n'));
+        }
+
+        // Refuse undeclared tree-mutating tasks outright; declared ones serialize after the parallel batch.
+        const { refused, background, foreground, mutating } = planDispatch(specs, profileFailures);
+        for (const { spec, reason, error } of refused) {
           const task = progress.get(spec)!;
           task.status = 'error';
-          task.error = profileFailure;
+          task.error = error;
           task.doneAt = Date.now();
-          lines.push(`## ✗ ${task.label} — refused\n\n${profileFailure}`);
-          continue;
+          lines.push(
+            reason === 'profile'
+              ? `## ✗ ${task.label} — refused\n\n${error}`
+              : `## ✗ ${task.label} — refused\n\nTools include edit/write/bash, which mutate the shared working tree. Resubmit with allowTreeMutation: true (the task will run sequentially, after the parallel batch).`,
+          );
         }
-        if (wantsTreeMutation(spec)) {
-          if (spec.allowTreeMutation === true) {
-            mutating.push(spec);
-          } else {
-            const task = progress.get(spec)!;
-            task.status = 'error';
-            task.error = 'refused: edit/write/bash require allowTreeMutation';
-            task.doneAt = Date.now();
-            lines.push(
-              `## ✗ ${task.label} — refused\n\nTools include edit/write/bash, which mutate the shared working tree. Resubmit with allowTreeMutation: true (the task will run sequentially, after the parallel batch).`,
-            );
-          }
-        } else {
-          runnable.push(spec);
-        }
-      }
-      emit();
-
-      const background = runnable.filter((s) => s.background);
-      const foreground = runnable.filter((s) => !s.background);
-
-      for (const spec of background) {
-        const task = progress.get(spec)!;
-        // Deliberately no tool signal for background runs: pi may abort tool
-        // signals after execute returns, which would kill the child.
-        const done = spawnCancellable(runtime, toSpawnOptions(spec, ctx.cwd, parentSession), undefined);
-        const runId = (done as Promise<SpawnResult> & { runId: string }).runId;
-        task.status = 'background';
-        task.runId = runId;
-        task.startedAt = Date.now();
-        lines.push(
-          `⏳ ${task.label} — background run ${runId.slice(0, 8)} (its result arrives as a message when it finishes)`,
-        );
-        watchBackground(pi, runId, task.label, done);
         emit();
-      }
 
-      if (foreground.length > 0) {
-        const results = await Promise.all(
-          foreground.map(async (spec) => {
-            const task = progress.get(spec)!;
-            task.status = 'working';
-            task.startedAt = Date.now();
-            emit();
-            const result = await spawnCancellable(
-              runtime,
-              {
-                ...toSpawnOptions(spec, ctx.cwd, parentSession),
-                onUsage: (usage) => {
-                  task.tokens = usage;
-                  emit();
+        for (const spec of background) {
+          const task = progress.get(spec)!;
+          // Deliberately no tool signal for background runs: pi may abort tool
+          // signals after execute returns, which would kill the child.
+          const done = spawnCancellable(runtime, toSpawnOptions(spec, ctx.cwd, parentSession), undefined);
+          const runId = (done as Promise<SpawnResult> & { runId: string }).runId;
+          task.status = 'background';
+          task.runId = runId;
+          task.startedAt = Date.now();
+          lines.push(
+            `⏳ ${task.label} — background run ${runId.slice(0, 8)} (its result arrives as a message when it finishes)`,
+          );
+          watchBackground(pi, runId, task.label, done);
+          emit();
+        }
+
+        if (foreground.length > 0) {
+          const results = await Promise.all(
+            foreground.map(async (spec) => {
+              const task = progress.get(spec)!;
+              task.status = 'working';
+              task.startedAt = Date.now();
+              emit();
+              const result = await spawnCancellable(
+                runtime,
+                {
+                  ...toSpawnOptions(spec, ctx.cwd, parentSession),
+                  onUsage: (usage) => {
+                    task.tokens = usage;
+                    emit();
+                  },
                 },
+                signal ?? undefined,
+              );
+              settle(task, result);
+              emit();
+              return result;
+            }),
+          );
+          for (let i = 0; i < results.length; i++) {
+            const result = results[i]!;
+            const label = progress.get(foreground[i]!)!.label;
+            if (result.ok) {
+              lines.push(
+                `## ✓ ${label} — ${formatSeconds(0, result.durationMs)}${formatTokens(result.usage)}\n\n${result.text.slice(0, MAX_TASK_OUTPUT_CHARS)}`,
+              );
+            } else {
+              lines.push(
+                `## ✗ ${label} — ${result.kind} (${formatSeconds(0, result.durationMs)})\n\n${result.error}${result.text ? `\n\nPartial output:\n${result.text.slice(0, 1000)}` : ''}`,
+              );
+            }
+          }
+        }
+
+        // Tree-mutating tasks run strictly sequentially, after the parallel batch, so they never
+        // stomp the working tree concurrently with each other or with read-only children.
+        for (const spec of mutating) {
+          const task = progress.get(spec)!;
+          task.status = 'working';
+          task.startedAt = Date.now();
+          emit();
+          const result = await spawnCancellable(
+            runtime,
+            {
+              ...toSpawnOptions(spec, ctx.cwd, parentSession),
+              onUsage: (usage) => {
+                task.tokens = usage;
+                emit();
               },
-              signal ?? undefined,
-            );
-            settle(task, result);
-            emit();
-            return result;
-          }),
-        );
-        for (let i = 0; i < results.length; i++) {
-          const result = results[i]!;
-          const label = progress.get(foreground[i]!)!.label;
+            },
+            signal ?? undefined,
+          );
+          settle(task, result);
+          emit();
           if (result.ok) {
             lines.push(
-              `## ✓ ${label} — ${formatSeconds(0, result.durationMs)}${formatTokens(result.usage)}\n\n${result.text.slice(0, MAX_TASK_OUTPUT_CHARS)}`,
+              `## ✓ ${task.label} — ${formatSeconds(0, result.durationMs)}${formatTokens(result.usage)}\n\n${result.text.slice(0, MAX_TASK_OUTPUT_CHARS)}`,
             );
           } else {
             lines.push(
-              `## ✗ ${label} — ${result.kind} (${formatSeconds(0, result.durationMs)})\n\n${result.error}${result.text ? `\n\nPartial output:\n${result.text.slice(0, 1000)}` : ''}`,
+              `## ✗ ${task.label} — ${result.kind} (${formatSeconds(0, result.durationMs)})\n\n${result.error}${result.text ? `\n\nPartial output:\n${result.text.slice(0, 1000)}` : ''}`,
             );
           }
         }
-      }
 
-      // Tree-mutating tasks run strictly sequentially, after the parallel batch, so they never
-      // stomp the working tree concurrently with each other or with read-only children.
-      for (const spec of mutating) {
-        const task = progress.get(spec)!;
-        task.status = 'working';
-        task.startedAt = Date.now();
-        emit();
-        const result = await spawnCancellable(
-          runtime,
-          {
-            ...toSpawnOptions(spec, ctx.cwd, parentSession),
-            onUsage: (usage) => {
-              task.tokens = usage;
-              emit();
-            },
-          },
-          signal ?? undefined,
-        );
-        settle(task, result);
-        emit();
-        if (result.ok) {
-          lines.push(
-            `## ✓ ${task.label} — ${formatSeconds(0, result.durationMs)}${formatTokens(result.usage)}\n\n${result.text.slice(0, MAX_TASK_OUTPUT_CHARS)}`,
-          );
-        } else {
-          lines.push(
-            `## ✗ ${task.label} — ${result.kind} (${formatSeconds(0, result.durationMs)})\n\n${result.error}${result.text ? `\n\nPartial output:\n${result.text.slice(0, 1000)}` : ''}`,
-          );
+        details.settled = true;
+        liveDispatches.delete(toolCallId);
+        return toolResult(lines.join('\n\n'), details);
+      },
+
+      renderCall(args, theme, ctx) {
+        widgetTheme = theme;
+        const count = Array.isArray(args?.tasks) ? args.tasks.length : 0;
+
+        if (!ctx?.isPartial) {
+          clearSpinner(ctx);
+          liveDispatches.delete(ctx?.toolCallId ?? '');
+          return makeText(ctx?.lastComponent, dispatchHeader(`${count} task${count === 1 ? '' : 's'}`, theme));
         }
-      }
 
-      details.settled = true;
-      liveDispatches.delete(toolCallId);
-      return toolResult(lines.join('\n\n'), details);
-    },
+        const frame = ensureSpinner(ctx);
+        const details = liveDispatches.get(ctx.toolCallId) ?? null;
+        const settled = details
+          ? details.tasks.filter((t) => t.status !== 'pending' && t.status !== 'working').length
+          : 0;
+        const summary = details
+          ? `${settled}/${details.tasks.length} done`
+          : count > 0
+            ? `${count} task${count === 1 ? '' : 's'}`
+            : '...';
+        const spinner = `${theme.fg('muted', SPINNER_FRAMES[frame % SPINNER_FRAMES.length]!)} `;
+        // Header only — the tree is rendered solely by renderResult. pi keeps
+        // the renderCall component on screen alongside renderResult once the
+        // first onUpdate fires, and emit() populates liveDispatches and fires
+        // onUpdate together — so rendering the tree here too shows it twice.
+        return makeText(ctx.lastComponent, dispatchHeader(summary, theme, spinner));
+      },
 
-    renderCall(args, theme, ctx) {
-      widgetTheme = theme;
-      const count = Array.isArray(args?.tasks) ? args.tasks.length : 0;
+      renderResult(result, options, theme, ctx) {
+        widgetTheme = theme;
+        const details = result.details as DispatchDetails | undefined;
 
-      if (!ctx?.isPartial) {
-        clearSpinner(ctx);
-        liveDispatches.delete(ctx?.toolCallId ?? '');
-        return makeText(ctx?.lastComponent, dispatchHeader(`${count} task${count === 1 ? '' : 's'}`, theme));
-      }
+        // No tracked tasks (validation failures) — plain text fallback.
+        if (!details?.tasks || details.tasks.length === 0) {
+          const text = result.content[0];
+          return makeText(ctx?.lastComponent, text?.type === 'text' ? text.text : '(no output)');
+        }
 
-      const frame = ensureSpinner(ctx);
-      const details = liveDispatches.get(ctx.toolCallId) ?? null;
-      const settled = details
-        ? details.tasks.filter((t) => t.status !== 'pending' && t.status !== 'working').length
-        : 0;
-      const summary = details
-        ? `${settled}/${details.tasks.length} done`
-        : count > 0
-          ? `${count} task${count === 1 ? '' : 's'}`
-          : '...';
-      const spinner = `${theme.fg('muted', SPINNER_FRAMES[frame % SPINNER_FRAMES.length]!)} `;
-      // Header only — the tree is rendered solely by renderResult. pi keeps
-      // the renderCall component on screen alongside renderResult once the
-      // first onUpdate fires, and emit() populates liveDispatches and fires
-      // onUpdate together — so rendering the tree here too shows it twice.
-      return makeText(ctx.lastComponent, dispatchHeader(summary, theme, spinner));
-    },
+        const frame = ctx?.state?.spinnerFrame ?? 0;
 
-    renderResult(result, options, theme, ctx) {
-      widgetTheme = theme;
-      const details = result.details as DispatchDetails | undefined;
+        if (!options?.expanded) {
+          const tree = renderTaskTree(details.tasks, theme, frame);
+          tree[tree.length - 1] += expandHint(theme, ctx.keyText);
+          return makeText(ctx?.lastComponent, ['', ...tree].join('\n'));
+        }
 
-      // No tracked tasks (validation failures) — plain text fallback.
-      if (!details?.tasks || details.tasks.length === 0) {
-        const text = result.content[0];
-        return makeText(ctx?.lastComponent, text?.type === 'text' ? text.text : '(no output)');
-      }
-
-      const frame = ctx?.state?.spinnerFrame ?? 0;
-
-      if (!options?.expanded) {
-        const tree = renderTaskTree(details.tasks, theme, frame);
-        tree[tree.length - 1] += expandHint(theme, ctx.keyText);
-        return makeText(ctx?.lastComponent, ['', ...tree].join('\n'));
-      }
-
-      return createExpandedDispatchView(details.tasks, theme);
-    },
-  });
+        return createExpandedDispatchView(details.tasks, theme);
+      },
+    });
+  };
+  registerDispatch(profileCatalogLine(loadProfiles(undefined, extraProfileDirs).profiles));
 
   pi.registerTool({
     name: 'fleet',
@@ -1943,7 +1925,6 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
       if (!ctx.hasUI) {
         postText(
           pi,
-          ctx,
           runs.length === 0
             ? scope === 'current'
               ? 'No active subagent runs for the current session. Use `/fleet all` for persisted history.'
@@ -1977,7 +1958,7 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
         }
       }
 
-      await openFleetOverlay(pi, ctx, runtime, initial, scope, parentSession);
+      await openFleetOverlay(ctx, runtime, initial, scope, parentSession);
     },
   });
 
@@ -1995,19 +1976,20 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
         ctx.ui.notify('No active subagent runs for the current session. Use /fleet all for persisted history.', 'info');
         return;
       }
-      await openFleetOverlay(pi, ctx, runtime, undefined, 'current', parentSession);
+      await openFleetOverlay(ctx, runtime, undefined, 'current', parentSession);
     },
   });
 
   pi.registerCommand('patches', {
     description: 'Staging area for worktree-subagent patches: pre-flight, apply, apply a hunk, or discard',
     handler: async (_args, ctx) => {
-      const all = await collectPatches(pi, runtime, ctx.cwd);
-      const pending = all.filter((p) => !p.decision);
+      let pending = await collectPatches(pi, ctx.cwd, loadPatchState(patchesStateDir()));
+      // Re-read after the (slow) pre-flight: another pi process may have decided some meanwhile.
+      const state = loadPatchState(patchesStateDir());
+      pending = pending.filter((p) => !state.decisions[p.patchPath]);
       if (!ctx.hasUI) {
         postText(
           pi,
-          ctx,
           pending.length === 0
             ? 'No pending patches.'
             : pending
@@ -2023,7 +2005,6 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
         ctx.ui.notify('No pending patches.', 'info');
         return;
       }
-      const state = loadPatchState();
       await ctx.ui.custom<void>(
         (tui, theme, _kb, done) => {
           widgetTheme = theme;
@@ -2096,25 +2077,18 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
         ctx.ui.notify('/again needs the TUI.', 'warning');
         return;
       }
-      const entries = ctx.sessionManager.getEntries();
-      let last: { data?: { prompt?: string; agentType?: string; worktree?: boolean } } | undefined;
-      for (let i = entries.length - 1; i >= 0; i--) {
-        const e = entries[i]!;
-        if (e.type === 'custom' && (e as { customType?: string }).customType === 'subagents:dispatch') {
-          last = e as typeof last;
-          break;
-        }
-      }
-      if (!last?.data?.prompt) {
+      // Current branch only: after /tree navigation, dispatches on abandoned branches don't count.
+      const last = findLastDispatch(ctx.sessionManager.getBranch() as Array<{ type: string; customType?: string }>);
+      if (!last?.prompt) {
         ctx.ui.notify('No prior & dispatch to re-fire.', 'warning');
         return;
       }
       const amendment = args.trim();
-      const prompt = amendment ? `${last.data.prompt}\n\n${amendment}` : last.data.prompt;
+      const prompt = amendment ? `${last.prompt}\n\n${amendment}` : last.prompt;
       const spec = resolveInlineSpec(ctx, {
         task: prompt,
-        agent: last.data.agentType,
-        worktree: last.data.worktree ? true : undefined,
+        agent: last.agentType,
+        worktree: last.worktree ? true : undefined,
       });
       void dispatchInline(pi, ctx, runtime, spec);
     },

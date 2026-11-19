@@ -7,7 +7,8 @@ Replicates Claude Code's message stash using `ctrl+s`. Rebind Pi's built-in `ctr
 - **Keybinding:** `ctrl+s` toggles stash/restore. See the behavior table below.
 - **Widget:** a single-line widget above the editor, visible whenever the stash stack is non-empty, showing a 60-char preview of the most recent stash, the count of additional stashes (`(+N more)`), and a `ctrl+s to restore` hint
 - **Events hooked:**
-  - `before_agent_start`: after a message is submitted and the agent starts, this session's most recent stash is auto-restored into the now-empty editor (mirrors Claude Code).
+  - `before_agent_start`: after you submit a message from the editor and the agent starts, this session's most recent stash is auto-restored into the now-empty editor (mirrors Claude Code). Runs started by other extensions (`pi.sendUserMessage()`, `pi.sendMessage(..., { triggerTurn: true })`) don't restore anything.
+  - `input`: records where the last prompt came from, so only prompts typed in the editor trigger the auto-restore.
   - `session_start`: shows the widget for drafts already saved for this directory.
 - No slash commands, no tools, no custom entry types.
 
@@ -57,12 +58,12 @@ Merge these entries into your existing config, then run `/reload`. Model-save an
 
 ## Dependencies
 
-- **Peer:** `@earendil-works/pi-coding-agent` (`*`). Uses only the public extension API: `pi.registerShortcut`, `pi.on("before_agent_start" | "session_start")`, `getAgentDir()`, `ctx.sessionManager.getSessionId()`, `ctx.ui.getEditorText` / `setEditorText` / `setWidget` / `notify` / `theme`, and `ctx.hasUI`.
+- **Peer:** `@earendil-works/pi-coding-agent` (`*`). Uses only the public extension API: `pi.registerShortcut`, `pi.on("before_agent_start" | "input" | "session_start")`, `getAgentDir()`, `ctx.sessionManager.getSessionId()`, `ctx.ui.getEditorText` / `setEditorText` / `setWidget` / `notify` / `theme`, `ctx.hasUI`, and `ctx.mode`.
 - Node built-ins: `node:crypto`, `node:fs`, `node:path`. No runtime npm dependencies, no workspace deps.
 
 ## Caveats
 
-- UI-gated: every handler checks `ctx.hasUI`; the extension is a no-op in headless/non-TUI mode.
+- TUI-only: every handler checks `ctx.mode === "tui"`; the extension is a no-op in RPC, JSON, and print modes (RPC has no editor text to stash or restore into).
 - Depends on the editor text APIs (`ctx.ui.getEditorText` / `setEditorText`) and the widget system (`ctx.ui.setWidget`) — these are stable pi extension APIs, but a pi version that changes editor or widget semantics could affect it.
 - The `before_agent_start` auto-restore pops a stash whenever a message is sent with an empty editor. If you intentionally sent a quick command and wanted the stash to stay parked, it will still be restored into the editor (you can `ctrl+s` it back). This matches Claude Code's behavior.
 - The shifted replacement shortcuts require a terminal that reports them distinctly, for example through the Kitty keyboard protocol. The widget preview uses the Unicode glyphs `⧉` and `…`.
@@ -70,5 +71,11 @@ Merge these entries into your existing config, then run `/reload`. Model-save an
 ## Install
 
 ```bash
-pi install /Users/nicknisi/Developer/pi-extensions/packages/stash
+pi install npm:@nicknisi/pi-stash
+```
+
+Or from a local checkout of this repo:
+
+```bash
+pi install ./packages/stash
 ```

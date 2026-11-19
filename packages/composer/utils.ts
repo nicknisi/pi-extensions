@@ -8,6 +8,14 @@ export function plainText(line: string): string {
   return line.replace(ANSI_RE, '');
 }
 
+/** Fold whitespace so a stray newline in an extension status or label can't break a row. */
+export function sanitize(text: string): string {
+  return text
+    .replace(/[\r\n\t]/g, ' ')
+    .replace(/ +/g, ' ')
+    .trim();
+}
+
 /** Parse a `composer:set-label` bus payload: a non-empty string `text` sets
  * the label; anything else (absent, empty, wrong type) clears the override. */
 export function parseLabelData(data: unknown): string | undefined {

@@ -377,3 +377,72 @@ describe('ask_user_question.execute — dialog walker as custom()-undefined back
     expect(r?.content[0]).toMatchObject({ text: expect.stringContaining('"Which?"="A"') });
   });
 });
+
+describe('ask_user_question.execute — RPC dialog walker honours tool-call abort', () => {
+  /** A host select that stays open until its `signal` aborts, like Pi's RPC dialog helper. */
+  function pendingUntilAbort() {
+    return vi.fn(
+      (_t: string, _o: string[], opts?: { signal?: AbortSignal }) =>
+        new Promise<string | undefined>((resolve) => {
+          opts?.signal?.addEventListener('abort', () => resolve(undefined), { once: true });
+        }),
+    );
+  }
+
+  it('passes the tool-call signal to each dialog and cancels when it aborts', async () => {
+    const tool = register();
+    const select = pendingUntilAbort();
+    const controller = new AbortController();
+    const pending = tool.execute?.(
+      'tc',
+      SINGLE as never,
+      controller.signal,
+      undefined as never,
+      ctxRpc({ select }) as never,
+    );
+    await vi.waitFor(() => expect(select).toHaveBeenCalledOnce());
+    expect(select.mock.calls[0]?.[2]).toMatchObject({ signal: controller.signal });
+    controller.abort();
+    const r = await pending;
+    expect(r?.details).toMatchObject({ cancelled: true });
+  });
+
+  it('does not reopen the options after an aborted "Type something." follow-up', async () => {
+    const tool = register();
+    const controller = new AbortController();
+    // Picks the "Type something." row; a host ignoring the signal would otherwise loop back.
+    const select = vi.fn(async (_t: string, options: string[]) => options[options.length - 1]);
+    const input = vi.fn(async () => {
+      controller.abort();
+      return undefined;
+    });
+    const r = await tool.execute?.(
+      'tc',
+      SINGLE as never,
+      controller.signal,
+      undefined as never,
+      ctxRpc({ select, input }) as never,
+    );
+    expect(select).toHaveBeenCalledOnce();
+    expect(r?.details).toMatchObject({ cancelled: true });
+  });
+
+  it('cancels the custom()-undefined backstop walker on abort', async () => {
+    const tool = register();
+    const select = pendingUntilAbort();
+    const controller = new AbortController();
+    const ctx = createMockCtx({
+      hasUI: true,
+      ui: {
+        custom: vi.fn(async () => undefined) as never,
+        select: select as never,
+        input: vi.fn(async () => '') as never,
+      } as never,
+    });
+    const pending = tool.execute?.('tc', SINGLE as never, controller.signal, undefined as never, ctx as never);
+    await vi.waitFor(() => expect(select).toHaveBeenCalledOnce());
+    controller.abort();
+    const r = await pending;
+    expect(r?.details).toMatchObject({ cancelled: true });
+  });
+});

@@ -55,6 +55,10 @@ function buildSectionItems(models: Model<Api>[], current: Model<Api> | undefined
 
 async function showModelPicker(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
   if (!ctx.hasUI) return;
+  if (ctx.mode !== 'tui') {
+    ctx.ui.notify('/model-switch picker requires the terminal UI', 'warning');
+    return;
+  }
 
   const loaded = loadModelSwitchConfig();
   if (!loaded.ok) {
@@ -65,8 +69,13 @@ async function showModelPicker(pi: ExtensionAPI, ctx: ExtensionContext): Promise
   const pickerSections: PickerSection[] = [];
   const modelByReference = new Map<string, Model<Api>>();
 
-  for (const section of loaded.config.sections) {
-    const available = await resolveSectionModels(section.models, ctx);
+  const resolved = await Promise.all(
+    loaded.config.sections.map(async (section) => ({
+      section,
+      available: await resolveSectionModels(section.models, ctx),
+    })),
+  );
+  for (const { section, available } of resolved) {
     if (available.length > 0) {
       pickerSections.push({
         name: section.name,

@@ -111,7 +111,7 @@ Press `alt+h` (or run `/heads-up show`) to open the panel. It takes the editor's
 | `0`   | Dismiss                                                       | same                                                      |
 | `esc` | Back to the editor; the note stays                            | same (cancels a rewrite in progress)                      |
 
-Rewrites are side requests too, over a fresh digest. The panel remembers the expanded view and the latest rewrite until the note is cleared.
+Rewrites are side requests too, over a fresh digest. The panel remembers the expanded view and the latest rewrite until the note is cleared. A failed rewrite shows a warning and leaves the previous text in place. Moving to another branch with `/tree` clears the note, since it describes work that is no longer in context.
 
 "Make a page" and "Ask in chat" send a user message to the main agent, queued as a follow-up when the agent is busy. "Make a page" asks for an artifact, which works best with [`@nicknisi/pi-artifacts`](../artifacts/).
 

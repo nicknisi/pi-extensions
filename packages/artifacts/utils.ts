@@ -105,28 +105,39 @@ export function listArtifacts(): ArtifactEntry[] {
     const absPath = join(dir, file);
     const content = readFileSync(absPath, 'utf-8');
     const slug = file.replace(/\.html$/, '');
-    const titleMatch = content.match(/<title>(.*?)<\/title>/s);
-    const kindMatch = content.match(/<meta name="artifact-kind" content="(.*?)"/);
-    const kindRaw = kindMatch?.[1];
-    // Meta present → trust it. Absent (pre-fix full-doc html or external file) →
-    // infer from the shell marker: buildShell always emits <style data-base>, so
-    // its presence means a rendered markdown/fragment artifact; absence means a
-    // full-doc html or a foreign file → call it html.
-    const kind: 'markdown' | 'html' =
-      kindRaw === 'html' || kindRaw === 'markdown'
-        ? kindRaw
-        : content.includes('<style data-base')
-          ? 'markdown'
-          : 'html';
     entries.push({
       slug,
-      title: titleMatch ? titleMatch[1]!.trim() : slug,
-      kind,
+      title: documentTitle(content) || slug,
+      kind: artifactKind(content),
       mtime: extractMtime(content) ?? statSync(absPath).mtimeMs,
       absPath,
     });
   }
   return entries.sort((a, b) => b.mtime - a.mtime);
+}
+
+/** The kind recorded in a stored artifact's HTML. */
+export function artifactKind(html: string): 'markdown' | 'html' {
+  const kindRaw = html.match(/<meta name="artifact-kind" content="(.*?)"/)?.[1];
+  // Meta present → trust it. Absent (pre-fix full-doc html or external file) →
+  // infer from the shell marker: buildShell always emits <style data-base>, so
+  // its presence means a rendered markdown/fragment artifact; absence means a
+  // full-doc html or a foreign file → call it html.
+  if (kindRaw === 'html' || kindRaw === 'markdown') return kindRaw;
+  return html.includes('<style data-base') ? 'markdown' : 'html';
+}
+
+/** The <title> text of a stored artifact, with the entities the renderer writes decoded. */
+export function documentTitle(html: string): string {
+  const raw = html.match(/<title\b[^>]*>([\s\S]*?)<\/title\s*>/i)?.[1] ?? '';
+  return raw
+    .replace(/<[^>]*>/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&')
+    .trim();
 }
 
 /** Parse the generated-at timestamp embedded by the shell template. */
@@ -160,19 +171,55 @@ export function openInBrowser(url: string): void {
     .unref();
 }
 
-/** Run a command, resolve with trimmed stdout. Rejects with stderr (or spawn error) on failure. */
-function run(cmd: string, args: string[], input?: string): Promise<string> {
+/** Default ceiling for headless-browser and gh invocations, which can hang on a page, network, or auth. */
+export const EXTERNAL_TIMEOUT_MS = 60_000;
+
+export interface RunOptions {
+  input?: string;
+  /** Kills the child and rejects when aborted. */
+  signal?: AbortSignal | undefined;
+  /** Kills the child and rejects after this many ms. */
+  timeoutMs?: number;
+}
+
+/** Run a command, resolve with trimmed stdout. Rejects with stderr (or spawn error) on failure, abort, or timeout. */
+export function run(cmd: string, args: string[], opts: RunOptions = {}): Promise<string> {
   return new Promise((resolve, reject) => {
+    if (opts.signal?.aborted) {
+      reject(new Error(`${cmd} was cancelled`));
+      return;
+    }
     const child = spawn(cmd, args);
     let out = '';
     let err = '';
+    let settled = false;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onAbort);
+      fn();
+    };
+    const kill = (reason: string) => {
+      child.kill('SIGKILL');
+      finish(() => reject(new Error(reason)));
+    };
+    const onAbort = () => kill(`${cmd} was cancelled`);
+    const timer =
+      opts.timeoutMs !== undefined
+        ? setTimeout(() => kill(`${cmd} timed out after ${Math.round(opts.timeoutMs! / 1000)}s`), opts.timeoutMs)
+        : undefined;
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
     child.stdout.on('data', (d) => (out += d));
     child.stderr.on('data', (d) => (err += d));
-    child.on('error', (e) => reject(new Error(`${cmd} is not available: ${e.message}`)));
+    child.stdin.on('error', () => {}); // EPIPE when the child exits or is killed before reading stdin
+    child.on('error', (e) => finish(() => reject(new Error(`${cmd} is not available: ${e.message}`))));
     child.on('close', (code) =>
-      code === 0 ? resolve(out.trim()) : reject(new Error(err.trim() || `${cmd} exited with code ${code}`)),
+      finish(() =>
+        code === 0 ? resolve(out.trim()) : reject(new Error(err.trim() || `${cmd} exited with code ${code}`)),
+      ),
     );
-    if (input != null) child.stdin.write(input);
+    if (opts.input != null) child.stdin.write(opts.input);
     child.stdin.end();
   });
 }
@@ -185,7 +232,7 @@ export async function copyToClipboard(text: string): Promise<void> {
       : process.platform === 'win32'
         ? (['clip', []] as const)
         : (['wl-copy', []] as const);
-  await run(cmd, [...args], text);
+  await run(cmd, [...args], { input: text });
 }
 
 /** Reveal a file in the OS file manager (Finder / Explorer / xdg-open on its directory). */
@@ -202,10 +249,15 @@ export function revealFile(absPath: string): void {
 }
 
 /** Upload an artifact file as a GitHub gist via the gh CLI. Returns the gist URL. */
-export async function createGist(absPath: string, title: string, isPublic: boolean): Promise<string> {
+export async function createGist(
+  absPath: string,
+  title: string,
+  isPublic: boolean,
+  signal?: AbortSignal,
+): Promise<string> {
   const args = ['gist', 'create', absPath, '--desc', title];
   if (isPublic) args.push('--public');
-  return run('gh', args);
+  return run('gh', args, { signal, timeoutMs: EXTERNAL_TIMEOUT_MS });
 }
 
 /** Locate a headless-capable browser binary. darwin: known app paths; elsewhere: PATH names. */
@@ -228,21 +280,31 @@ function findBrowser(): string | null {
  * Screenshot a URL to a PNG via headless Chrome-family flags.
  * The artifact server must already be running (the caller ensures it).
  */
-export async function screenshotUrl(url: string, outPath: string, width: number, height: number): Promise<void> {
+export async function screenshotUrl(
+  url: string,
+  outPath: string,
+  width: number,
+  height: number,
+  signal?: AbortSignal,
+): Promise<void> {
   const browser = findBrowser();
   if (!browser) {
     throw new Error(
       'no Chrome-family browser found (looked in /Applications). Install Chrome or Chromium to render images.',
     );
   }
-  await run(browser, [
-    '--headless',
-    '--disable-gpu',
-    '--hide-scrollbars',
-    `--window-size=${width},${height}`,
-    `--screenshot=${outPath}`,
-    url,
-  ]);
+  await run(
+    browser,
+    [
+      '--headless',
+      '--disable-gpu',
+      '--hide-scrollbars',
+      `--window-size=${width},${height}`,
+      `--screenshot=${outPath}`,
+      url,
+    ],
+    { signal, timeoutMs: EXTERNAL_TIMEOUT_MS },
+  );
   if (!existsSync(outPath)) throw new Error('the browser exited without writing a screenshot.');
 }
 
@@ -250,14 +312,17 @@ export async function screenshotUrl(url: string, outPath: string, width: number,
  * Print a URL to PDF via headless Chrome-family flags.
  * The artifact server must already be running (the caller ensures it).
  */
-export async function pdfToFile(url: string, outPath: string): Promise<void> {
+export async function pdfToFile(url: string, outPath: string, signal?: AbortSignal): Promise<void> {
   const browser = findBrowser();
   if (!browser) {
     throw new Error(
       'no Chrome-family browser found (looked in /Applications). Install Chrome or Chromium to render PDFs.',
     );
   }
-  await run(browser, ['--headless', '--disable-gpu', '--no-pdf-header-footer', `--print-to-pdf=${outPath}`, url]);
+  await run(browser, ['--headless', '--disable-gpu', '--no-pdf-header-footer', `--print-to-pdf=${outPath}`, url], {
+    signal,
+    timeoutMs: EXTERNAL_TIMEOUT_MS,
+  });
   if (!existsSync(outPath)) throw new Error('the browser exited without writing a PDF.');
 }
 

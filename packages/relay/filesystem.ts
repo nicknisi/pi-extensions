@@ -2,6 +2,7 @@
 import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import { createRequire } from 'node:module';
+import * as os from 'node:os';
 import * as path from 'node:path';
 
 if (process.platform !== 'darwin' && process.platform !== 'linux') {
@@ -52,8 +53,16 @@ const nativeMkdirAt = libc.func('int mkdirat(int, const char *, uint32_t)');
 const nativeUnlinkAt = libc.func('int unlinkat(int, const char *, int)');
 const nativeRenameAt = libc.func('int renameat(int, const char *, int, const char *)');
 const nativeDup = libc.func('int dup(int)');
-const nativeFdOpenDir = libc.func('void *fdopendir(int)');
-const nativeReadDir = libc.func('void *readdir(void *)');
+// struct dirent parsing below assumes the 64-bit-inode layouts: darwin's
+// INODE64 struct and the generic 64-bit Linux struct. On Intel macOS the plain
+// `readdir`/`fdopendir` symbols are the legacy 32-bit-inode variants, so bind
+// the `$INODE64` ones there; 32-bit Linux uses a different layout and is refused.
+if (process.platform === 'linux' && koffi.sizeof('void *') !== 8) {
+  throw new Error(`Relay filesystem operations are unsupported on 32-bit Linux (${process.arch})`);
+}
+const DIRENT_SYMBOL_SUFFIX = process.platform === 'darwin' && process.arch === 'x64' ? '$INODE64' : '';
+const nativeFdOpenDir = libc.func(`fdopendir${DIRENT_SYMBOL_SUFFIX}`, 'void *', ['int']);
+const nativeReadDir = libc.func(`readdir${DIRENT_SYMBOL_SUFFIX}`, 'void *', ['void *']);
 const nativeCloseDir = libc.func('int closedir(void *)');
 const nativeStrError = libc.func('const char *strerror(int)');
 const errnoNames = new Map(Object.entries(koffi.os.errno).map(([name, value]) => [value, name]));
@@ -246,6 +255,41 @@ const DT_DIRECTORY = 4;
 const DT_REGULAR = 8;
 const DT_SYMLINK = 10;
 
+// 64-bit struct dirent field offsets. Both layouts start d_ino(8), then
+// d_seekoff/d_off(8), then d_reclen(u16) at 16. darwin: d_namlen(u16)@18,
+// d_type@20, d_name@21. Linux: d_type@18, d_name@19 (NUL-terminated).
+const DIRENT_RECLEN_OFFSET = 16;
+const DIRENT_TYPE_OFFSET = process.platform === 'darwin' ? 20 : 18;
+const DIRENT_NAME_OFFSET = process.platform === 'darwin' ? 21 : 19;
+const LITTLE_ENDIAN = os.endianness() === 'LE';
+
+function readUInt16(bytes: Buffer, offset: number): number {
+  return LITTLE_ENDIAN ? bytes.readUInt16LE(offset) : bytes.readUInt16BE(offset);
+}
+
+/** Decode one native dirent, reading only the d_reclen bytes the kernel/libc wrote. */
+function parseDirent(pointer: unknown): { name: string; type: number } {
+  const header = Buffer.from(koffi.view(pointer, DIRENT_NAME_OFFSET));
+  const recordLength = readUInt16(header, DIRENT_RECLEN_OFFSET);
+  if (recordLength <= DIRENT_NAME_OFFSET) {
+    throw new Error(`Relay read an invalid directory entry (d_reclen ${recordLength})`);
+  }
+  const bytes = Buffer.from(koffi.view(pointer, recordLength));
+  const type = bytes[DIRENT_TYPE_OFFSET]!;
+  const nameBytes = bytes.subarray(DIRENT_NAME_OFFSET);
+  let nameLength: number;
+  if (process.platform === 'darwin') {
+    nameLength = readUInt16(bytes, 18);
+    if (nameLength > nameBytes.length) {
+      throw new Error(`Relay read an invalid directory entry (d_namlen ${nameLength})`);
+    }
+  } else {
+    const terminator = nameBytes.indexOf(0);
+    nameLength = terminator === -1 ? nameBytes.length : terminator;
+  }
+  return { name: nameBytes.subarray(0, nameLength).toString(), type };
+}
+
 function readDirectoryFd(fd: number): RelayDirent[] {
   const duplicate = nativeDup(fd);
   if (duplicate < 0) throw syscallError('dup', String(fd));
@@ -264,16 +308,7 @@ function readDirectoryFd(fd: number): RelayDirent[] {
         if (koffi.errno() !== 0) throw syscallError('readdir', String(fd));
         break;
       }
-      const bytes = Buffer.from(koffi.view(pointer, process.platform === 'darwin' ? 1048 : 280));
-      const type = bytes[process.platform === 'darwin' ? 20 : 18]!;
-      const nameOffset = process.platform === 'darwin' ? 21 : 19;
-      const nameLength =
-        process.platform === 'darwin'
-          ? bytes.readUInt16LE(18)
-          : bytes.subarray(nameOffset).indexOf(0) === -1
-            ? bytes.length - nameOffset
-            : bytes.subarray(nameOffset).indexOf(0);
-      const name = bytes.subarray(nameOffset, nameOffset + nameLength).toString();
+      const { name, type } = parseDirent(pointer);
       if (name === '.' || name === '..') continue;
       entries.push({
         name,

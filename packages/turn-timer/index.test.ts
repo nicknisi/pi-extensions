@@ -11,7 +11,7 @@ function harness() {
     on: (name: string, fn: (event: any) => void) => handlers.set(name, fn),
     appendEntry,
   } as never);
-  const emit = (name: string, event: object = {}) => handlers.get(name)!(event);
+  const emit = (name: string, event: object = {}) => handlers.get(name)?.(event);
   return { emit, appendEntry };
 }
 
@@ -32,5 +32,37 @@ describe('turn-timer', () => {
     vi.advanceTimersByTime(500);
     emit('agent_settled', { aborted: true });
     expect(appendEntry).toHaveBeenLastCalledWith('turn-duration', { seconds: 0.5, aborted: true });
+  });
+});
+
+describe('turn-timer multi-run and open prompts', () => {
+  it('times the whole settled run across repeated agent_start events', () => {
+    vi.useFakeTimers();
+    const { emit, appendEntry } = harness();
+    emit('agent_start');
+    vi.advanceTimersByTime(2000);
+    emit('agent_end');
+    emit('agent_start'); // retry / follow-up
+    vi.advanceTimersByTime(3000);
+    emit('agent_settled', { aborted: false });
+    expect(appendEntry).toHaveBeenCalledTimes(1);
+    expect(appendEntry).toHaveBeenLastCalledWith('turn-duration', { seconds: 5 });
+  });
+
+  it('excludes a prompt still open when the run settles', () => {
+    vi.useFakeTimers();
+    const { emit, appendEntry } = harness();
+    emit('agent_start');
+    vi.advanceTimersByTime(1000);
+    emit('ui_prompt_start');
+    vi.advanceTimersByTime(5000);
+    emit('agent_settled', { aborted: true });
+    expect(appendEntry).toHaveBeenLastCalledWith('turn-duration', { seconds: 1, aborted: true });
+    // a late ui_prompt_end must not leak into the next run
+    emit('ui_prompt_end');
+    emit('agent_start');
+    vi.advanceTimersByTime(2000);
+    emit('agent_settled', { aborted: false });
+    expect(appendEntry).toHaveBeenLastCalledWith('turn-duration', { seconds: 2 });
   });
 });

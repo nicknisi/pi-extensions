@@ -449,8 +449,27 @@ describe('threshold enforcement', () => {
     expect(h.active()).toContain('bash');
   });
 
-  it('fails closed at the execution gate when thresholds cannot fit the model window', async () => {
-    const h = makeHarness({ contextWindow: 200000 }); // 225k/250k defaults impossible here
+  const explicitTokenFlags = { 'compact-soft-at': '225k', 'compact-at': '250k', 'compact-buffer': '20k' };
+
+  it('falls back to window-relative defaults when no flags are passed and the token defaults do not fit', async () => {
+    const h = makeHarness({ contextWindow: 200000 }); // 225k/250k token defaults impossible here
+    await h.fire('session_start');
+    expect(h.notes().some((n) => n.type === 'error')).toBe(false);
+    h.setUsage(100000);
+    expect((await h.fire('tool_call', { type: 'tool_call', toolName: 'bash', toolCallId: 't1' }))[0]).toBeUndefined();
+    await h.runCommand(INFO_COMMAND);
+    const info = h.notes().find((n) => n.message.startsWith('self-compact info:'));
+    expect(info?.message).toContain('soft=120000');
+    expect(info?.message).toContain('warning=140000');
+    expect(info?.message).toContain('hard=160000');
+    h.setUsage(165000);
+    expect((await h.fire('tool_call', { type: 'tool_call', toolName: 'bash', toolCallId: 't2' }))[0]).toMatchObject({
+      block: true,
+    });
+  });
+
+  it('fails closed at the execution gate when explicit thresholds cannot fit the model window', async () => {
+    const h = makeHarness({ contextWindow: 200000, flags: explicitTokenFlags });
     await h.fire('session_start');
     expect(h.notes().some((n) => n.type === 'error')).toBe(true);
     const [blocked] = await h.fire('tool_call', { type: 'tool_call', toolName: 'bash', toolCallId: 't1' });
@@ -460,7 +479,7 @@ describe('threshold enforcement', () => {
   });
 
   it('re-resolves on model selection and keeps failing closed on an incompatible window', async () => {
-    const h = makeHarness({ contextWindow: 200000 });
+    const h = makeHarness({ contextWindow: 200000, flags: explicitTokenFlags });
     await h.fire('session_start');
     await h.fire('model_select', { type: 'model_select' });
     const [blocked] = await h.fire('tool_call', { type: 'tool_call', toolName: 'bash', toolCallId: 't1' });
@@ -649,6 +668,76 @@ describe('recovery after interrupted compaction', () => {
   });
 });
 
+describe('recovery after fork or clone', () => {
+  it('rebinds a pending handoff to the new session id so it can still compact', async () => {
+    const h = makeHarness();
+    await h.fire('session_start');
+    await h.call('forked unfinished action');
+    expect(h.state()?.sessionId).toBe('session-1');
+    // /fork and /clone copy the branch into a session with a new id.
+    (h.ctx.sessionManager as { getSessionId: () => string }).getSessionId = () => 'session-2';
+    const compact = vi.fn((options: { onComplete: () => void }) => options.onComplete());
+    (h.ctx as { compact: unknown }).compact = compact;
+    await h.fire('session_start');
+    expect(h.state()?.sessionId).toBe('session-2');
+    await h.fire('agent_settled');
+    expect(compact).toHaveBeenCalledTimes(1);
+    expect(h.state()?.phase).toBe('ready-to-deliver');
+    expect(h.sent().filter((m) => m.customType === CONTINUATION_MESSAGE_TYPE)).toHaveLength(1);
+  });
+
+  it('re-arms a failed handoff carried over from another session under the current id', async () => {
+    const h = makeHarness();
+    await h.fire('session_start');
+    await h.call('retry after fork');
+    h.entries.push({
+      type: 'custom',
+      customType: STATE_ENTRY,
+      data: { ...h.state(), phase: 'failed', lastError: 'boom', sessionId: 'old-session' },
+      id: 'failed-old',
+      parentId: h.entries.at(-1)!.id,
+      timestamp: new Date().toISOString(),
+    } as SessionEntry);
+    await h.call('retry after fork');
+    expect(h.state()?.phase).toBe('pending');
+    expect(h.state()?.sessionId).toBe('session-1');
+  });
+});
+
+describe('persisted handoff validation', () => {
+  const custom = (id: string, data: unknown): SessionEntry =>
+    ({
+      type: 'custom',
+      customType: STATE_ENTRY,
+      data,
+      id,
+      parentId: null,
+      timestamp: new Date().toISOString(),
+    }) as SessionEntry;
+
+  it('ignores malformed state entries instead of crashing tool restoration', async () => {
+    const valid = {
+      cycleId: 'c1',
+      phase: 'delivered',
+      note: 'done',
+      originalActiveTools: ['read'],
+      completedCycles: 1,
+    };
+    expect(readHandoffState([custom('a', valid), custom('b', { cycleId: 'c2', phase: 'pending' })])).toEqual(valid);
+    expect(readHandoffState([custom('a', { ...valid, phase: 'bogus' })])).toBeUndefined();
+    expect(readHandoffState([custom('a', { ...valid, originalActiveTools: 'read' })])).toBeUndefined();
+    expect(
+      readHandoffState([custom('a', { ...valid, originalActiveTools: ['read', 3] })])?.originalActiveTools,
+    ).toEqual(['read']);
+
+    const h = makeHarness();
+    h.entries.push(custom('broken', { cycleId: 'c3', phase: 'pending', note: 'n' }));
+    await expect(h.fire('session_start')).resolves.toBeDefined();
+    await expect(h.fire('turn_end')).resolves.toBeDefined();
+    expect(h.active()).toContain('bash');
+  });
+});
+
 describe('composer context-bar integration', () => {
   it('publishes zone colors while keeping the standalone widget as a fallback', async () => {
     const h = makeHarness();
@@ -771,6 +860,98 @@ describe('human commands', () => {
     const req = h.sent().find((m) => m.customType === 'self-compact:manual-request');
     expect(req).toBeDefined();
     expect(String(req?.content)).toContain('EXACT NEXT ACTION: run the failing test');
+  });
+
+  it('/self-compact-now does not resend a continuation that is already queued', async () => {
+    const h = makeHarness({ contextWindow: 1_000_000 });
+    await h.fire('session_start');
+    await h.call('queued next action');
+    h.entries.push({
+      type: 'custom',
+      customType: STATE_ENTRY,
+      data: { ...h.state(), phase: 'ready-to-deliver' },
+      id: 'ready',
+      parentId: h.entries.at(-1)!.id,
+      timestamp: new Date().toISOString(),
+    } as SessionEntry);
+    await h.fire('agent_settled');
+    expect(h.sent().filter((m) => m.customType === CONTINUATION_MESSAGE_TYPE)).toHaveLength(1);
+    let pending = true;
+    (h.ctx as { hasPendingMessages: () => boolean }).hasPendingMessages = () => pending;
+    await h.runCommand(NOW_COMMAND);
+    expect(h.sent().filter((m) => m.customType === CONTINUATION_MESSAGE_TYPE)).toHaveLength(1);
+    // Once journaled, the command acknowledges instead of re-sending.
+    pending = false;
+    h.entries.push({
+      type: 'custom_message',
+      customType: CONTINUATION_MESSAGE_TYPE,
+      content: 'queued next action',
+      display: true,
+      details: { cycleId: h.state()!.cycleId },
+      id: 'journal',
+      parentId: h.entries.at(-1)!.id,
+      timestamp: new Date().toISOString(),
+    });
+    await h.runCommand(NOW_COMMAND);
+    expect(h.sent().filter((m) => m.customType === CONTINUATION_MESSAGE_TYPE)).toHaveLength(1);
+    expect(h.state()?.phase).toBe('delivered');
+  });
+
+  it('/self-compact-now re-sends a continuation that was requested but never queued', async () => {
+    const h = makeHarness({ contextWindow: 1_000_000 });
+    await h.fire('session_start');
+    await h.call('lost next action');
+    h.entries.push({
+      type: 'custom',
+      customType: STATE_ENTRY,
+      data: { ...h.state(), phase: 'ready-to-deliver' },
+      id: 'ready',
+      parentId: h.entries.at(-1)!.id,
+      timestamp: new Date().toISOString(),
+    } as SessionEntry);
+    await h.fire('agent_settled');
+    (h.ctx as { hasPendingMessages: () => boolean }).hasPendingMessages = () => false;
+    await h.runCommand(NOW_COMMAND);
+    expect(h.sent().filter((m) => m.customType === CONTINUATION_MESSAGE_TYPE)).toHaveLength(2);
+  });
+
+  it('/self-compact-now resumes an unanswered continuation journaled before an interrupted run', async () => {
+    const h = makeHarness({ contextWindow: 1_000_000 });
+    await h.fire('session_start');
+    await h.call('interrupted next action');
+    const cycleId = h.state()!.cycleId;
+    h.entries.push(
+      {
+        type: 'custom',
+        customType: STATE_ENTRY,
+        data: { ...h.state(), phase: 'ready-to-deliver' },
+        id: 'ready',
+        parentId: h.entries.at(-1)!.id,
+        timestamp: new Date().toISOString(),
+      } as SessionEntry,
+      {
+        type: 'custom_message',
+        customType: CONTINUATION_MESSAGE_TYPE,
+        content: 'interrupted next action',
+        display: true,
+        details: { cycleId },
+        id: 'journal',
+        parentId: 'ready',
+        timestamp: new Date().toISOString(),
+      },
+    );
+    (h.ctx as { hasPendingMessages: () => boolean }).hasPendingMessages = () => false;
+    // Reload schedules recovery; the command runs before that timer fires.
+    await h.fire('session_start');
+    expect(h.state()?.phase).toBe('ready-to-deliver');
+    await h.runCommand(NOW_COMMAND);
+    const continuations = () => h.sent().filter((m) => m.customType === CONTINUATION_MESSAGE_TYPE);
+    expect(continuations()).toHaveLength(1);
+    expect(String(continuations()[0]?.content)).toContain('Resume the unanswered self-compaction note');
+    expect(h.state()?.phase).toBe('ready-to-deliver');
+    // The recovery timer must not deliver a duplicate.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(continuations()).toHaveLength(1);
   });
 
   it('/self-compact-now on a fresh session asks the model to write a note and compact', async () => {

@@ -5,7 +5,7 @@ import { ARTIFACTS_SERVICE, type ArtifactsAPI } from './contract.js';
 import { answerQuestion } from './feedback.js';
 import { savePreviousRevision } from './review.js';
 import { artifactUrl, notifyAnnotations, notifyReload, setFeedbackSender, type FeedbackSender } from './server.js';
-import { renderHtmlDocument } from './templates.js';
+import { loadTemplates } from './render.js';
 import { artifactExists, isSafeSlug, openInBrowser, slugify, sourcePath, writeArtifact } from './utils.js';
 
 export function provideArtifacts(events: Pick<ExtensionAPI['events'], 'on'>, fallback: FeedbackSender) {
@@ -28,7 +28,10 @@ export function provideArtifacts(events: Pick<ExtensionAPI['events'], 'on'>, fal
       if (open !== undefined && typeof open !== 'boolean') throw new Error('invalid open');
       const slug = slugify(title);
       slugGuard(slug);
-      // Synchronous writes preserve invocation order. Callers own sequencing/coalescing.
+      // The shared loader promise resumes callers in invocation order, and the writes
+      // after it are synchronous, so invocation order is preserved. Callers own sequencing/coalescing.
+      const { renderHtmlDocument } = await loadTemplates();
+      guard();
       const rendered = renderHtmlDocument(title.trim(), slug, html);
       savePreviousRevision(slug);
       const absPath = writeArtifact(slug, rendered);

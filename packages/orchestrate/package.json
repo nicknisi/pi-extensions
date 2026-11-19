@@ -1,7 +1,7 @@
 {
   "name": "@nicknisi/pi-orchestrate",
   "version": "0.2.2",
-  "description": "Multi-agent orchestration across pi sessions",
+  "description": "Evidence-checked /goal and recurring /loop commands for pi",
   "keywords": [
     "pi",
     "pi-coding-agent",

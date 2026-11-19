@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { paneHasFocusedClient, parseFocusInput, parseLabelData, truncateCells } from './utils.js';
+import { paneHasFocusedClient, parseFocusInput, parseLabelData, sanitize, truncateCells } from './utils.js';
 
 describe('parseLabelData', () => {
   it('returns the text when it is a non-empty string', () => {
@@ -14,6 +14,13 @@ describe('parseLabelData', () => {
     expect(parseLabelData(null)).toBeUndefined();
     expect(parseLabelData('just a string')).toBeUndefined();
     expect(parseLabelData(undefined)).toBeUndefined();
+  });
+});
+
+describe('sanitize', () => {
+  it('folds newlines and tabs so a label stays on one row', () => {
+    expect(sanitize('fix\r\nthe\ttests\n')).toBe('fix the tests');
+    expect(sanitize('plain')).toBe('plain');
   });
 });
 

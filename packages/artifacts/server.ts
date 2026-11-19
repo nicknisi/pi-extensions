@@ -12,12 +12,13 @@ import {
   annotationsPath,
   artifactDir,
   artifactPath,
+  documentTitle,
   isSafeSlug,
   listArtifacts,
   readArtifact,
   safeArtifactPath,
 } from './utils.js';
-import { renderCommentMarkdown, renderIndexPage } from './templates.js';
+import { loadTemplates } from './render.js';
 import { BAKED_RELOAD_SNIPPET } from './events.js';
 import { injectAnnotations, injectBridge, renderShell } from './annotate.js';
 import { renderRevisionComparison } from './review.js';
@@ -444,6 +445,7 @@ async function handleRender(req: IncomingMessage, res: ServerResponse): Promise<
     sendJson(res, 400, { error: 'markdown must be a string' });
     return;
   }
+  const { renderCommentMarkdown } = await loadTemplates();
   sendJson(res, 200, { html: renderCommentMarkdown(body.markdown) });
 }
 
@@ -472,7 +474,7 @@ async function handleShare(req: IncomingMessage, res: ServerResponse): Promise<v
     sendJson(res, 404, { error: 'no such artifact' });
     return;
   }
-  const title = html.match(/<title>(.*?)<\/title>/s)?.[1]?.trim() || body.slug;
+  const title = documentTitle(html) || body.slug;
   try {
     // handleShare only runs on a live server, so state is set.
     const result = await shareBaked(body.slug, title, method, {
@@ -579,6 +581,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, clients: Set<Se
 
   // Index page
   if (url === '/') {
+    const { renderIndexPage } = await loadTemplates();
     const entries = listArtifacts();
     const html = renderIndexPage(entries);
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -612,19 +615,6 @@ async function handle(req: IncomingMessage, res: ServerResponse, clients: Set<Se
       fallbackUrl: `http://localhost:${port}/c/${slug}.html`,
     }),
   );
-}
-
-/** The <title> text of a stored artifact, with the entities the renderer writes decoded. */
-function documentTitle(html: string): string {
-  const raw = html.match(/<title\b[^>]*>([\s\S]*?)<\/title\s*>/i)?.[1] ?? '';
-  return raw
-    .replace(/<[^>]*>/g, '')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&amp;/g, '&')
-    .trim();
 }
 
 /**

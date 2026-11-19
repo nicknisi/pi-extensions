@@ -20,7 +20,6 @@ import { truncateToWidth, visibleWidth, type OverlayHandle, type TUI } from '@ea
 
 const WIDGET_ID = 'pin-last-prompt';
 let lastPrompt = '';
-let requestRender: (() => void) | null = null;
 
 interface RenderableLike {
   render(width: number): string[];
@@ -40,7 +39,7 @@ type TuiInternals = TUI & {
   getPrimaryScrollView?: () => ScrollViewLike | undefined;
 };
 
-interface PromptEntry {
+export interface PromptEntry {
   start: number;
   text: string;
 }
@@ -61,7 +60,7 @@ function componentName(child: unknown): string {
 /** Accumulate document line offsets of every UserMessageComponent.
  *  Recurses only into plain Containers (pure concatenation of children), so
  *  offsets match the exact lines the transcript ScrollView renders. */
-function collectPrompts(children: unknown[], width: number, offset: number, out: PromptEntry[]): number {
+export function collectPrompts(children: unknown[], width: number, offset: number, out: PromptEntry[]): number {
   for (const child of children) {
     const name = componentName(child);
     const component = child as RenderableLike;
@@ -79,25 +78,35 @@ function collectPrompts(children: unknown[], width: number, offset: number, out:
   return offset;
 }
 
+/** The entry owning document line `scrollTop`: the last one starting at or
+ *  above it, clamped to the first entry when scrolled above every prompt. */
+export function stickyEntry(entries: PromptEntry[], scrollTop: number): PromptEntry | undefined {
+  let current = entries[0];
+  for (const entry of entries) {
+    if (entry.start > scrollTop) break;
+    current = entry;
+  }
+  return current;
+}
+
 export default function (pi: ExtensionAPI) {
   pi.on('before_agent_start', async (event, _ctx) => {
     // Runs started by a custom message carry no prompt.
     const prompt = 'prompt' in event ? event.prompt : undefined;
     if (typeof prompt === 'string' && prompt.trim()) {
       lastPrompt = collapse(prompt);
-      requestRender?.();
     }
   });
 
   pi.on('session_start', async (_event, ctx) => {
     if (ctx.mode !== 'tui') return;
     ctx.ui.setWidget(WIDGET_ID, (tui, theme) => {
-      requestRender = () => tui.requestRender();
       const internals = tui as TuiInternals;
 
       let pinnedText = '';
       let overlay: OverlayHandle | null = null;
       let syncQueued = false;
+      let disposed = false;
 
       // Offset cache, invalidated when the transcript's width or total
       // rendered height changes (streaming, tool expand/collapse, resize).
@@ -123,14 +132,7 @@ export default function (pi: ExtensionAPI) {
       const stickyPrompt = (): string => {
         const sv = internals.getPrimaryScrollView?.();
         if (!sv) return lastPrompt;
-        const entries = promptEntries(sv);
-        if (entries.length === 0) return lastPrompt;
-        let current = entries[0]!; // clamp: above the first prompt, keep showing it
-        for (const entry of entries) {
-          if (entry.start > sv.scrollTop) break;
-          current = entry;
-        }
-        return current.text;
+        return stickyEntry(promptEntries(sv), sv.scrollTop)?.text ?? lastPrompt;
       };
 
       // Full-width bar pinned to the top of the fullscreen transcript.
@@ -160,6 +162,9 @@ export default function (pi: ExtensionAPI) {
         syncQueued = true;
         queueMicrotask(() => {
           syncQueued = false;
+          // The widget may have been disposed before this microtask ran;
+          // showing an overlay now would leak it (nothing would ever hide it).
+          if (disposed) return;
           const wantNow = scrolledBack() && !!pinnedText;
           if (wantNow && !overlay) {
             overlay = tui.showOverlay(topBar, {
@@ -187,9 +192,9 @@ export default function (pi: ExtensionAPI) {
           cache = null;
         },
         dispose() {
+          disposed = true;
           overlay?.hide();
           overlay = null;
-          requestRender = null;
         },
       };
     });
@@ -199,6 +204,5 @@ export default function (pi: ExtensionAPI) {
     if (ctx.mode !== 'tui') return;
     ctx.ui.setWidget(WIDGET_ID, undefined);
     lastPrompt = '';
-    requestRender = null;
   });
 }

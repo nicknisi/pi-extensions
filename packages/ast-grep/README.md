@@ -4,7 +4,7 @@ Adds `ast_search` and `ast_rewrite` using your existing [ast-grep CLI](https://a
 
 ## Requirements and installation
 
-Install the ast-grep CLI separately and ensure `ast-grep --version` works on Pi's `PATH`. The wrapper deliberately uses `ast-grep`, not `sg`, which can name an unrelated system utility. Tested with ast-grep 0.45.3. Pi is a peer dependency provided by the host. `typebox` is a runtime dependency. The host must export `withFileMutationQueue` (available in Pi 0.84.0).
+Install the ast-grep CLI separately and ensure `ast-grep --version` works on Pi's `PATH`. The wrapper deliberately uses `ast-grep`, not `sg`, which can name an unrelated system utility. Tested with ast-grep 0.45.3. Pi is a peer dependency provided by the host. `typebox` is also a peer dependency supplied by the Pi host. The host must export `withFileMutationQueue` (available in Pi 0.84.0).
 
 ```sh
 pi install npm:@nicknisi/pi-ast-grep
@@ -60,8 +60,8 @@ Apply after reviewing the preview:
 - **File scope:** Search accepts directories, but rewrite intentionally accepts one file per call. This allows applied rewrites to join Pi's per-file mutation queue, including canonicalized symlink aliases, rather than racing built-in edit/write calls. External processes are not coordinated. All matches in that file are applied, without an additional confirmation dialog or undo mechanism. Keep a recoverable working tree and inspect the diff.
 - **Paths and discovery:** Paths resolve against `ctx.cwd`, with a leading `@` removed for Pi compatibility. Tilde expansion, shell globs, pipes, and shell interpolation are not performed. CLI arguments are passed directly through `pi.exec`, with `--` before the absolute path. ast-grep's normal language discovery, ignore rules, and project configuration apply. The extension does not enable following directory symlinks or override ignore rules.
 - **Results:** Native output retains initial file paths and line numbers. Content is clipped to 2000 characters per line, then 500 lines or 30000 bytes, plus a short status/truncation notice. These are display limits, not match limits. No full-output file is saved. Narrow the path/pattern to retrieve omitted search or preview results. Never rerun an applied rewrite just to recover its output. Pi buffers CLI output in memory before truncation, so prefer narrow searches in large repositories.
-- **Failures:** Each operation first validates `ast-grep --version`, because Pi can report a missing executable as an empty exit 1. Only a verified CLI run with empty stdout and stderr and exit 0 or 1 becomes “No matches found.” Other nonzero exits throw tool errors. Successful stderr diagnostics are retained.
-- **Cancellation:** The tool abort signal and timeout reach both the version check and actual operation. Each process has its own timeout, so the complete invocation can take up to twice the requested timeout, plus mutation-queue waiting. Cancelled or timed-out rewrites may have already changed files. Failures are not rolled back. Inspect the working tree before retrying.
+- **Failures:** The first operation in a session validates `ast-grep --version`, because Pi can report a missing executable as an empty exit 1. A successful check is reused for later calls; a later spawn `ENOENT` is still reported as a missing executable. Only a verified CLI run with empty stdout and stderr and exit 0 or 1 becomes “No matches found.” Other nonzero exits throw tool errors. Successful stderr diagnostics are retained.
+- **Cancellation:** The tool abort signal and timeout reach both the version check and actual operation. Each process has its own timeout, so the first invocation can take up to twice the requested timeout, plus mutation-queue waiting. Cancelled or timed-out rewrites may have already changed files. Failures are not rolled back. Inspect the working tree before retrying.
 
 ## Tool exposure
 

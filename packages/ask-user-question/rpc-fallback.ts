@@ -35,15 +35,17 @@ const MULTI_SELECT_PLACEHOLDER = '1,3; custom answer';
 /** Longest preview slice folded into a select title before truncation. */
 const MAX_PREVIEW_CHARS = 600;
 
+/** Pi's dialog options; `signal` dismisses an open dialog when the tool call is aborted. */
+type DialogOptions = { signal?: AbortSignal };
+
 /**
  * The dialog-primitive slice of `ExtensionUIContext` this walker needs.
- * Structural on purpose: the pinned pi 0.74 peer types predate `ctx.mode`,
- * and jiti transpiles without type-checking — `hasDialogUI` is the runtime
- * gate that makes the shape trustworthy.
+ * Structural so tests and hosts can supply just these two methods —
+ * `hasDialogUI` is the runtime gate that makes the shape trustworthy.
  */
 export type DialogUI = {
-  select: (title: string, options: string[]) => Promise<string | undefined>;
-  input: (title: string, placeholder?: string) => Promise<string | undefined>;
+  select: (title: string, options: string[], opts?: DialogOptions) => Promise<string | undefined>;
+  input: (title: string, placeholder?: string, opts?: DialogOptions) => Promise<string | undefined>;
 };
 
 /** True when the host implements the select/input dialog primitives. */
@@ -85,13 +87,27 @@ function buildPreviewBlock(question: QuestionData): string {
  * `QuestionAnswer` is produced per question otherwise, so the envelope is
  * identical to the TUI path's.
  */
-export async function runRpcQuestionnaire(ui: DialogUI, params: QuestionParams): Promise<QuestionnaireResult> {
+export async function runRpcQuestionnaire(
+  ui: DialogUI,
+  params: QuestionParams,
+  signal?: AbortSignal,
+): Promise<QuestionnaireResult> {
   const answers: QuestionAnswer[] = [];
+  // Fork: an aborted tool call dismisses the open host dialog and cancels, as Esc does in the TUI.
+  const dialog: DialogUI = signal
+    ? {
+        select: async (title, options) => (signal.aborted ? undefined : ui.select(title, options, { signal })),
+        input: async (title, placeholder) => (signal.aborted ? undefined : ui.input(title, placeholder, { signal })),
+      }
+    : ui;
   for (let qi = 0; qi < params.questions.length; qi++) {
+    if (signal?.aborted) return { answers, cancelled: true };
     const q = params.questions[qi]!;
     const header = q.header ? `[${q.header}] ` : '';
-    const answer = q.multiSelect ? await askMultiSelect(ui, q, qi, header) : await askSingleSelect(ui, q, qi, header);
-    if (answer === undefined) return { answers, cancelled: true };
+    const answer = q.multiSelect
+      ? await askMultiSelect(dialog, q, qi, header)
+      : await askSingleSelect(dialog, q, qi, header);
+    if (answer === undefined || signal?.aborted) return { answers, cancelled: true };
     answers.push(answer);
   }
   return { answers, cancelled: false };

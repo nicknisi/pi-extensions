@@ -302,7 +302,9 @@ function computeStageKeys(stages: WorkflowStage[]): Record<string, string> {
     if (existing) return existing;
     const index = byId.get(id);
     if (index === undefined) return '<unknown>'; // dangling needs ref — scheduler reports it separately
-    if (visiting.has(id)) throw new Error(`workflow spec has a needs cycle at stage '${id}'`);
+    // A needs cycle (incl. a self-reference): placeholder, not a throw — the
+    // scheduler settles cycle members as skipped, keeping runWorkflow non-rejecting.
+    if (visiting.has(id)) return '<cycle>';
     visiting.add(id);
     const stage = stages[index]!;
     const needs = stage.needs ?? (index === 0 ? [] : [stages[index - 1]!.id]);
@@ -478,7 +480,20 @@ export async function runWorkflow(
 
     for (;;) {
       attempts++;
-      const spawnOpts: SpawnOptions = { prompt: buildPrompt(stage, item, index, feedback), cwd: opts.cwd };
+      let prompt: string;
+      try {
+        prompt = buildPrompt(stage, item, index, feedback);
+      } catch (err) {
+        // A throwing prompt function fails this item; aggregation settles the stage once.
+        return {
+          ok: false,
+          kind: 'crashed',
+          error: `Prompt threw: ${errorMessage(err)}`,
+          durationMs: Date.now() - jobStart,
+          attempts,
+        };
+      }
+      const spawnOpts: SpawnOptions = { prompt, cwd: opts.cwd };
       if (stage.agent !== undefined) spawnOpts.agent = stage.agent;
       if (stage.model !== undefined) spawnOpts.model = stage.model;
       spawnOpts.tools = stage.tools ?? DEFAULT_STAGE_TOOLS;
@@ -605,6 +620,7 @@ export async function runWorkflow(
         }
       } catch (err) {
         // runJob never throws; belt-and-braces so a bug can never wedge the scheduler
+        if (state.get(stage.id) === 'settled') return;
         settle(stage, {
           ok: false,
           kind: 'crashed',

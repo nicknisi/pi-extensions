@@ -14,7 +14,14 @@ import {
 import { type Component, visibleWidth } from '@earendil-works/pi-tui';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readStore } from './config.js';
-import headsUp from './index.js';
+import headsUp, { Panel, type View } from './index.js';
+import { parse } from './parse.js';
+
+// Wrap readStore so tests can count store reads; behavior is unchanged.
+vi.mock('./config.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./config.js')>();
+  return { ...actual, readStore: vi.fn(actual.readStore) };
+});
 
 const NOTE = `learn: The agent skipped the migration test because it needs a live database.
 tag: Heads up
@@ -93,6 +100,8 @@ function harness(reply = NOTE, registry: Record<string, unknown> = {}, sessionMa
     },
   } as unknown as ExtensionContext;
 
+  const storeReads = vi.mocked(readStore);
+  storeReads.mockClear();
   headsUp(pi);
   const fire = (name: string, event: unknown = {}) => handlers.get(name)?.(event, ctx);
   const band = () => widget?.({}, theme).render(200).join('\n');
@@ -118,6 +127,7 @@ function harness(reply = NOTE, registry: Record<string, unknown> = {}, sessionMa
     renderers,
     sendUserMessage,
     sessionManager,
+    storeReads,
   };
 }
 
@@ -470,5 +480,130 @@ describe('heads-up', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(h.complete).not.toHaveBeenCalled();
     expect(readStore().disabled).toBe(true);
+  });
+
+  it('moving to another branch clears the note', async () => {
+    const h = harness();
+    await h.fire('session_start');
+    await h.longTurn();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.band()).toContain('migration test');
+
+    await h.fire('session_tree');
+    expect(h.band()).toBeUndefined();
+    await h.press();
+    expect(h.notify).toHaveBeenLastCalledWith('heads-up: nothing to show', 'info');
+  });
+
+  it.each(['check', 'show'])('/heads-up %s does nothing outside the TUI', async (arg) => {
+    const h = harness(INSIGHT);
+    (h.ctx as { mode: string }).mode = 'rpc';
+    await h.commands.get('heads-up')!(arg, h.ctx);
+    expect(h.complete).not.toHaveBeenCalled();
+    expect(h.appendEntry).not.toHaveBeenCalled();
+    expect(h.notify).toHaveBeenLastCalledWith('heads-up only runs in the TUI', 'info');
+  });
+
+  it('reports a failed panel rewrite', async () => {
+    const h = harness();
+    await h.commands.get('heads-up')!('check', h.ctx);
+    h.complete.mockRejectedValueOnce(new Error('provider down'));
+    // The panel stays open after the failed rewrite; the notify is what matters.
+    void h.press('1', 'm');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.notify).toHaveBeenCalledWith('heads-up: rewrite failed: provider down', 'warning');
+  });
+
+  it('while off, a long turn re-reads the store at most once per cooldown', async () => {
+    const h = harness();
+    await h.fire('session_start');
+    await h.commands.get('heads-up')!('off', h.ctx);
+    await h.fire('before_agent_start');
+    for (let i = 0; i < 8; i += 1) await h.fire('tool_execution_start');
+    h.storeReads.mockClear();
+    // First tick finds the store off and starts the 300s cooldown.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.storeReads).toHaveBeenCalledTimes(1);
+    // Ticks inside the cooldown skip the store entirely.
+    await vi.advanceTimersByTimeAsync(290_000);
+    expect(h.storeReads).toHaveBeenCalledTimes(1);
+    // The first tick past the cooldown re-reads exactly once.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.storeReads).toHaveBeenCalledTimes(2);
+    expect(h.complete).not.toHaveBeenCalled();
+    await h.commands.get('heads-up')!('on', h.ctx);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.complete).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Panel', () => {
+  const note = parse(NOTE)!;
+  const make = (view: View = 'expanded') => {
+    initTheme('dark');
+    const state = { note, view, rewrite: null as string | null, at: Date.now() };
+    const requestRender = vi.fn();
+    const done = vi.fn();
+    const signals: AbortSignal[] = [];
+    const resolvers: ((text: string | null) => void)[] = [];
+    const rewrite = vi.fn(
+      (_variant: string, signal: AbortSignal) =>
+        new Promise<string | null>((resolve) => {
+          signals.push(signal);
+          resolvers.push(resolve);
+        }),
+    );
+    const panel = new Panel({ requestRender }, theme as unknown as Theme, state, rewrite, () => {}, done);
+    const text = () => stripVTControlCharacters(panel.render(100).join('\n'));
+    return { panel, state, requestRender, done, rewrite, signals, resolvers, text };
+  };
+
+  it('m shows the working view, then keeps the rewrite on the note', async () => {
+    const p = make();
+    p.panel.handleInput('m');
+    expect(p.rewrite).toHaveBeenCalledWith('more', expect.any(AbortSignal));
+    expect(p.state.view).toBe('working');
+    expect(p.text()).toContain('Rewriting…');
+    p.resolvers[0]!('**Longer** explanation');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(p.state.view).toBe('expanded');
+    expect(p.state.rewrite).toBe('**Longer** explanation');
+    expect(p.text()).toContain('Longer explanation');
+    expect(p.requestRender).toHaveBeenCalledTimes(2);
+  });
+
+  it('esc while working aborts the rewrite and returns to expanded', async () => {
+    const p = make();
+    p.panel.handleInput('s');
+    p.panel.handleInput('\x1b');
+    expect(p.signals[0]!.aborted).toBe(true);
+    expect(p.done).not.toHaveBeenCalled();
+    p.resolvers[0]!(null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(p.state.view).toBe('expanded');
+    expect(p.state.rewrite).toBeNull();
+  });
+
+  it('an action key during a rewrite finishes and aborts it', () => {
+    const p = make();
+    p.panel.handleInput('l');
+    p.panel.handleInput('0');
+    expect(p.signals[0]!.aborted).toBe(true);
+    expect(p.done).toHaveBeenCalledWith('dismissed');
+  });
+
+  it('does not render after dispose while a rewrite is pending', async () => {
+    const p = make();
+    p.panel.handleInput('m');
+    p.requestRender.mockClear();
+    p.panel.dispose();
+    expect(p.signals[0]!.aborted).toBe(true);
+    p.resolvers[0]!('late');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(p.requestRender).not.toHaveBeenCalled();
+  });
+
+  it('opens a reused working state in expanded view', () => {
+    expect(make('working').state.view).toBe('expanded');
   });
 });

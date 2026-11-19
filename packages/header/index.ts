@@ -23,7 +23,6 @@
  * `/nicknisi-header` cycles blink → waiting → full → compact.
  */
 
-import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { formatDirectory } from '@nicknisi/pi-shared';
 import { join } from 'node:path';
@@ -34,7 +33,7 @@ import {
   type ExtensionContext,
   type Theme,
 } from '@earendil-works/pi-coding-agent';
-import type { Component } from '@earendil-works/pi-tui';
+import { truncateToWidth, visibleWidth, type Component } from '@earendil-works/pi-tui';
 import * as blinkDataLarge from './frames-blink-large.js';
 import * as blinkDataSmall from './frames-blink-small.js';
 import * as blinkData from './frames-blink.js';
@@ -43,8 +42,6 @@ import * as waitingDataSmall from './frames-waiting-small.js';
 import * as waitingData from './frames-waiting.js';
 
 const ANSI_RESET = '\x1b[0m';
-const ANSI_RE = /\u001b\[[0-9;]*m/g; // eslint-disable-line no-control-regex -- intentional: matches ANSI color escapes
-const visibleLen = (s: string) => s.replace(ANSI_RE, '').length;
 
 // ---------------------------------------------------------------------------
 // GIF frame decoding (palette-indexed half-block cells, per source file)
@@ -56,7 +53,7 @@ interface FrameData {
   FRAMES: { delay: number; lines: string[][] }[];
 }
 
-function makeGifDecoder(data: FrameData) {
+export function makeGifDecoder(data: FrameData) {
   const fgEscapes = new Map<number, string>();
   const bgEscapes = new Map<number, string>();
   const cellStrings = new Map<number, string>();
@@ -119,7 +116,7 @@ function makeGifDecoder(data: FrameData) {
       if (width === undefined) {
         width = 0;
         for (let i = 0; i < data.FRAMES.length; i++) {
-          for (const line of this.frame(i)) width = Math.max(width, visibleLen(line));
+          for (const line of this.frame(i)) width = Math.max(width, visibleWidth(line));
         }
       }
       return width;
@@ -127,11 +124,11 @@ function makeGifDecoder(data: FrameData) {
   };
 }
 
-type Size = 'small' | 'medium' | 'large';
-const SIZES: Size[] = ['small', 'medium', 'large'];
+export type Size = 'small' | 'medium' | 'large';
+export const SIZES: Size[] = ['small', 'medium', 'large'];
 
 /** Rows per size: small ≈ 10, medium ≈ 13-14, large ≈ 15-18. */
-const GIFS: Record<'blink' | 'waiting', Record<Size, ReturnType<typeof makeGifDecoder>>> = {
+export const GIFS: Record<'blink' | 'waiting', Record<Size, ReturnType<typeof makeGifDecoder>>> = {
   blink: {
     small: makeGifDecoder(blinkDataSmall),
     medium: makeGifDecoder(blinkData),
@@ -150,9 +147,16 @@ interface HeaderConfig {
 }
 const CONFIG_PATH = join(getAgentDir(), 'nicknisi-header.json');
 
+export const isSize = (value: unknown): value is Size => SIZES.includes(value as Size);
+
 function loadConfig(): HeaderConfig {
   try {
-    return JSON.parse(readFileSync(CONFIG_PATH, 'utf8')) as HeaderConfig;
+    const raw: unknown = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'));
+    if (!raw || typeof raw !== 'object') return {};
+    const config = raw as Record<string, unknown>;
+    // Drop an unknown size rather than letting GIF modes silently fall back to ASCII art.
+    const { size, ...rest } = config;
+    return isSize(size) ? { ...rest, size } : rest;
   } catch {
     return {};
   }
@@ -331,31 +335,43 @@ const MODES: Mode[] = ['blink', 'waiting', 'full', 'compact'];
 
 const MARGIN = '  ';
 const INFO_GAP = '   ';
+/** Narrowest info column worth showing beside the art; below this the art is dropped. */
+const MIN_INFO_WIDTH = 20;
 
-function gitBranch(cwd: string): string | undefined {
-  try {
-    const branch = execFileSync('git', ['branch', '--show-current'], {
-      cwd,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 2000,
-    }).trim();
-    return branch || undefined;
-  } catch {
-    return undefined;
+/**
+ * Lay out art + info side by side, fitted to `width`. The info column is
+ * vertically centered against the art. When the terminal is too narrow for
+ * both, the art is dropped and only the (truncated) info is shown.
+ */
+export function layoutRows(art: string[], artWidth: number, info: string[], width: number): string[] {
+  const fit = (row: string) => truncateToWidth(row, Math.max(0, width));
+  if (width < MARGIN.length + artWidth + INFO_GAP.length + MIN_INFO_WIDTH) {
+    return ['', ...info.map((line) => fit(MARGIN + line))];
   }
+  const infoOffset = Math.max(0, Math.floor((art.length - info.length) / 2));
+  const rows = art.map((artLine, i) => {
+    const left = MARGIN + artLine + ' '.repeat(Math.max(0, artWidth - visibleWidth(artLine)));
+    const infoIdx = i - infoOffset;
+    return fit(infoIdx >= 0 && infoIdx < info.length ? left + INFO_GAP + info[infoIdx] : left);
+  });
+  return ['', ...rows];
 }
 
 export default function (pi: ExtensionAPI) {
   let mode: Mode = 'blink';
   let size: Size = loadConfig().size ?? 'medium';
-  let timer: ReturnType<typeof setInterval> | undefined;
   let shown = false;
+  /** Identifies the most recently installed dashboard; older components ignore teardown of shared state. */
+  let activeToken: object | undefined;
+  /** Stops the animation timer of the active dashboard component. */
+  let stopAnimation = () => {};
 
-  const stopAnimation = () => {
-    if (timer) {
-      clearInterval(timer);
-      timer = undefined;
+  const gitBranch = async (cwd: string): Promise<string | undefined> => {
+    try {
+      const result = await pi.exec('git', ['branch', '--show-current'], { cwd, timeout: 2000 });
+      return result.code === 0 ? result.stdout.trim() || undefined : undefined;
+    } catch {
+      return undefined;
     }
   };
 
@@ -371,57 +387,71 @@ export default function (pi: ExtensionAPI) {
     let frameIndex = 0;
     let frameElapsed = 0;
     let lastTick = Date.now();
-    let headerComp: Component | undefined;
+    let headerComp: (Component & { dispose(): void }) | undefined;
+    let requestRender = () => {};
+    const token = {};
 
-    // Session info, resolved once
+    // Session info, resolved once; the branch is filled in asynchronously.
     const modelName = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : 'no model';
-    const branch = gitBranch(ctx.cwd);
-    const location = branch ? `${formatDirectory(ctx.cwd)}  ·  ${branch}` : formatDirectory(ctx.cwd);
+    const dir = formatDirectory(ctx.cwd);
+    let location = dir;
+    void gitBranch(ctx.cwd).then((branch) => {
+      if (!branch || activeToken !== token) return;
+      location = `${dir}  ·  ${branch}`;
+      requestRender();
+    });
 
+    activeToken = token;
     shown = true;
     ctx.ui.setHeader((tui, theme) => {
-      const startAnimation = () => {
-        if (timer) return;
-        timer = setInterval(() => {
-          const now = Date.now();
-          const dt = now - lastTick;
-          lastTick = now;
-          let dirty = false;
+      let timer: ReturnType<typeof setInterval> | undefined;
+      const stop = () => {
+        if (timer) {
+          clearInterval(timer);
+          timer = undefined;
+        }
+      };
+      requestRender = () => {
+        if (!timer) return;
+        headerComp?.invalidate();
+        tui.requestRender();
+      };
+      timer = setInterval(() => {
+        const now = Date.now();
+        const dt = now - lastTick;
+        lastTick = now;
+        let dirty = false;
 
-          if (typed < quote.length) {
-            typed += 1;
+        if (typed < quote.length) {
+          typed += 1;
+          dirty = true;
+        }
+
+        if (gif) {
+          frameElapsed += dt;
+          if (frameElapsed >= gif.delay(frameIndex)) {
+            frameElapsed = 0;
+            frameIndex = (frameIndex + 1) % gif.count;
             dirty = true;
           }
-
-          if (gif) {
-            frameElapsed += dt;
-            if (frameElapsed >= gif.delay(frameIndex)) {
-              frameElapsed = 0;
-              frameIndex = (frameIndex + 1) % gif.count;
-              dirty = true;
-            }
-          } else {
-            if (!blink && now >= nextBlinkAt) {
-              blink = true;
-              blinkUntil = now + 180;
-              dirty = true;
-            } else if (blink && now >= blinkUntil) {
-              blink = false;
-              nextBlinkAt = now + 2500 + Math.random() * 3500;
-              dirty = true;
-            }
+        } else {
+          if (!blink && now >= nextBlinkAt) {
+            blink = true;
+            blinkUntil = now + 180;
+            dirty = true;
+          } else if (blink && now >= blinkUntil) {
+            blink = false;
+            nextBlinkAt = now + 2500 + Math.random() * 3500;
+            dirty = true;
           }
+        }
 
-          if (dirty && headerComp) {
-            headerComp.invalidate();
-            tui.requestRender();
-          }
-        }, 50);
-      };
-      startAnimation();
+        if (dirty) requestRender();
+      }, 50);
+      stopAnimation = stop;
 
       headerComp = {
-        render(_width: number): string[] {
+        render(width: number): string[] {
           let art: string[];
           let artWidth: number;
           if (gif) {
@@ -435,23 +465,23 @@ export default function (pi: ExtensionAPI) {
             artWidth = ART_WIDTH;
           }
 
-          // Info column, vertically centered against the art
           const cursor = typed < quote.length ? theme.fg('dim', '▌') : '';
           const info = [
             `${theme.bold(theme.fg('accent', 'pi'))} ${theme.fg('dim', `v${VERSION} · ${modelName}`)}`,
             theme.fg('muted', location),
             theme.italic(theme.fg('text', quote.slice(0, typed))) + cursor,
           ];
-          const infoOffset = Math.max(0, Math.floor((art.length - info.length) / 2));
-
-          const rows = art.map((artLine, i) => {
-            const left = MARGIN + artLine + ' '.repeat(Math.max(0, artWidth - visibleLen(artLine)));
-            const infoIdx = i - infoOffset;
-            return infoIdx >= 0 && infoIdx < info.length ? left + INFO_GAP + info[infoIdx] : left;
-          });
-          return ['', ...rows];
+          return layoutRows(art, artWidth, info, width);
         },
         invalidate() {},
+        // pi calls this when the header is replaced (by us, another extension, or setHeader(undefined)).
+        dispose() {
+          stop();
+          if (activeToken === token) {
+            activeToken = undefined;
+            shown = false;
+          }
+        },
       };
       return headerComp;
     });
@@ -499,8 +529,12 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand('nicknisi-header-size', {
     description: 'Set nicknisi header size (small|medium|large, no arg cycles)',
     handler: async (args, ctx) => {
-      const requested = args.trim() as Size;
-      size = SIZES.includes(requested) ? requested : SIZES[(SIZES.indexOf(size) + 1) % SIZES.length]!;
+      const requested = args.trim();
+      if (requested && !isSize(requested)) {
+        ctx.ui.notify(`nicknisi header size: unknown size "${requested}" (use ${SIZES.join('|')})`, 'error');
+        return;
+      }
+      size = isSize(requested) ? requested : SIZES[(SIZES.indexOf(size) + 1) % SIZES.length]!;
       saveConfig({ ...loadConfig(), size });
       if (shown && ctx.mode === 'tui') {
         stopAnimation();

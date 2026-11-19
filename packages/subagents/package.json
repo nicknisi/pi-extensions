@@ -17,8 +17,11 @@
   "files": [
     "dist",
     "index.ts",
+    "artifact-cache.ts",
     "background.ts",
+    "dispatch-plan.ts",
     "fleet.ts",
+    "patch-staging.ts",
     "profiles.ts",
     "searchable-select-list.ts",
     "CHANGELOG.md"

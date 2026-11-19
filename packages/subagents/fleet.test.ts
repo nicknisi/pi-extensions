@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { RunArtifact } from '@nicknisi/pi-shared';
-import { scopeFleetRuns } from './fleet.js';
+import { mergeFleet, scopeFleetRuns } from './fleet.js';
 
 function run(runId: string, status: RunArtifact['status'], ownerSession?: string): RunArtifact {
   return {
@@ -38,5 +38,22 @@ describe('scopeFleetRuns', () => {
 
   it('returns machine-wide persisted history only for the explicit all scope', () => {
     expect(scopeFleetRuns(runs, 'all', currentSession)).toEqual(runs);
+  });
+});
+
+describe('mergeFleet', () => {
+  it('lets live records win but keeps the persisted output, newest first', () => {
+    const persisted: RunArtifact[] = [
+      { ...run('a', 'running'), startedAt: 1, output: 'persisted a' },
+      { ...run('b', 'completed'), startedAt: 3, output: 'persisted b' },
+    ];
+    const live: RunArtifact[] = [
+      { ...run('a', 'completed'), startedAt: 1, endedAt: 9 },
+      { ...run('c', 'running'), startedAt: 2 },
+    ];
+    const merged = mergeFleet(persisted, live);
+    expect(merged.map((r) => r.runId)).toEqual(['b', 'c', 'a']);
+    expect(merged[2]).toMatchObject({ status: 'completed', endedAt: 9, output: 'persisted a' });
+    expect(merged[1]!.output).toBeUndefined();
   });
 });

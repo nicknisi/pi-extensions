@@ -13,9 +13,11 @@
  * /loop [interval] <prompt>   re-run a prompt while the session stays open.
  *   /loop 5m check if the deploy finished
  *   /loop check if the deploy finished      (self-paced: next turn after each agent_end)
- *   /loop                                    (uses .pi-loop.md or a default maintenance prompt)
+ *   /loop 5m                                 (interval only: uses .pi-loop.md or a default maintenance prompt)
  * /loop                 show status.
  * /loop stop            stop the loop.
+ *
+ * Timer intervals must be at least 1s.
  *
  * One goal per session. One loop per session. State persists to
  * <cwd>/.pi-goal/<session-file-name>.json so it survives --resume — one file
@@ -70,10 +72,13 @@ let loopTimer: NodeJS.Timeout | null = null;
 let evaluationController: AbortController | null = null;
 let evaluatingGoal: GoalState | null = null;
 let tickOnSettle = false;
+/** Goal whose last run ended in an error; paused at agent_settled unless a retry ran. */
+let erroredGoal: GoalState | null = null;
 
 const MAX_GOAL_RUNS = 10;
 const MAX_GOAL_MS = 30 * 60_000;
 const EVALUATOR_TIMEOUT_MS = 60_000;
+const MIN_LOOP_INTERVAL_MS = 1000;
 
 // Aliases for /goal clear
 const CLEAR_ALIASES = new Set(['clear', 'stop', 'off', 'reset', 'none', 'cancel']);
@@ -160,11 +165,6 @@ function rememberCtx(ctx: ExtensionContext): void {
   lastCtx = ctx;
 }
 
-function isStaleError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  return /stale|invalid|session replacement|assertActive/i.test(msg);
-}
-
 /** Send a user message to keep the session working. Returns true on success. */
 function sendContinuation(text: string): boolean {
   if (!api) return false;
@@ -173,8 +173,8 @@ function sendContinuation(text: string): boolean {
   try {
     api.sendUserMessage(text, { deliverAs: ctx.isIdle() ? 'followUp' : 'steer' });
     return true;
-  } catch (err) {
-    if (isStaleError(err)) return false;
+  } catch {
+    // Stale ctx or session replacement: the next event refreshes state.
     return false;
   }
 }
@@ -212,10 +212,10 @@ function refreshStatus(ctx: ExtensionContext): void {
       const dur = fmtDuration(Date.now() - goal.startedAt);
       ctx.ui.setStatus(
         'pi-goal',
-        `◎ goal ${goal.pausedReason ? 'paused' : 'active'} · ${dur} · ${goal.turns}/${MAX_GOAL_RUNS} runs`,
+        `◎ goal ${goal.pausedReason ? 'paused' : 'active'} · ${dur} · ${goal.turns}/${MAX_GOAL_RUNS} runs${loop ? ' · ↻ loop' : ''}`,
       );
     } else if (loop) {
-      const pace = loop.intervalMs ? `every ${fmtDuration(loop.intervalMs)}` : 'self-paced';
+      const pace = loop.intervalMs !== null ? `every ${fmtDuration(loop.intervalMs)}` : 'self-paced';
       ctx.ui.setStatus('pi-goal', `↻ loop · ${pace} · ${loop.iterations} run${loop.iterations === 1 ? '' : 's'}`);
     } else {
       ctx.ui.setStatus('pi-goal', '');
@@ -393,6 +393,8 @@ function setGoal(ctx: ExtensionContext, condition: string): void {
     return;
   }
   evaluationController?.abort();
+  // The new goal drives the session; drop a loop tick pending from a met goal.
+  tickOnSettle = false;
   goal = { condition: trimmed, startedAt: Date.now(), turns: 0 };
   persist(ctx);
   refreshStatus(ctx);
@@ -425,6 +427,7 @@ function resumeGoal(ctx: ExtensionContext): void {
   const condition = goal.condition;
   const reason = goal.lastReason || goal.pausedReason;
   evaluationController?.abort();
+  tickOnSettle = false;
   goal = { condition, startedAt: Date.now(), turns: 0 };
   persist(ctx);
   refreshStatus(ctx);
@@ -434,9 +437,11 @@ function resumeGoal(ctx: ExtensionContext): void {
   );
 }
 
-function clearGoal(ctx: ExtensionContext, silent = false): void {
+function clearGoal(ctx: ExtensionContext): void {
   evaluationController?.abort();
   const cond = goal?.condition;
+  // A paused goal does no work; aborting would only kill an unrelated turn.
+  const goalWasActive = goal !== null && !goal.pausedReason;
   goal = null;
   // Stop means stop. A runaway "goal" report is usually a running /loop the
   // user can't see from /goal subcommands — take it down too, and abort the
@@ -447,14 +452,13 @@ function clearGoal(ctx: ExtensionContext, silent = false): void {
   persist(ctx);
   if (!goal && !loop) clearStateFile(ctx);
   refreshStatus(ctx);
-  if (cond !== undefined || stoppedLoop) {
+  if (goalWasActive || stoppedLoop) {
     try {
       ctx.abort();
     } catch {
       /* best effort — cleared state already guarantees no new continuations */
     }
   }
-  if (silent) return;
   const parts: string[] = [];
   if (cond !== undefined) parts.push(`Goal cleared: ${short(cond)}`);
   if (stoppedLoop)
@@ -481,6 +485,7 @@ function goalStatus(ctx: ExtensionContext): void {
 // Loop lifecycle
 // =================================================================
 
+/** Parse a leading interval token (`500ms`, `30s`, `5m`, `1h`); null if not an interval. */
 function parseInterval(s: string): number | null {
   const m = s.match(/^(\d+)\s*(ms|s|m|h)$/i);
   if (!m) return null;
@@ -517,6 +522,18 @@ function clearLoopTimer(): void {
   }
 }
 
+function armLoopTimer(): void {
+  clearLoopTimer();
+  if (!loop || loop.intervalMs === null) return;
+  // Clamp intervals persisted before the minimum existed.
+  const delay = Math.max(loop.intervalMs, MIN_LOOP_INTERVAL_MS);
+  loopTimer = setTimeout(() => {
+    loopTimer = null;
+    const c = freshCtx();
+    if (c && loop) loopTick(c);
+  }, delay);
+}
+
 function loopTick(ctx: ExtensionContext): void {
   if (!loop) return;
   loop.iterations++;
@@ -525,13 +542,7 @@ function loopTick(ctx: ExtensionContext): void {
   refreshStatus(ctx);
   sendContinuation(loop.prompt);
   // Schedule next tick if timer-driven
-  if (loop.intervalMs !== null) {
-    clearLoopTimer();
-    loopTimer = setTimeout(() => {
-      const c = freshCtx();
-      if (c && loop) loopTick(c);
-    }, loop.intervalMs);
-  }
+  armLoopTimer();
 }
 
 function setLoop(ctx: ExtensionContext, args: string): void {
@@ -546,6 +557,10 @@ function setLoop(ctx: ExtensionContext, args: string): void {
   let prompt: string;
   let pace: number | null;
   if (intervalMs !== null) {
+    if (intervalMs < MIN_LOOP_INTERVAL_MS) {
+      notify(ctx, `Loop interval must be at least ${fmtDuration(MIN_LOOP_INTERVAL_MS)}`, 'warning');
+      return;
+    }
     pace = intervalMs;
     prompt = (parts[1] ?? '').trim() || defaultLoopPrompt(ctx);
   } else {
@@ -556,7 +571,7 @@ function setLoop(ctx: ExtensionContext, args: string): void {
   loop = { prompt, intervalMs: pace, iterations: 0, lastTickAt: Date.now() };
   persist(ctx);
   refreshStatus(ctx);
-  const paceLabel = pace ? `every ${fmtDuration(pace)}` : 'self-paced';
+  const paceLabel = pace !== null ? `every ${fmtDuration(pace)}` : 'self-paced';
   notify(ctx, `Loop started (${paceLabel}): ${short(prompt)}`);
   // First tick now
   loopTick(ctx);
@@ -582,7 +597,7 @@ function loopStatus(ctx: ExtensionContext): void {
     notify(ctx, 'No loop running');
     return;
   }
-  const pace = loop.intervalMs ? `every ${fmtDuration(loop.intervalMs)}` : 'self-paced';
+  const pace = loop.intervalMs !== null ? `every ${fmtDuration(loop.intervalMs)}` : 'self-paced';
   notify(ctx, `Loop (${pace}): ${short(loop.prompt, 200)}\n${loop.iterations} run${loop.iterations === 1 ? '' : 's'}`);
 }
 
@@ -590,7 +605,17 @@ function loopStatus(ctx: ExtensionContext): void {
 // agent_end: evaluate the goal, continue the loop
 // =================================================================
 
+function runSignalOf(ctx: ExtensionContext): AbortSignal | undefined {
+  try {
+    return ctx.signal;
+  } catch {
+    return undefined;
+  }
+}
+
 async function onAgentEnd(event: AgentEndEvent, ctx: ExtensionContext): Promise<void> {
+  // A later agent_end means pi retried (or recovered) after an earlier error.
+  erroredGoal = null;
   if (goal && !goal.pausedReason) {
     const activeGoal = goal;
     if (evaluatingGoal === activeGoal) return;
@@ -598,8 +623,14 @@ async function onAgentEnd(event: AgentEndEvent, ctx: ExtensionContext): Promise<
       ?.slice()
       .reverse()
       .find((m) => m.role === 'assistant');
-    if (lastAssistant?.stopReason === 'aborted' || lastAssistant?.stopReason === 'error') {
-      pauseGoal(ctx, `Agent stopped: ${lastAssistant.stopReason}.`);
+    if (lastAssistant?.stopReason === 'aborted') {
+      pauseGoal(ctx, 'Agent stopped: aborted.');
+      return;
+    }
+    if (lastAssistant?.stopReason === 'error') {
+      // agent_end is not final: pi may auto-retry or compact and retry. Decide
+      // at agent_settled, which fires only when nothing else will run.
+      erroredGoal = activeGoal;
       return;
     }
     const exhausted = goalBudgetExceeded();
@@ -613,9 +644,17 @@ async function onAgentEnd(event: AgentEndEvent, ctx: ExtensionContext): Promise<
     const controller = new AbortController();
     evaluationController = controller;
     evaluatingGoal = activeGoal;
+    // pi awaits agent_end handlers, so Escape during evaluation aborts the run
+    // signal; honor it rather than holding the session for the full timeout.
+    const runSignal = runSignalOf(ctx);
+    const signal = runSignal ? AbortSignal.any([controller.signal, runSignal]) : controller.signal;
     try {
-      const result = await evaluateGoal(ctx, activeGoal.condition, controller.signal);
+      const result = await evaluateGoal(ctx, activeGoal.condition, signal);
       if (goal !== activeGoal || controller.signal.aborted) return;
+      if (runSignal?.aborted && (result.error || result.verdict !== 'met')) {
+        pauseGoal(ctx, 'Agent stopped: aborted.');
+        return;
+      }
       activeGoal.lastReason = result.reason;
       activeGoal.lastVerdict = result.verdict;
       activeGoal.evidence = result.evidence;
@@ -633,6 +672,8 @@ async function onAgentEnd(event: AgentEndEvent, ctx: ExtensionContext): Promise<
         if (!loop) clearStateFile(ctx);
         refreshStatus(ctx);
         notify(ctx, `Goal achieved: ${short(cond, 200)}\n${result.reason}\nEvidence: ${result.evidence.join(', ')}`);
+        // A self-paced loop was suspended while the goal drove the session; resume it.
+        if (loop && loop.intervalMs === null) tickOnSettle = true;
         return;
       }
       const budget = goalBudgetExceeded();
@@ -725,16 +766,11 @@ export default function (pi: ExtensionAPI): void {
     evaluationController?.abort();
     clearLoopTimer();
     tickOnSettle = false;
+    erroredGoal = null;
     rememberCtx(ctx);
     loadState(ctx);
     // Re-arm a timer-driven loop
-    if (loop && loop.intervalMs !== null) {
-      clearLoopTimer();
-      loopTimer = setTimeout(() => {
-        const c = freshCtx();
-        if (c && loop) loopTick(c);
-      }, loop.intervalMs);
-    }
+    armLoopTimer();
     refreshStatus(ctx);
   });
 
@@ -744,8 +780,16 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on('agent_settled', (_event, ctx) => {
+    if (erroredGoal) {
+      const failed = erroredGoal;
+      erroredGoal = null;
+      // No retry or recovery followed the error: the run really failed.
+      if (goal === failed && !failed.pausedReason) pauseGoal(freshCtx() ?? ctx, 'Agent stopped: error.');
+    }
     if (!tickOnSettle) return;
     tickOnSettle = false;
+    // An active goal suspends the self-paced loop; its own settlement resumes it.
+    if (goal && !goal.pausedReason) return;
     if (loop && loop.intervalMs === null) loopTick(freshCtx() ?? ctx);
   });
 

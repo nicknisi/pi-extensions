@@ -30,10 +30,12 @@
  * Without this guard, `read`ing a hostile SKILL.md is remote code execution.
  */
 
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { stripFrontmatter, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { exec as execCb } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * Matches both dynamic-command forms, mirroring Claude Code:
@@ -43,31 +45,35 @@ import { dirname, resolve } from 'node:path';
  *
  * Group 1 is a fenced body, group 2 an inline command; exactly one is set.
  */
-const CMD_RE = /^```!\r?\n([\s\S]*?)\r?\n```[ \t]*$|(?<=^|\s)!`([^`]+)`/gm;
-const HAS_CMD = /^```!\r?\n|(?<=^|\s)!`[^`]+`/m;
+export const CMD_RE = /^```!\r?\n([\s\S]*?)\r?\n```[ \t]*$|(?<=^|\s)!`([^`]+)`/gm;
+export const HAS_CMD = /^```!\r?\n|(?<=^|\s)!`[^`]+`/m;
 
-function runCommand(command: string, cwd: string): Promise<string> {
+function runCommand(command: string, cwd: string, signal?: AbortSignal): Promise<string> {
   return new Promise((resolve) => {
-    execCb(command, { cwd, timeout: 30_000, maxBuffer: 1024 * 512, encoding: 'utf-8' }, (err, stdout, stderr) => {
-      if (err && !stdout && !stderr) {
+    execCb(
+      command,
+      { cwd, timeout: 30_000, maxBuffer: 1024 * 512, encoding: 'utf-8', signal },
+      (err, stdout, stderr) => {
         // Fenced blocks are multi-line; label with the first line only.
         const [first, ...rest] = command.split('\n');
         const label = rest.length > 0 ? `${first}…` : first;
-        resolve(`[!\`${label}\` failed: ${err.message}]`);
-      } else {
+        if (err && !stdout && !stderr) {
+          resolve(`[!\`${label}\` failed: ${err.message}]`);
+          return;
+        }
         resolve((stdout || stderr || '').trim());
-      }
-    });
+      },
+    );
   });
 }
 
-async function expandCommands(text: string, cwd: string): Promise<string> {
+export async function expandCommands(text: string, cwd: string, signal?: AbortSignal): Promise<string> {
   const matches = [...text.matchAll(CMD_RE)];
   if (matches.length === 0) return text;
 
   // Run all commands in parallel. Matches come from the original text and are
   // replaced by index, so command output is never re-scanned for placeholders.
-  const outputs = await Promise.all(matches.map((m) => runCommand(m[1] ?? m[2] ?? '', cwd)));
+  const outputs = await Promise.all(matches.map((m) => runCommand(m[1] ?? m[2] ?? '', cwd, signal)));
 
   // Replace in reverse to preserve indices
   let result = text;
@@ -81,20 +87,84 @@ async function expandCommands(text: string, cwd: string): Promise<string> {
   return result;
 }
 
+/** Canonical form of a path for allowlist comparison (symlinks resolved when possible). */
+function canonical(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+// Replicated from pi 1.5.2 utils/paths.js + core/tools/path-utils.js (not exported).
+const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
+function normalizeWindowsShellPath(filePath: string): string {
+  if (!filePath.startsWith('/') || filePath.startsWith('//') || filePath.includes('\\')) return filePath;
+  const match = filePath.match(/^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i);
+  if (!match) return filePath;
+  return `${match[1]!.toUpperCase()}:\\${match[2]?.replaceAll('/', '\\') ?? ''}`;
+}
+
+function piNormalizePath(input: string, readTool: boolean): string {
+  let p = input;
+  if (readTool) {
+    p = p.replace(UNICODE_SPACES, ' ');
+    if (p.startsWith('@')) p = p.slice(1);
+  }
+  if (process.platform === 'win32') p = normalizeWindowsShellPath(p);
+  if (p === '~') return homedir();
+  if (p.startsWith('~/') || (process.platform === 'win32' && p.startsWith('~\\'))) return join(homedir(), p.slice(2));
+  if (p.startsWith('file://')) return fileURLToPath(p);
+  return p;
+}
+
+/** Mirror of pi's resolveReadPath: the file the read tool actually opens. */
+function piResolveReadPath(path: string, cwd: string): string {
+  const p = piNormalizePath(path, true);
+  const resolved = isAbsolute(p) ? resolve(p) : resolve(piNormalizePath(cwd, false), p);
+  if (existsSync(resolved)) return resolved;
+  const curly = (s: string) => s.replace(/'/g, '\u2019');
+  const nfd = resolved.normalize('NFD');
+  for (const variant of [resolved.replace(/ (AM|PM)\./gi, '\u202F$1.'), nfd, curly(resolved), curly(nfd)]) {
+    if (variant !== resolved && existsSync(variant)) return variant;
+  }
+  return resolved;
+}
+
 /**
- * Resolved SKILL.md path -> skill base dir, for every skill pi registered in
- * this session. This is the allowlist for command expansion: a SKILL.md that
- * pi did not load as a skill is just an untrusted file on disk.
+ * Resolve a read-tool path exactly as pi's read tool does (Unicode spaces →
+ * ASCII, strip `@`, expand `~`, macOS filename variants), then canonicalize
+ * symlinks, so the allowlist checks the file that was actually read.
  */
-function registeredSkillPaths(pi: ExtensionAPI): Map<string, string> {
-  const paths = new Map<string, string>();
+export function normalizeReadPath(path: string, cwd: string): string {
+  return canonical(piResolveReadPath(path, cwd));
+}
+
+/**
+ * Canonical SKILL.md paths of every skill pi registered in this session. This
+ * is the allowlist for command expansion: a SKILL.md that pi did not load as a
+ * skill is just an untrusted file on disk.
+ */
+export function registeredSkillPaths(pi: Pick<ExtensionAPI, 'getCommands'>): Set<string> {
+  const paths = new Set<string>();
   for (const cmd of pi.getCommands()) {
     if (cmd.source !== 'skill') continue;
     const path = cmd.sourceInfo?.path;
     if (!path) continue;
-    paths.set(resolve(path), cmd.sourceInfo.baseDir ?? dirname(path));
+    paths.add(canonical(resolve(path)));
   }
   return paths;
+}
+
+/**
+ * Build the /skill: prompt exactly like pi's built-in expansion
+ * (frontmatter stripped, wrapped in a <skill> block, args appended raw).
+ */
+export function buildSkillPrompt(name: string, filePath: string, body: string, args: string | undefined): string {
+  const block = `<skill name="${name}" location="${filePath}">\nReferences are relative to ${dirname(filePath)}.\n\n${body}\n</skill>`;
+  const trimmed = args?.trim();
+  return trimmed ? `${block}\n\n${trimmed}` : block;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -108,26 +178,23 @@ export default function (pi: ExtensionAPI) {
     // Find the skill's SKILL.md path
     const skill = pi.getCommands().find((c) => c.source === 'skill' && c.name === `skill:${skillName}`);
     const skillPath = skill?.sourceInfo.path;
-    if (!skillPath) return { action: 'continue' as const };
+    if (!skillName || !skillPath) return { action: 'continue' as const };
 
     // Read and check for dynamic commands
-    let content: string;
+    let body: string;
     try {
-      content = readFileSync(skillPath, 'utf-8');
+      body = stripFrontmatter(readFileSync(skillPath, 'utf-8')).trim();
     } catch {
       return { action: 'continue' as const };
     }
 
-    if (!HAS_CMD.test(content)) return { action: 'continue' as const };
+    if (!HAS_CMD.test(body)) return { action: 'continue' as const };
 
-    // Execute commands and expand
-    const skillDir = skill!.sourceInfo.baseDir ?? dirname(skillPath);
+    // Execute commands in the project directory, as Claude Code does.
     ctx.ui.notify(`Expanding dynamic commands in ${skillName}…`, 'info');
-    const expanded = await expandCommands(content, skillDir);
+    const expanded = await expandCommands(body, ctx.cwd, ctx.signal);
 
-    // Build the prompt — replicate pi's skill expansion (content + User: args)
-    const text = args?.trim() ? `${expanded}\n\nUser: ${args.trim()}` : expanded;
-    return { action: 'transform' as const, text };
+    return { action: 'transform' as const, text: buildSkillPrompt(skillName, skillPath, expanded, args) };
   });
 
   // ── Path 2: Agent reads a SKILL.md via the read tool ──────────────────
@@ -145,8 +212,7 @@ export default function (pi: ExtensionAPI) {
 
     // Only expand for SKILL.md files pi registered as skills. Reading some
     // other SKILL.md must never execute the commands embedded in it.
-    const skillDir = registeredSkillPaths(pi).get(resolve(ctx.cwd, input.path));
-    if (!skillDir) {
+    if (!registeredSkillPaths(pi).has(normalizeReadPath(input.path, ctx.cwd))) {
       ctx.ui.notify(`Skipped !\`cmd\` expansion in unregistered ${input.path}`, 'warning');
       return;
     }
@@ -156,7 +222,7 @@ export default function (pi: ExtensionAPI) {
         if (block.type !== 'text') return block;
         const text = (block as { text: string }).text;
         if (!HAS_CMD.test(text)) return block;
-        return { ...block, text: await expandCommands(text, skillDir) };
+        return { ...block, text: await expandCommands(text, ctx.cwd, ctx.signal) };
       }),
     );
 

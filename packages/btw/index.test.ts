@@ -32,7 +32,8 @@ it.each(['unavailable', 'rejects', 'usable'])('selects the btw model when prefer
   const ctx = {
     model: current,
     modelRegistry: { find, getAvailableOfType, getApiKeyAndHeaders },
-    sessionManager: { buildContextEntries: () => [] },
+    mode: 'tui',
+    sessionManager: { buildSessionProjection: () => ({ messages: [] }) },
     ui: { notify },
   } as unknown as ExtensionContext;
   btw({

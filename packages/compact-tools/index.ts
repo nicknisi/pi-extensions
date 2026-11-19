@@ -12,13 +12,18 @@ type ToolRenderContext = Parameters<NonNullable<ToolRenderers['renderCall']>>[2]
 // Shared per-row renderer state; tells the call frame whether a result frame follows it.
 const HAS_RESULT = 'compactToolsHasResult';
 
+// Pi's collapsed-output truncation hints, e.g. `... (12 earlier lines, ctrl+o to expand)`.
+const TRUNCATION_HINT = /^\.\.\. \(?\d+ (?:earlier|more) lines\b/;
+// Collapsed previews only need the start of the output; avoid splitting or parsing huge results every render.
+const PREVIEW_CHARS = 64 * 1024;
+
 function renderedLines(component: Component | undefined, width: number): string[] {
   try {
     return (
       component
         ?.render(Math.max(1, width))
         .map((line) => sanitizeTerminalLabel(stripTerminalSequences(line)).trim())
-        .filter(Boolean) ?? []
+        .filter((line) => line && !TRUNCATION_HINT.test(line)) ?? []
     );
   } catch {
     // A custom renderer can fail. Fall back to the tool's text without losing expansion.
@@ -36,27 +41,44 @@ function background(context: ToolRenderContext): 'toolPendingBg' | 'toolErrorBg'
   return context.isPartial ? 'toolPendingBg' : context.isError ? 'toolErrorBg' : 'toolSuccessBg';
 }
 
-function textOf(result: AgentToolResult<unknown>): string[] {
-  return result.content
+function textOf(result: AgentToolResult<unknown>, limit = Infinity): string[] {
+  let text = result.content
     .filter((part) => part.type === 'text')
     .map((part) => part.text)
-    .join('\n')
+    .join('\n');
+  if (text.length > limit) text = text.slice(0, limit);
+  return text
     .split('\n')
     .map((line) => sanitizeTerminalLabel(line.replaceAll('\t', ' ')).trim())
     .filter(Boolean);
 }
 
-/** One painted, width-filling line computed at render time. */
+/**
+ * One painted, width-filling line computed at render time, indented by outputPad like pi's default shell.
+ * Pi rebuilds this component whenever the row's inputs change, so the line is cached per width.
+ */
 class Line implements Component {
+  private cachedWidth: number | undefined;
+  private cachedLines: string[] | undefined;
   constructor(
     readonly inner: Component | undefined,
     private readonly line: (width: number) => string,
     private readonly paint: (text: string) => string,
+    private readonly pad = 0,
   ) {}
   render(width: number): string[] {
-    return [this.paint(truncateToWidth(this.line(width), width, '…', true))];
+    if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
+    const pad = Math.max(0, this.pad);
+    const inner = Math.max(0, width - pad * 2);
+    const text = ' '.repeat(pad) + truncateToWidth(this.line(inner), inner, '…');
+    this.cachedWidth = width;
+    this.cachedLines = [this.paint(truncateToWidth(text, width, '…', true))];
+    return this.cachedLines;
   }
-  invalidate(): void {}
+  invalidate(): void {
+    this.cachedWidth = undefined;
+    this.cachedLines = undefined;
+  }
 }
 
 /** Pi's default tool shell (outcome background, outputPad, one blank line above and below), for one slot. */
@@ -118,6 +140,7 @@ function compactRenderers(toolName: string, base: ToolRenderers | undefined): To
           return theme.fg('toolTitle', `▸ ${title ?? argsTitle(toolName, args)}`);
         },
         paint(theme, context),
+        context.outputPad,
       );
     },
     renderResult(result, options, theme, context) {
@@ -148,7 +171,7 @@ function compactRenderers(toolName: string, base: ToolRenderers | undefined): To
         component,
         (width) => {
           const rendered = renderedLines(component, width - 2);
-          const previewLines = rendered.length ? rendered : textOf(result);
+          const previewLines = rendered.length ? rendered : textOf(result, PREVIEW_CHARS);
           let preview = previewLines[0] ?? (options.isPartial ? 'Running' : 'Done');
           try {
             const value: unknown = JSON.parse(previewLines.join('\n'));
@@ -167,6 +190,7 @@ function compactRenderers(toolName: string, base: ToolRenderers | undefined): To
           return theme.fg(color, truncateToWidth(`  ${preview}`, Math.max(0, width - hint.length)) + hint);
         },
         paint(theme, context),
+        context.outputPad,
       );
     },
   };
