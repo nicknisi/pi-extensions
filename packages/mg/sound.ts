@@ -131,8 +131,8 @@ export function playClick(freq = 1200, durationMs = 40): ChildProcess | null {
 
 /**
  * Speak the monologue using macOS `say` — slow and dramatic.
- * `onDone` fires only when speech actually finishes; if `say` is unavailable or fails to
- * spawn it never fires, so the caller falls back to its fixed timeout.
+ * `onDone` fires only when speech actually finishes (exit code 0); if `say` is unavailable,
+ * fails to spawn, exits nonzero, or is killed it never fires, so the caller falls back to its fixed timeout.
  */
 export function speak(text: string, rate = 120, onDone?: () => void): ChildProcess | null {
   if (!AUDIO_SUPPORTED) return null;
@@ -141,7 +141,9 @@ export function speak(text: string, rate = 120, onDone?: () => void): ChildProce
     const args = ['-v', 'Daniel', '-r', String(rate)];
     const proc = spawn('say', [...args, text], { stdio: 'ignore' });
     proc.on('error', () => {});
-    proc.on('exit', () => onDone?.());
+    proc.on('exit', (code, signal) => {
+      if (code === 0 && signal === null) onDone?.();
+    });
     return proc;
   } catch {
     return null;

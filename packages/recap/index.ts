@@ -122,7 +122,8 @@ export default function (pi: ExtensionAPI) {
     inflight = null;
   }
 
-  async function generateSummary(ctx: ExtensionContext, signal: AbortSignal): Promise<string> {
+  // Resolves null when generation was skipped (no model / nothing to summarize; already notified).
+  async function generateSummary(ctx: ExtensionContext, signal: AbortSignal): Promise<string | null> {
     const cfg = readConfig();
     const preferences =
       cfg.model && typeof cfg.model.provider === 'string' && typeof cfg.model.id === 'string'
@@ -139,13 +140,13 @@ export default function (pi: ExtensionAPI) {
     );
     if (!model) {
       ctx.ui.notify('recap: no model available', 'warning');
-      return '';
+      return null;
     }
     // Active context only: compaction summary + kept messages, not pre-compaction history.
     const conversation = buildConversation(convertToLlm(buildSessionContext(ctx.sessionManager.getBranch()).messages));
     if (!conversation.trim()) {
       ctx.ui.notify('recap: nothing to summarize yet', 'info');
-      return '';
+      return null;
     }
     // streamSimple takes provider-neutral options, so `reasoning` applies to every API.
     const response = await ctx.modelRegistry
@@ -185,7 +186,7 @@ export default function (pi: ExtensionAPI) {
     inflight = controller;
     try {
       const summary = await generateSummary(ctx, controller.signal);
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || summary === null) return;
       if (!summary.trim()) {
         ctx.ui.notify('recap: model returned an empty summary', 'warning');
         return;

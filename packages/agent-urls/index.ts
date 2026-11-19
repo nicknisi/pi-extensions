@@ -398,7 +398,9 @@ export default function agentUrls(pi: ExtensionAPI) {
       }
       // pi-tui replaces the whole argument text with `value`, so keep the
       // subcommand. Filenames only (no JSON parsing) — this runs per keystroke.
+      // Same cap as discoverRuns() so we never suggest a run resolveRun() can't find.
       const items = listRunFiles()
+        .slice(0, MAX_SCAN_FILES)
         .map((run) => `agent://${run.namespace}/${run.runId}`)
         .filter((uri) => uri.startsWith(typed) || (!typed.startsWith('agent://') && uri.includes(typed)))
         .slice(0, 20)

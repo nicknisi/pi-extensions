@@ -73,6 +73,11 @@ describe('CLI safety', () => {
     expect(exec.mock.calls.filter((c) => c[1][0] === '--version')).toHaveLength(1);
     exec.mockResolvedValue({ ...ok, code: 1, stderr: 'spawn ast-grep ENOENT' });
     await expect(call('ast_search', { pattern: 'z' })).rejects.toThrow(/not found/);
+    // The cache is reset, so a later call re-verifies instead of reading exit 1 as no matches.
+    exec.mockClear();
+    exec.mockResolvedValue({ ...ok, code: 1, stderr: '' });
+    await expect(call('ast_search', { pattern: 'w' })).rejects.toThrow(/executable unavailable/);
+    expect(exec.mock.calls[0]![1]).toEqual(['--version']);
   });
   it('rejects missing, empty, and directory rewrite paths without invoking the CLI', async () => {
     const { call, exec } = setup();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { findAdrDir, listAdrs } from './index.js';
@@ -28,6 +28,22 @@ describe('findAdrDir', () => {
     mkdirSync(join(root, '.git'));
     expect(findAdrDir(root)).toBeNull();
   });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'treats an untraversable docs/ as unavailable instead of throwing',
+    () => {
+      const root = mkdtempSync(join(tmpdir(), 'adr-'));
+      const docs = join(root, 'docs');
+      mkdirSync(join(docs, 'decisions'), { recursive: true });
+      mkdirSync(join(root, '.git'));
+      chmodSync(docs, 0o000);
+      try {
+        expect(findAdrDir(root)).toBeNull();
+      } finally {
+        chmodSync(docs, 0o755);
+      }
+    },
+  );
 
   it('returns null when nothing exists', () => {
     const root = mkdtempSync(join(tmpdir(), 'adr-'));

@@ -1,6 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import { parseUnifiedDiff, type RunArtifact } from '@nicknisi/pi-shared';
-import { buildHunkPatch, mapLimit, selectPendingPatches } from './patch-staging.js';
+import {
+  buildHunkPatch,
+  loadPatchState,
+  mapLimit,
+  recordPatchDecision,
+  selectPendingPatches,
+} from './patch-staging.js';
 
 function artifact(runId: string, repoRoot?: string): RunArtifact {
   return {
@@ -92,5 +101,43 @@ describe('mapLimit', () => {
 
   it('handles an empty list', async () => {
     expect(await mapLimit([], 4, async (n: number) => n)).toEqual([]);
+  });
+});
+
+describe('recordPatchDecision', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
+  });
+  const tmpDir = () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'patch-state-'));
+    dirs.push(d);
+    return path.join(d, 'patches');
+  };
+
+  it('merges with decisions written by another process since the state was loaded', () => {
+    const dir = tmpDir();
+    const stale = loadPatchState(dir); // this process's snapshot, taken before preflight
+    expect(stale.decisions).toEqual({});
+    // Another pi process decides a patch meanwhile.
+    recordPatchDecision(dir, '/runs/other.patch', 'discarded', 1);
+    // This process now records its own decision; the other one must survive.
+    const merged = recordPatchDecision(dir, '/runs/mine.patch', 'applied', 2);
+    const expected = {
+      '/runs/other.patch': { decision: 'discarded', at: 1 },
+      '/runs/mine.patch': { decision: 'applied', at: 2 },
+    };
+    expect(merged.decisions).toEqual(expected);
+    expect(loadPatchState(dir).decisions).toEqual(expected);
+    expect(fs.readdirSync(dir)).toEqual(['state.json']); // temp file renamed away
+  });
+
+  it('starts fresh from corrupt state', () => {
+    const dir = tmpDir();
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'state.json'), '{not json');
+    expect(recordPatchDecision(dir, '/runs/a.patch', 'applied', 3).decisions).toEqual({
+      '/runs/a.patch': { decision: 'applied', at: 3 },
+    });
   });
 });

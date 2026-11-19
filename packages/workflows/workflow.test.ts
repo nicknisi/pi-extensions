@@ -172,6 +172,19 @@ describe('engine: compile never runs the script body', () => {
     expect(readStaticMeta('export const meta = (() => { while (true); })();')).toBeUndefined();
     expect(readStaticMeta('export const meta = { name: process.pid };')).toBeUndefined();
   });
+
+  it('readStaticMeta bounds microtasks and getters by the eval timeout', () => {
+    expect(
+      readStaticMeta(
+        "export const meta = (() => { Promise.resolve().then(() => { while (true); }); return { name: 'x' }; })();",
+      ),
+    ).toBeUndefined();
+    expect(readStaticMeta("export const meta = { name: 'x', get extra() { while (true); } };")).toBeUndefined();
+    expect(readStaticMeta("export const meta = { name: 'x', get extra() { return 1; } };")).toEqual({
+      name: 'x',
+      extra: 1,
+    });
+  });
 });
 
 describe('engine: parallel + pipeline', () => {

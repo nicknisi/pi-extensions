@@ -30,6 +30,7 @@ import {
   claimInbox,
   clearAsk,
   deposit,
+  discardClaimedLetter,
   outgoingAskIds,
   pendingAsks,
   previewBody,
@@ -344,9 +345,18 @@ export default function relay(pi: ExtensionAPI) {
         // transient read failure — keep it claimed rather than discarding
         continue;
       }
-      if (!letter || deliveredIds.has(letter.id)) {
-        // corrupt letters are discarded like drain does; already-accepted
-        // letters are redeliveries (crash between delivery and ack)
+      if (!letter) {
+        // corrupt/rejected letters are discarded like drain does, with no
+        // delivery proof: the sender's receipt must not read 'delivered'
+        try {
+          discardClaimedLetter(root, me, claimToken, fileToken);
+        } catch {
+          // stays claimed; recovery requeues it and it is rejected again
+        }
+        continue;
+      }
+      if (deliveredIds.has(letter.id)) {
+        // already-accepted letter: a redelivery (crash between delivery and ack)
         ack(fileToken);
         continue;
       }

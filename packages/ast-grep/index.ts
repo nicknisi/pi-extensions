@@ -101,8 +101,8 @@ async function run(
     let result;
     try {
       const options = { cwd, ...(signal ? { signal } : {}), timeout: params.timeout ?? 30000 };
-      // Pi's exec can report spawn ENOENT as an empty exit 1, identical to no matches.
-      // Verify the binary once per session; later calls reuse the successful check.
+      // Pi's exec reports spawn failures as exit 1 with the error message (e.g. "spawn ast-grep ENOENT")
+      // in stderr. Verify the binary once per session; later spawn failures are caught below and reset this.
       if (!versionChecked.ok) {
         const version = await pi.exec('ast-grep', ['--version'], options);
         if (signal?.aborted || version.killed) throw new Error('ast-grep cancelled or timed out during version check.');

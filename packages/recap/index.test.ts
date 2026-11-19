@@ -205,6 +205,20 @@ describe('recap extension', () => {
     expect(appendEntry).not.toHaveBeenCalled();
   });
 
+  it('does not warn about an empty summary when generation is skipped', async () => {
+    const noModel = harness();
+    noModel.ctx.model = undefined;
+    await noModel.commands.get('recap')!('', noModel.ctx);
+    expect(noModel.notify).toHaveBeenCalledWith('recap: no model available', 'warning');
+    expect(noModel.notify).not.toHaveBeenCalledWith('recap: model returned an empty summary', 'warning');
+
+    const empty = harness([]);
+    await empty.commands.get('recap')!('', empty.ctx);
+    expect(empty.notify).toHaveBeenCalledWith('recap: nothing to summarize yet', 'info');
+    expect(empty.notify).not.toHaveBeenCalledWith('recap: model returned an empty summary', 'warning');
+    expect(empty.complete).not.toHaveBeenCalled();
+  });
+
   it('passes provider-neutral low reasoning', async () => {
     const { commands, complete, ctx } = harness();
     complete.mockResolvedValue({ content: [{ type: 'text', text: 'r' }] } as AssistantMessage);

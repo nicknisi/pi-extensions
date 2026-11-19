@@ -578,27 +578,31 @@ export function readStaticMeta(script: string): ScriptMeta | undefined {
   if (!m) return undefined;
   const start = m.index + m[0].length;
   const limit = Math.min(script.length, start + MAX_META_CHARS);
-  let expr: vm.Script | undefined;
-  for (let i = start; i <= limit && !expr; i++) {
+  let exprSource: string | undefined;
+  for (let i = start; i <= limit && exprSource === undefined; i++) {
     if (i < limit && script[i] !== ';' && script[i] !== '\n') continue;
     const candidate = script.slice(start, i);
     if (!candidate.trim()) continue;
     try {
-      expr = new vm.Script(`(${candidate}\n)`, { filename: 'workflow-meta.js' });
+      new vm.Script(`(${candidate}\n)`, { filename: 'workflow-meta.js' });
+      exprSource = `(${candidate}\n)`;
     } catch {
       // not a complete expression yet — keep scanning
     }
   }
-  if (!expr) return undefined;
+  if (exprSource === undefined) return undefined;
   try {
-    const value: unknown = expr.runInNewContext(Object.create(null), { timeout: META_EVAL_TIMEOUT_MS });
-    if (value === null || typeof value !== 'object') return undefined;
-    try {
-      // Bring the object into this realm so callers can compare it normally.
-      return structuredClone(value) as ScriptMeta;
-    } catch {
-      return value as ScriptMeta;
-    }
+    // Serialize inside the timed evaluation so getters/toJSON can't run
+    // untimed in this realm, and drain the context's own microtask queue
+    // before the timeout ends ('afterEvaluate') so queued promise jobs can't
+    // escape it. The JSON string is then parsed into a plain object here.
+    const context = vm.createContext(Object.create(null), { microtaskMode: 'afterEvaluate' });
+    const json: unknown = new vm.Script(
+      `((v) => (v !== null && typeof v === 'object' ? JSON.stringify(v) : undefined))${exprSource}`,
+      { filename: 'workflow-meta.js' },
+    ).runInContext(context, { timeout: META_EVAL_TIMEOUT_MS });
+    if (typeof json !== 'string') return undefined;
+    return JSON.parse(json) as ScriptMeta;
   } catch {
     return undefined;
   }

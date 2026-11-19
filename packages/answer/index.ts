@@ -147,18 +147,26 @@ export function parseExtractionResult(text: string): ExtractionOutcome {
 }
 
 export function fallbackExtractQuestions(text: string): ExtractionResult {
-  const prose = text
-    .replace(/\r\n?/g, '\n')
-    // "?" inside code or URLs is not a question.
-    .replace(/```[\s\S]*?(?:```|$)/g, '\n')
-    .replace(/`[^`\n]*`/g, 'code')
-    .replace(/\bhttps?:\/\/\S+/g, 'link');
-  // Sentences end at punctuation followed by whitespace, so "v1.2" or "foo.ts" do not split a question.
-  const sentences = prose.split('\n').flatMap((line) => line.split(/(?<=[.!?]["')\]]*)\s+/));
-  const questions = sentences
-    .map((sentence) => sentence.replace(/^[\s>*-]+/, '').trim())
-    .filter((sentence) => /\?+["')\]]*$/.test(sentence))
-    .map((question) => ({ question }));
+  // "?" inside fenced code is not a question; drop those blocks entirely.
+  const prose = text.replace(/\r\n?/g, '\n').replace(/```[\s\S]*?(?:```|$)/g, '\n');
+  // "?" inside inline code or URLs is not a question either. Mask them with same-length filler
+  // so sentence boundaries found in the masked text map back onto the original prose.
+  const mask = (match: string) => 'x'.repeat(match.length);
+  const masked = prose.replace(/`[^`\n]*`/g, mask).replace(/\bhttps?:\/\/\S+/g, mask);
+  // Sentences end at punctuation (optionally followed by closing quotes/brackets/emphasis) and
+  // whitespace, so "v1.2" or "foo.ts" do not split a question.
+  const boundaries = [...masked.matchAll(/\n|(?<=[.!?]["')\]*_]*)[^\S\n]+/g)];
+  const questions: { question: string }[] = [];
+  let start = 0;
+  for (const { index: end, 0: separator } of [...boundaries, { index: masked.length, 0: '' }]) {
+    const isQuestion = /\?+["')\]*_]*\s*$/.test(masked.slice(start, end));
+    const question = prose
+      .slice(start, end)
+      .replace(/^[\s>*_-]+/, '')
+      .replace(/[\s*_]+$/, '');
+    start = end + separator.length;
+    if (isQuestion && question) questions.push({ question });
+  }
 
   return normalizeExtractedQuestions({ questions });
 }

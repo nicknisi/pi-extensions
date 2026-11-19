@@ -144,6 +144,22 @@ export default function fastExtension(pi: ExtensionAPI) {
     cooldownTimer = undefined;
   }
 
+  // Re-arms while the cooldown is extended (e.g. a subagent child hit another 429).
+  function scheduleCooldownEnd(current: SessionState, ctx: ExtensionContext): void {
+    clearCooldownTimer();
+    if (current.cooldownUntil === undefined) return;
+    cooldownTimer = setTimeout(
+      () => {
+        cooldownTimer = undefined;
+        if (state !== current) return;
+        updateStatus(ctx, current);
+        if (isCoolingDown(current)) scheduleCooldownEnd(current, ctx);
+      },
+      Math.max(0, current.cooldownUntil - Date.now()),
+    );
+    cooldownTimer.unref?.();
+  }
+
   function getState(ctx: ExtensionContext): SessionState {
     state ??= createState(ctx);
     return state;
@@ -164,15 +180,7 @@ export default function fastExtension(pi: ExtensionAPI) {
     onCooldown: (until, ctx) => {
       const current = getState(ctx);
       updateStatus(ctx, current);
-      clearCooldownTimer();
-      cooldownTimer = setTimeout(
-        () => {
-          cooldownTimer = undefined;
-          if (state === current) updateStatus(ctx, current);
-        },
-        Math.max(0, until - Date.now()),
-      );
-      cooldownTimer.unref?.();
+      scheduleCooldownEnd(current, ctx);
       if (ctx.hasUI) {
         ctx.ui.notify(
           `Fast mode rate limited; using standard speed until ${new Date(until).toLocaleTimeString()}.`,

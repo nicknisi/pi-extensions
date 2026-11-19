@@ -1,7 +1,7 @@
 import type { Message } from '@earendil-works/pi-ai';
 import type { SessionEntry, Theme } from '@earendil-works/pi-coding-agent';
 import type { TUI } from '@earendil-works/pi-tui';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -68,6 +68,7 @@ it('forks with a valid parentId chain, labels dropped and header fields set', ()
     makeAssistant,
   );
   expect(dirname(file)).toBe(tmp);
+  if (process.platform !== 'win32') expect(statSync(file).mode & 0o777).toBe(0o600);
   const [header, ...entries] = readFileSync(file, 'utf8')
     .trim()
     .split('\n')
@@ -91,6 +92,7 @@ it('forks in-memory sessions into the temp dir, not cwd', () => {
   );
   try {
     expect(dirname(file)).toBe(tmpdir());
+    if (process.platform !== 'win32') expect(statSync(file).mode & 0o777).toBe(0o600);
   } finally {
     rmSync(file, { force: true });
   }

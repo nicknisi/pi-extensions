@@ -676,7 +676,11 @@ export function forkSessionWithThread(
   // fork into the user's project via a relative path.
   const dir = sessionManager.getSessionDir() || tmpdir();
   const file = join(dir, `${iso.replace(/[:.]/g, '-')}_${header.id}.jsonl`);
-  writeFileSync(file, [header, ...entries].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  // Owner-only, exclusive create: the transcript may land in a shared /tmp.
+  writeFileSync(file, [header, ...entries].map((e) => JSON.stringify(e)).join('\n') + '\n', {
+    mode: 0o600,
+    flag: 'wx',
+  });
   return file;
 }
 

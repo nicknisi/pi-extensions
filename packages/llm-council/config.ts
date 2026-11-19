@@ -304,7 +304,7 @@ export async function saveCouncilDefaults(selection: CouncilSelection): Promise<
         throw new Error(`Invalid council config at ${path}. Expected objects. File left unchanged.`);
       }
     }
-    const previous = value.member?.council as CouncilMemberUserConfig[] | undefined;
+    const previous = validCouncil(value.member?.council, path);
     value.member = {
       ...value.member,
       council: selection.models.map((model) => ({

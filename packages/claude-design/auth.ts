@@ -8,7 +8,7 @@
  * Anthropic hosts. Anthropic may change or revoke this flow.
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -20,7 +20,10 @@ const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
 const REDIRECT_URI = 'https://platform.claude.com/oauth/code/callback';
 const REFRESH_SKEW_MS = 60_000;
 const FETCH_TIMEOUT_MS = 15_000;
-const LOCK_STALE_MS = 30_000;
+// A lock is stale once its owner pid is gone. Unowned/unreadable locks (crash mid-write)
+// expire after a short grace; owned locks also expire after a long max age (pid reuse).
+const LOCK_UNOWNED_STALE_MS = 30_000;
+const LOCK_MAX_AGE_MS = 5 * 60_000;
 const LOCK_POLL_MS = 100;
 
 export const STORE_PATH =
@@ -82,29 +85,88 @@ async function saveStore(store: TokenStore): Promise<void> {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Serialize refreshes across processes with an O_EXCL lockfile; stale locks are broken. */
+const errCode = (error: unknown) => (error as NodeJS.ErrnoException).code;
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return errCode(error) !== 'ESRCH';
+  }
+}
+
+/** Whether the lock at `path` is stale (owner pid gone); null if there is no lock. */
+async function lockIsStale(path: string): Promise<boolean | null> {
+  let raw: string;
+  let mtimeMs: number;
+  try {
+    [raw, { mtimeMs }] = await Promise.all([readFile(path, 'utf8'), stat(path)]);
+  } catch (error) {
+    if (errCode(error) === 'ENOENT') return null;
+    throw error;
+  }
+  const age = Date.now() - mtimeMs;
+  let pid: unknown;
+  try {
+    pid = (JSON.parse(raw) as { pid?: unknown }).pid;
+  } catch {
+    // Unowned: written by an older version or a crash mid-write.
+  }
+  if (typeof pid === 'number' && Number.isInteger(pid) && pid > 0) return age > LOCK_MAX_AGE_MS || !pidAlive(pid);
+  return age > LOCK_UNOWNED_STALE_MS;
+}
+
+/** O_EXCL create; false if the file already exists. */
+async function tryCreate(path: string, body: string): Promise<boolean> {
+  try {
+    await writeFile(path, body, { mode: 0o600, flag: 'wx' });
+    return true;
+  } catch (error) {
+    if (errCode(error) === 'EEXIST') return false;
+    throw error;
+  }
+}
+
+async function releaseIfOwned(path: string, body: string): Promise<void> {
+  const held = await readFile(path, 'utf8').catch(() => null);
+  if (held === body) await rm(path, { force: true });
+}
+
+/**
+ * Remove a stale lock. Breakers serialize on a short-lived guard file and re-check
+ * staleness while holding it, so two waiters that saw the same abandoned lock can't
+ * delete each other's fresh lock.
+ */
+async function breakStaleLock(lockPath: string, body: string): Promise<void> {
+  const guard = `${lockPath}.break`;
+  if (!(await tryCreate(guard, body))) {
+    // Guard is only held for a few fs ops; clear it if its holder died.
+    if (await lockIsStale(guard)) await rm(guard, { force: true });
+    else await sleep(LOCK_POLL_MS);
+    return;
+  }
+  try {
+    if (await lockIsStale(lockPath)) await rm(lockPath, { force: true });
+  } finally {
+    await releaseIfOwned(guard, body);
+  }
+}
+
+/** Serialize refreshes across processes with an O_EXCL lockfile owned by pid + random token. */
 async function withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
   const lockPath = `${STORE_PATH}.lock`;
+  const body = JSON.stringify({ pid: process.pid, token: b64url(randomBytes(12)) });
   await mkdir(dirname(STORE_PATH), { recursive: true });
-  for (;;) {
-    try {
-      const handle = await open(lockPath, 'wx', 0o600);
-      await handle.close();
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      const age = await stat(lockPath).then(
-        (s) => Date.now() - s.mtimeMs,
-        () => 0,
-      );
-      if (age > LOCK_STALE_MS) await rm(lockPath, { force: true });
-      else await sleep(LOCK_POLL_MS);
-    }
+  while (!(await tryCreate(lockPath, body))) {
+    const stale = await lockIsStale(lockPath);
+    if (stale) await breakStaleLock(lockPath, body);
+    else if (stale === false) await sleep(LOCK_POLL_MS);
   }
   try {
     return await fn();
   } finally {
-    await rm(lockPath, { force: true });
+    await releaseIfOwned(lockPath, body);
   }
 }
 

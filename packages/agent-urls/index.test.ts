@@ -106,6 +106,15 @@ it('keeps the newest runs when more records exist than the scan cap', async () =
   expect(await read('agent://newest')).toContain('agent://zzz/newest');
 });
 
+it('does not complete runs beyond the scan cap', async () => {
+  for (let i = 0; i < 2500; i++) writeRun('zzz', { runId: `new${i}` }, 2_000_000);
+  writeRun('aaa', { runId: 'oldest' }, 1_000_000);
+  const { command, read } = load();
+  expect(command.getArgumentCompletions('read agent://aaa/')).toBeNull();
+  expect(command.getArgumentCompletions('read agent://zzz/new0')?.[0]?.value).toBe('read agent://zzz/new0');
+  await expect(read('agent://oldest')).rejects.toThrow();
+});
+
 it('reports running records whose host process is gone as stale', async () => {
   writeRun('subagents', { runId: 'ghost', status: 'running', hostPid: 2 ** 22 + 12345 });
   writeRun('subagents', { runId: 'live', status: 'running', hostPid: process.pid });

@@ -613,6 +613,20 @@ describe('agent_end lifecycle', () => {
     expect(saved('a').goal).toBeNull();
   });
 
+  it('does not resume a self-paced loop when a replacement goal starts before settlement', async () => {
+    const h = makeHarness('b.jsonl');
+    await h.commands.get('loop')!('keep going', h.ctx);
+    await h.command('all tests pass');
+    evaluator(verdict('met', ['result']));
+    await h.event('agent_end');
+    expect(h.notifications.some((n) => n.includes('Goal achieved'))).toBe(true);
+    await h.command('lint is clean');
+    expect(h.sent.at(-1)).toBe('lint is clean');
+    await h.event('agent_settled');
+    expect(h.sent).toEqual(['keep going', 'all tests pass', 'lint is clean']);
+    expect(saved('b').goal.condition).toBe('lint is clean');
+  });
+
   it('does not abort an unrelated turn when clearing an already-paused goal', async () => {
     const h = makeHarness();
     await h.command('all tests pass');

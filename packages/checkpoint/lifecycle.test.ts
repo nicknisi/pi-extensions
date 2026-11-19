@@ -915,6 +915,45 @@ describe('human commands', () => {
     expect(h.sent().filter((m) => m.customType === CONTINUATION_MESSAGE_TYPE)).toHaveLength(2);
   });
 
+  it('/self-compact-now resumes an unanswered continuation journaled before an interrupted run', async () => {
+    const h = makeHarness({ contextWindow: 1_000_000 });
+    await h.fire('session_start');
+    await h.call('interrupted next action');
+    const cycleId = h.state()!.cycleId;
+    h.entries.push(
+      {
+        type: 'custom',
+        customType: STATE_ENTRY,
+        data: { ...h.state(), phase: 'ready-to-deliver' },
+        id: 'ready',
+        parentId: h.entries.at(-1)!.id,
+        timestamp: new Date().toISOString(),
+      } as SessionEntry,
+      {
+        type: 'custom_message',
+        customType: CONTINUATION_MESSAGE_TYPE,
+        content: 'interrupted next action',
+        display: true,
+        details: { cycleId },
+        id: 'journal',
+        parentId: 'ready',
+        timestamp: new Date().toISOString(),
+      },
+    );
+    (h.ctx as { hasPendingMessages: () => boolean }).hasPendingMessages = () => false;
+    // Reload schedules recovery; the command runs before that timer fires.
+    await h.fire('session_start');
+    expect(h.state()?.phase).toBe('ready-to-deliver');
+    await h.runCommand(NOW_COMMAND);
+    const continuations = () => h.sent().filter((m) => m.customType === CONTINUATION_MESSAGE_TYPE);
+    expect(continuations()).toHaveLength(1);
+    expect(String(continuations()[0]?.content)).toContain('Resume the unanswered self-compaction note');
+    expect(h.state()?.phase).toBe('ready-to-deliver');
+    // The recovery timer must not deliver a duplicate.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(continuations()).toHaveLength(1);
+  });
+
   it('/self-compact-now on a fresh session asks the model to write a note and compact', async () => {
     const h = makeHarness({ contextWindow: 1_000_000 });
     await h.fire('session_start');

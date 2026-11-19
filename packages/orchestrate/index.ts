@@ -393,6 +393,8 @@ function setGoal(ctx: ExtensionContext, condition: string): void {
     return;
   }
   evaluationController?.abort();
+  // The new goal drives the session; drop a loop tick pending from a met goal.
+  tickOnSettle = false;
   goal = { condition: trimmed, startedAt: Date.now(), turns: 0 };
   persist(ctx);
   refreshStatus(ctx);
@@ -425,6 +427,7 @@ function resumeGoal(ctx: ExtensionContext): void {
   const condition = goal.condition;
   const reason = goal.lastReason || goal.pausedReason;
   evaluationController?.abort();
+  tickOnSettle = false;
   goal = { condition, startedAt: Date.now(), turns: 0 };
   persist(ctx);
   refreshStatus(ctx);
@@ -785,6 +788,8 @@ export default function (pi: ExtensionAPI): void {
     }
     if (!tickOnSettle) return;
     tickOnSettle = false;
+    // An active goal suspends the self-paced loop; its own settlement resumes it.
+    if (goal && !goal.pausedReason) return;
     if (loop && loop.intervalMs === null) loopTick(freshCtx() ?? ctx);
   });
 

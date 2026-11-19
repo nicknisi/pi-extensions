@@ -285,6 +285,28 @@ it('discards a claimed letter with a malformed sender instead of requeueing it f
   expect(host.sends.filter((s) => s.message.customType === 'relay:delivery')).toEqual([]);
 });
 
+it('discards a letter with an invalid replyTo without writing delivery proof', async () => {
+  const root = fixture();
+  const p = peer();
+  writeRecord(root, p);
+  const self = deriveAddr('/work', 'self');
+  const from = { addr: p.addr, name: p.name, cwd: p.cwd };
+  const ts = Date.now();
+  // replyTo fails the validated reader (assertAskId) but passes the ACK writer's own shape check.
+  const bad: Letter = { id: 'bad-reply', kind: 'reply', body: 'x', ts, replyTo: '../not-an-ask', from };
+  const good: Letter = { id: 'good-letter', kind: 'message', body: 'ok', ts: ts + 1, from };
+  deposit(root, self, bad);
+  deposit(root, self, good);
+  const host = start();
+  const { awaitReceipt } = await import('./mailbox.js');
+  expect(await awaitReceipt(root, self, good, 3000)).toBe('delivered');
+  expect(unreadCount(root, self)).toBe(0);
+  expect(recoverInboxClaims(root, self).flatMap((claim) => claim.fileTokens)).toEqual([]);
+  expect(fs.existsSync(path.join(root, `${self}.acks`, `${bad.ts}-${bad.id}.json`))).toBe(false);
+  expect(await awaitReceipt(root, self, bad, 0)).not.toBe('delivered');
+  expect(host.sends.map((s) => (s.message.details as { id?: string } | undefined)?.id)).not.toContain(bad.id);
+});
+
 it('routes a reply that arrives before the ask receipt settles to the waiting ask', async () => {
   const root = fixture();
   const p = peer();

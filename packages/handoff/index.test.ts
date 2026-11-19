@@ -2,6 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ExtensionAPI, ExtensionCommandContext, SessionEntry } from '@earendil-works/pi-coding-agent';
+import { initTheme } from '@earendil-works/pi-coding-agent';
 import { describe, expect, it, vi } from 'vitest';
 import type { Message } from '@earendil-works/pi-ai';
 import handoff, { buildSessionChain, entriesToMessages, fitConversation, recentRequests } from './index.js';
@@ -148,54 +149,134 @@ describe('/handoff', () => {
   });
 });
 
+type Complete = (model: unknown, request: unknown, options: { signal?: AbortSignal }) => Promise<unknown>;
+type Component = { handleInput?: (data: string) => void; dispose?: () => void };
+type Factory = (
+  tui: unknown,
+  theme: unknown,
+  kb: unknown,
+  done: (r: unknown) => void,
+) => Component | Promise<Component>;
+
 describe('/handoff generation outcomes', () => {
-  const setup = (mode: string, custom: () => Promise<unknown>) => {
+  initTheme('dark'); // BorderedLoader renders a key hint from Pi's global theme
+  const textResponse = (text: string) => ({ stopReason: 'stop', content: [{ type: 'text', text }] });
+
+  /** Mirrors pi's showExtensionCustom: runs the factory, resolves on the first done(), then disposes. */
+  const runCustom = (factory: Factory, onComponent?: (c: Component) => void) =>
+    new Promise<unknown>((resolve) => {
+      let closed = false;
+      let component: Component | undefined;
+      const done = (result: unknown) => {
+        if (closed) return;
+        closed = true;
+        resolve(result);
+        component?.dispose?.();
+      };
+      const tui = { requestRender: () => {} };
+      const theme = { fg: (_color: string, s: string) => s, bold: (s: string) => s };
+      void Promise.resolve(factory(tui, theme, undefined, done)).then((c) => {
+        component = c;
+        if (closed) c.dispose?.();
+        else onComponent?.(c);
+      });
+    });
+
+  const setup = (
+    mode: string,
+    opts: {
+      complete?: Complete;
+      custom?: () => Promise<unknown>;
+      onComponent?: (c: Component) => void;
+    } = {},
+  ) => {
     let handler!: Handler;
     handoff({
       registerCommand: (_name: string, c: { handler: Handler }) => (handler = c.handler),
     } as unknown as ExtensionAPI);
+    const complete = vi.fn<Complete>(opts.complete ?? (async () => textResponse('RPC prompt')));
     const ctx = {
       mode,
       hasUI: true,
       model: { provider: 'p', id: 'm' },
-      modelRegistry: {
-        getApiKeyAndHeaders: async () => ({ ok: true }),
-        complete: async () => ({ stopReason: 'stop', content: [{ type: 'text', text: 'RPC prompt' }] }),
-      },
+      modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true }), complete },
       sessionManager: {
         getBranch: () => [{ type: 'message', message: { role: 'user', content: 'hi', timestamp: 0 } }],
         getSessionFile: () => undefined,
         getHeader: () => ({}),
       },
-      ui: { notify: vi.fn(), custom: vi.fn(custom), editor: vi.fn(async () => undefined) },
+      ui: {
+        notify: vi.fn(),
+        custom: vi.fn(opts.custom ?? ((factory: Factory) => runCustom(factory, opts.onComponent))),
+        editor: vi.fn(async () => undefined),
+      },
       newSession: vi.fn(),
     } as unknown as ExtensionCommandContext & {
       ui: { notify: ReturnType<typeof vi.fn>; editor: ReturnType<typeof vi.fn>; custom: ReturnType<typeof vi.fn> };
     };
-    return { run: () => handler('goal', ctx), ctx };
+    return { run: () => handler('goal', ctx), ctx, complete };
   };
 
-  it('cancels when the loader is aborted', async () => {
-    const { run, ctx } = setup('tui', async () => ({ text: null }));
+  it('runs generation through the loader and opens the editor with the result', async () => {
+    const { run, ctx, complete } = setup('tui', { complete: async () => textResponse('TUI prompt') });
     await run();
+    expect(ctx.ui.custom).toHaveBeenCalledOnce();
+    expect(complete.mock.calls[0]?.[2].signal).toBeInstanceOf(AbortSignal);
+    expect(ctx.ui.editor).toHaveBeenCalledWith('Edit handoff prompt', expect.stringContaining('TUI prompt'));
+  });
+
+  it('cancels when the loader is aborted', async () => {
+    let signal: AbortSignal | undefined;
+    const { run, ctx } = setup('tui', {
+      // Never settles on its own; only the abort ends it, like a real in-flight request.
+      complete: (_m, _r, options) =>
+        new Promise((resolve) => {
+          signal = options.signal;
+          signal?.addEventListener('abort', () => resolve({ stopReason: 'aborted', content: [] }));
+        }),
+      onComponent: (c) => c.handleInput?.('\x1b'),
+    });
+    await run();
+    expect(signal?.aborted).toBe(true);
     expect(ctx.ui.notify).toHaveBeenCalledWith('Cancelled', 'info');
     expect(ctx.ui.editor).not.toHaveBeenCalled();
   });
 
   it('reports generation errors', async () => {
-    const { run, ctx } = setup('tui', async () => ({ text: null, error: 'boom' }));
+    const { run, ctx } = setup('tui', {
+      complete: async () => ({ stopReason: 'error', errorMessage: 'boom', content: [] }),
+    });
     await run();
     expect(ctx.ui.notify).toHaveBeenCalledWith('Handoff failed: boom', 'error');
+    expect(ctx.ui.editor).not.toHaveBeenCalled();
+  });
+
+  it('reports a rejected completion instead of hanging', async () => {
+    const { run, ctx } = setup('tui', {
+      complete: async () => {
+        throw new Error('network down');
+      },
+    });
+    await run();
+    expect(ctx.ui.notify).toHaveBeenCalledWith('Handoff failed: network down', 'error');
+    expect(ctx.ui.editor).not.toHaveBeenCalled();
+  });
+
+  it('reports an empty response', async () => {
+    const { run, ctx } = setup('tui', { complete: async () => ({ stopReason: 'stop', content: [] }) });
+    await run();
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('Handoff failed: No text in response'), 'error');
+    expect(ctx.ui.editor).not.toHaveBeenCalled();
   });
 
   it('treats an undefined custom() result as cancelled instead of crashing', async () => {
-    const { run, ctx } = setup('tui', async () => undefined);
+    const { run, ctx } = setup('tui', { custom: async () => undefined });
     await run();
     expect(ctx.ui.notify).toHaveBeenCalledWith('Cancelled', 'info');
   });
 
   it('generates without custom() in RPC mode and cancels when the editor is dismissed', async () => {
-    const { run, ctx } = setup('rpc', async () => undefined);
+    const { run, ctx } = setup('rpc');
     await run();
     expect(ctx.ui.custom).not.toHaveBeenCalled();
     expect(ctx.ui.editor).toHaveBeenCalledWith('Edit handoff prompt', expect.stringContaining('RPC prompt'));

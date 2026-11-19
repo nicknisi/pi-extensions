@@ -598,6 +598,21 @@ describe('config persistence', () => {
     error.mockRestore();
   });
 
+  it('saves defaults over malformed member.council values, keeping metadata from valid entries', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    writeConfig({ member: { council: 'nope' } });
+    await saveCouncilDefaults(selection);
+    expect(loadCouncil(dir, true).member.council.map((m) => m.model)).toEqual(selection.models);
+    writeConfig({ member: { council: [null, 'x', { model: fable, systemPrompt: 'Keep me.', label: 'Skeptic' }] } });
+    await saveCouncilDefaults(selection);
+    expect(loadCouncil(dir, true).member.council[0]).toMatchObject({
+      model: fable,
+      systemPrompt: 'Keep me.',
+      label: 'Skeptic',
+    });
+    error.mockRestore();
+  });
+
   it('updates symlink targets without replacing links and refuses to overwrite malformed config', async () => {
     const target = join(dir, 'real-config.json');
     writeFileSync(target, '{"extra":true}');

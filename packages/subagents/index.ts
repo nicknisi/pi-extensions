@@ -70,7 +70,15 @@ import { backgroundNotice, MAX_TASK_OUTPUT_CHARS } from './background.js';
 import { mergeFleet, scopeFleetRuns, type FleetScope } from './fleet.js';
 import { createCachedArtifactReader } from './artifact-cache.js';
 import { findLastDispatch, planDispatch } from './dispatch-plan.js';
-import { buildHunkPatch, mapLimit, selectPendingPatches, type PatchFileRef } from './patch-staging.js';
+import {
+  buildHunkPatch,
+  loadPatchState,
+  mapLimit,
+  recordPatchDecision,
+  selectPendingPatches,
+  type PatchFileRef,
+  type PatchState,
+} from './patch-staging.js';
 import {
   applyProfile,
   discoverProfiles,
@@ -736,10 +744,6 @@ class FleetOverlay implements Component, Focusable {
 // to ~/.pi/agent/subagent-patches/state.json (or $PI_SUBAGENTS_DIR/patches/) so
 // /patches survives restart.
 
-interface PatchState {
-  version: 1;
-  decisions: Record<string, { decision: 'applied' | 'discarded'; at: number }>;
-}
 interface PatchEntry {
   runId: string;
   patchPath: string;
@@ -752,29 +756,6 @@ interface PatchEntry {
 }
 
 const PATCH_DIFF_CAP = 2000;
-
-function loadPatchState(): PatchState {
-  try {
-    const j = JSON.parse(fs.readFileSync(path.join(patchesStateDir(), 'state.json'), 'utf8')) as Partial<PatchState>;
-    if (j && j.decisions) return { version: 1, decisions: j.decisions };
-  } catch {
-    // missing/corrupt state — start fresh
-  }
-  return { version: 1, decisions: {} };
-}
-
-function savePatchState(state: PatchState): void {
-  try {
-    const dir = patchesStateDir();
-    const file = path.join(dir, 'state.json');
-    fs.mkdirSync(dir, { recursive: true });
-    const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
-    fs.renameSync(tmp, file);
-  } catch {
-    // best-effort persistence; a lost decision just means the patch re-appears
-  }
-}
 
 /** Pre-flight WITHOUT applying: `git apply --check`. Stale = a modified (non-created) target no longer exists in the working tree. */
 async function stampPatch(
@@ -1001,8 +982,7 @@ class PatchesOverlay implements Component, Focusable {
   }
 
   private setDecision(entry: PatchEntry, decision: 'applied' | 'discarded'): void {
-    this.state.decisions[entry.patchPath] = { decision, at: Date.now() };
-    savePatchState(this.state);
+    this.state = recordPatchDecision(patchesStateDir(), entry.patchPath, decision);
     this.patches = this.patches.filter((p) => p.patchPath !== entry.patchPath);
     if (this.diff?.patchPath === entry.patchPath) this.diff = null;
   }
@@ -2003,8 +1983,10 @@ export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = 
   pi.registerCommand('patches', {
     description: 'Staging area for worktree-subagent patches: pre-flight, apply, apply a hunk, or discard',
     handler: async (_args, ctx) => {
-      const state = loadPatchState();
-      const pending = await collectPatches(pi, ctx.cwd, state);
+      let pending = await collectPatches(pi, ctx.cwd, loadPatchState(patchesStateDir()));
+      // Re-read after the (slow) pre-flight: another pi process may have decided some meanwhile.
+      const state = loadPatchState(patchesStateDir());
+      pending = pending.filter((p) => !state.decisions[p.patchPath]);
       if (!ctx.hasUI) {
         postText(
           pi,

@@ -462,6 +462,7 @@ export default function artifacts(pi: ExtensionAPI) {
       const content = resolved.content;
 
       const { renderHtmlDocument, renderMarkdownDocument } = await loadTemplates();
+      if (signal?.aborted) return errResult(`${action} was cancelled`, { slug, title, kind });
       const html =
         kind === 'html' ? renderHtmlDocument(title, slug, content) : renderMarkdownDocument(title, slug, content);
 

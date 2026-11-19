@@ -45,6 +45,20 @@ describe('normalizeReadPath', () => {
     expect(normalizeReadPath('~/nonexistent-dyn/a', '/cwd')).toBe(join(homedir(), 'nonexistent-dyn/a'));
     expect(normalizeReadPath('rel/a', '/nonexistent-cwd')).toBe('/nonexistent-cwd/rel/a');
   });
+
+  it('converts Unicode spaces to ASCII like pi read tool', () => {
+    expect(normalizeReadPath('/nonexistent\u00A0dir/a\u3000b', '/cwd')).toBe('/nonexistent dir/a b');
+  });
+
+  it('does not let a Unicode-space lookalike match a registered skill path', () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'dyn-')));
+    const registered = join(dir, 'a\u00A0b', 'SKILL.md');
+    const lookalike = join(dir, 'a b', 'SKILL.md');
+    const allow = registeredSkillPaths(fakePi([registered]).pi);
+    // The read tool opens `a b/SKILL.md` for this input, which is not registered.
+    expect(normalizeReadPath(registered, '/')).toBe(lookalike);
+    expect(allow.has(normalizeReadPath(registered, '/'))).toBe(false);
+  });
 });
 
 function fakePi(skillPaths: string[]) {

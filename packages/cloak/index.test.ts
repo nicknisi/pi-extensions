@@ -137,6 +137,42 @@ describe('tool_result hook', () => {
     expect(other).toBeUndefined();
   });
 
+  it('resolves saved shell-output sources against the original command cwd', async () => {
+    writeConfig({
+      patterns: [{ filePattern: join(dir, 'config/*.env'), cloakPattern: '^TOKEN=(.+)$', replace: 'TOKEN=' }],
+    });
+    const onToolResult = await loadExtension();
+    const fullOutputPath = join(dir, 'pi-bash-456.log');
+    await onToolResult(result('bash', 'TOKEN=abc', { command: 'cat config/app.env' }, { fullOutputPath }), {
+      cwd: dir,
+    });
+
+    const read = await onToolResult(result('read', 'TOKEN=abc', { path: fullOutputPath }), { cwd: '/' });
+    expect(read?.content[0]!.text).toBe('TOKEN=***');
+  });
+
+  it('cloaks multi-line patterns across consecutive grep lines from the same file', async () => {
+    writeConfig({
+      patterns: [
+        {
+          filePattern: '**/*.pem',
+          cloakPattern: { pattern: '-----BEGIN [A-Z ]+-----.*?-----END [A-Z ]+-----', flags: 's' },
+        },
+      ],
+    });
+    const onToolResult = await loadExtension();
+    const output = [
+      'keys/id.pem-1- -----BEGIN PRIVATE KEY-----',
+      'keys/id.pem:2: MIIEvSECRET',
+      'keys/id.pem-3- -----END PRIVATE KEY-----',
+      'src/a.ts:1: MIIEvSECRET',
+    ].join('\n');
+    const grep = await onToolResult(result('grep', output, { pattern: 'MIIEv', context: 1 }), { cwd: dir });
+    const text = grep?.content[0]!.text ?? '';
+    const block = '-----BEGIN PRIVATE KEY-----\nMIIEvSECRET\n-----END PRIVATE KEY-----';
+    expect(text.split('\n')).toEqual([`keys/id.pem-1- -${'*'.repeat(block.length - 1)}`, 'src/a.ts:1: MIIEvSECRET']);
+  });
+
   it('keeps read scoped to the rule file glob', async () => {
     writeConfig({ patterns: [envRule] });
     const onToolResult = await loadExtension();

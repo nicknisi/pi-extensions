@@ -426,8 +426,9 @@ function finishClaimedLetter(
   addr: string,
   claimToken: string,
   fileToken: string,
-  requeue: boolean,
+  mode: 'ack' | 'requeue' | 'discard',
 ): boolean {
+  const requeue = mode === 'requeue';
   assertPathSegment(addr, 'relay address');
   assertInboxClaimToken(claimToken);
   assertInboxFileToken(fileToken);
@@ -451,7 +452,8 @@ function finishClaimedLetter(
           }
         } else {
           // Persist proof before deleting the exact letter. Corrupt payloads are discarded without proof.
-          const raw = claim.readFile(fileToken);
+          // Rejected letters (mode 'discard') are deleted without proof.
+          const raw = mode === 'ack' ? claim.readFile(fileToken) : null;
           if (raw !== null) {
             let parsed: Letter | undefined;
             try {
@@ -504,12 +506,17 @@ function finishClaimedLetter(
 
 /** Permanently acknowledge/delete one claimed letter. Idempotent. */
 export function ackClaimedLetter(root: string, addr: string, claimToken: string, fileToken: string): boolean {
-  return finishClaimedLetter(root, addr, claimToken, fileToken, false);
+  return finishClaimedLetter(root, addr, claimToken, fileToken, 'ack');
+}
+
+/** Delete one rejected claimed letter WITHOUT writing delivery proof. Idempotent. */
+export function discardClaimedLetter(root: string, addr: string, claimToken: string, fileToken: string): boolean {
+  return finishClaimedLetter(root, addr, claimToken, fileToken, 'discard');
 }
 
 /** Atomically return one claimed letter to the current inbox. */
 export function requeueClaimedLetter(root: string, addr: string, claimToken: string, fileToken: string): boolean {
-  return finishClaimedLetter(root, addr, claimToken, fileToken, true);
+  return finishClaimedLetter(root, addr, claimToken, fileToken, 'requeue');
 }
 
 /** Retain exact acknowledgement proof for the mail retention window, including live sessions. */

@@ -1,6 +1,7 @@
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 type Auth = typeof import('./auth.js');
@@ -18,6 +19,9 @@ function writeStore(store: unknown) {
 }
 
 const readStore = () => JSON.parse(readFileSync(storePath, 'utf8'));
+const lockPath = () => `${storePath}.lock`;
+const deadPid = () => spawnSync(process.execPath, ['-e', '']).pid!;
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 beforeEach(async () => {
   storePath = join(mkdtempSync(join(tmpdir(), 'claude-design-')), 'credentials.json');
@@ -96,6 +100,65 @@ describe('freshAccessToken', () => {
     const tokens = await Promise.all([auth.freshAccessToken(), auth.freshAccessToken(), auth.freshAccessToken()]);
     expect(tokens).toEqual(['new', 'new', 'new']);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovers a fresh lock abandoned by a dead process', async () => {
+    writeStore({ accessToken: 'old', refreshToken: 'r', expiresAt: Date.now() - 1 });
+    writeFileSync(lockPath(), JSON.stringify({ pid: deadPid(), token: 'dead' }));
+    fetchMock.mockResolvedValue(tokenResponse({ access_token: 'new', refresh_token: 'r2' }));
+    await expect(auth.freshAccessToken()).resolves.toBe('new');
+    expect(existsSync(lockPath())).toBe(false);
+  });
+
+  it('does not break an old lock whose owner is still alive', async () => {
+    writeStore({ accessToken: 'old', refreshToken: 'r', expiresAt: Date.now() - 1 });
+    writeFileSync(lockPath(), JSON.stringify({ pid: process.pid, token: 'live' }));
+    const old = (Date.now() - 60_000) / 1000;
+    utimesSync(lockPath(), old, old);
+    fetchMock.mockResolvedValue(tokenResponse({ access_token: 'new', refresh_token: 'r2' }));
+    const pending = auth.freshAccessToken();
+    await sleep(350);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(JSON.parse(readFileSync(lockPath(), 'utf8'))).toMatchObject({ token: 'live' });
+    writeFileSync(lockPath(), '');
+    utimesSync(lockPath(), old, old); // unowned + old => stale; lets the waiter proceed
+    await expect(pending).resolves.toBe('new');
+  });
+
+  it('two waiters recovering the same abandoned lock refresh only once', async () => {
+    writeStore({ accessToken: 'old', refreshToken: 'r', expiresAt: Date.now() - 1 });
+    writeFileSync(lockPath(), JSON.stringify({ pid: deadPid(), token: 'dead' }));
+    let inFlight = 0;
+    let maxInFlight = 0;
+    fetchMock.mockImplementation(async () => {
+      maxInFlight = Math.max(maxInFlight, ++inFlight);
+      await sleep(50);
+      inFlight--;
+      return tokenResponse({ access_token: 'new', refresh_token: 'r2' });
+    });
+    vi.resetModules();
+    const other: Auth = await import('./auth.js');
+    const tokens = await Promise.all([
+      auth.freshAccessToken(),
+      other.freshAccessToken(),
+      auth.freshAccessToken(),
+      other.freshAccessToken(),
+    ]);
+    expect(tokens).toEqual(['new', 'new', 'new', 'new']);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(maxInFlight).toBe(1);
+    expect(readdirSync(dirname(storePath)).sort()).toEqual(['credentials.json']);
+  });
+
+  it('does not release a lock that another owner now holds', async () => {
+    writeStore({ accessToken: 'old', refreshToken: 'r', expiresAt: Date.now() - 1 });
+    const replacement = JSON.stringify({ pid: process.pid, token: 'replacement' });
+    fetchMock.mockImplementation(async () => {
+      writeFileSync(lockPath(), replacement);
+      return tokenResponse({ access_token: 'new', refresh_token: 'r2' });
+    });
+    await expect(auth.freshAccessToken()).resolves.toBe('new');
+    expect(readFileSync(lockPath(), 'utf8')).toBe(replacement);
   });
 
   it('throws when not logged in', async () => {

@@ -23,12 +23,21 @@ const ADR_DIR = join('docs', 'decisions');
 const ADR_FILE = /^\d{4}-.+\.md$/;
 const SECTION = 'decision_records';
 
+/** True only for a stat-able directory; EACCES etc. count as unavailable. */
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path, { throwIfNoEntry: false })?.isDirectory() ?? false;
+  } catch {
+    return false;
+  }
+}
+
 /** Walk up from `start` to the repo root (or filesystem root); first docs/decisions/ wins. */
 export function findAdrDir(start: string): string | null {
   let dir = start;
   for (;;) {
     const candidate = join(dir, ADR_DIR);
-    if (statSync(candidate, { throwIfNoEntry: false })?.isDirectory()) return candidate;
+    if (isDirectory(candidate)) return candidate;
     // `.git` is a directory in a checkout and a file in a worktree; either marks the repo root.
     if (existsSync(join(dir, '.git'))) return null;
     const parent = dirname(dir);

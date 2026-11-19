@@ -53,4 +53,13 @@ describe('sound spawn failures', () => {
     spawned[0]!.proc.emit('exit', 0, null);
     expect(onDone).toHaveBeenCalledOnce();
   });
+
+  it('does not report speech as done when say fails or is killed', () => {
+    const onDone = vi.fn();
+    speak('hello', 120, onDone);
+    spawned[0]!.proc.emit('exit', 1, null);
+    speak('hello', 120, onDone);
+    spawned[1]!.proc.emit('exit', null, 'SIGKILL');
+    expect(onDone).not.toHaveBeenCalled();
+  });
 });

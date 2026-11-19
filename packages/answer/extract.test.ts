@@ -65,6 +65,20 @@ describe('fallbackExtractQuestions', () => {
     expect(questions(text)).toEqual(['Which option do you want?']);
   });
 
+  it('accepts questions wrapped in closing Markdown emphasis', () => {
+    expect(questions('**Which database should I use?** Noted. _Ready to ship?_ Done.')).toEqual([
+      'Which database should I use?',
+      'Ready to ship?',
+    ]);
+  });
+
+  it('returns inline code unchanged while ignoring "?" only inside it', () => {
+    expect(questions('Should I rename `foo` to `bar`? Use `a ?? b` here. Is `x?` ok?')).toEqual([
+      'Should I rename `foo` to `bar`?',
+      'Is `x?` ok?',
+    ]);
+  });
+
   it('splits sentences and keeps trailing quotes', () => {
     expect(questions('Done. Is "foo" fine?" Next steps! Ready (yes?)')).toEqual(['Is "foo" fine?"', 'Ready (yes?)']);
   });

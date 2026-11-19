@@ -670,6 +670,30 @@ export default function (
     );
   }
 
+  /** Whether a successful assistant reply follows the latest journaled continuation. */
+  function continuationAnswered(entries: SessionEntry[], cycleId: string): boolean {
+    const journalIndex = entries
+      .map(
+        (entry) =>
+          entry.type === 'custom_message' &&
+          entry.customType === CONTINUATION_MESSAGE_TYPE &&
+          (entry.details as { cycleId?: string } | undefined)?.cycleId === cycleId,
+      )
+      .lastIndexOf(true);
+    return (
+      journalIndex >= 0 &&
+      entries
+        .slice(journalIndex + 1)
+        .some(
+          (entry) =>
+            entry.type === 'message' &&
+            entry.message.role === 'assistant' &&
+            entry.message.stopReason !== 'error' &&
+            entry.message.stopReason !== 'aborted',
+        )
+    );
+  }
+
   async function coordinate(ctx: ExtensionContext): Promise<void> {
     if (disposed || busy) return;
     const state = currentState(ctx);
@@ -912,7 +936,14 @@ export default function (
       }
       const state = currentState(ctx);
       if (state?.phase === 'ready-to-deliver') {
-        if (continuationJournaled(ctx, state.cycleId)) {
+        // A continuation journaled by an interrupted run (no reply, nothing queued
+        // or running here) still needs its turn: fall through to deliver()'s resume.
+        const resumable =
+          deliveryRequested !== state.cycleId &&
+          !continuationAnswered(branch(ctx), state.cycleId) &&
+          safeIsIdle(ctx) &&
+          !safeHasPendingMessages(ctx);
+        if (continuationJournaled(ctx, state.cycleId) && !resumable) {
           acknowledgeDelivery(ctx);
           ctx.ui.notify('self-compact: the continuation was already delivered.', 'info');
           return;
@@ -1068,17 +1099,7 @@ export default function (
             (entry.details as { cycleId?: string } | undefined)?.cycleId === cycleId,
         )
         .lastIndexOf(true);
-      const answered =
-        journalIndex >= 0 &&
-        entries
-          .slice(journalIndex + 1)
-          .some(
-            (entry) =>
-              entry.type === 'message' &&
-              entry.message.role === 'assistant' &&
-              entry.message.stopReason !== 'error' &&
-              entry.message.stopReason !== 'aborted',
-          );
+      const answered = continuationAnswered(entries, cycleId);
       const landed = entries.some(
         (entry) =>
           entry.type === 'compaction' &&

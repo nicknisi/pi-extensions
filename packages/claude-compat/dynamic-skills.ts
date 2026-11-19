@@ -32,9 +32,10 @@
 
 import { stripFrontmatter, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { exec as execCb } from 'node:child_process';
-import { readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * Matches both dynamic-command forms, mirroring Claude Code:
@@ -95,15 +96,49 @@ function canonical(path: string): string {
   }
 }
 
+// Replicated from pi 1.5.2 utils/paths.js + core/tools/path-utils.js (not exported).
+const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
+function normalizeWindowsShellPath(filePath: string): string {
+  if (!filePath.startsWith('/') || filePath.startsWith('//') || filePath.includes('\\')) return filePath;
+  const match = filePath.match(/^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i);
+  if (!match) return filePath;
+  return `${match[1]!.toUpperCase()}:\\${match[2]?.replaceAll('/', '\\') ?? ''}`;
+}
+
+function piNormalizePath(input: string, readTool: boolean): string {
+  let p = input;
+  if (readTool) {
+    p = p.replace(UNICODE_SPACES, ' ');
+    if (p.startsWith('@')) p = p.slice(1);
+  }
+  if (process.platform === 'win32') p = normalizeWindowsShellPath(p);
+  if (p === '~') return homedir();
+  if (p.startsWith('~/') || (process.platform === 'win32' && p.startsWith('~\\'))) return join(homedir(), p.slice(2));
+  if (p.startsWith('file://')) return fileURLToPath(p);
+  return p;
+}
+
+/** Mirror of pi's resolveReadPath: the file the read tool actually opens. */
+function piResolveReadPath(path: string, cwd: string): string {
+  const p = piNormalizePath(path, true);
+  const resolved = isAbsolute(p) ? resolve(p) : resolve(piNormalizePath(cwd, false), p);
+  if (existsSync(resolved)) return resolved;
+  const curly = (s: string) => s.replace(/'/g, '\u2019');
+  const nfd = resolved.normalize('NFD');
+  for (const variant of [resolved.replace(/ (AM|PM)\./gi, '\u202F$1.'), nfd, curly(resolved), curly(nfd)]) {
+    if (variant !== resolved && existsSync(variant)) return variant;
+  }
+  return resolved;
+}
+
 /**
- * Resolve a read-tool path the way pi's read tool does: strip a leading `@`,
- * expand `~`, resolve against cwd, then canonicalize symlinks.
+ * Resolve a read-tool path exactly as pi's read tool does (Unicode spaces →
+ * ASCII, strip `@`, expand `~`, macOS filename variants), then canonicalize
+ * symlinks, so the allowlist checks the file that was actually read.
  */
 export function normalizeReadPath(path: string, cwd: string): string {
-  let p = path.startsWith('@') ? path.slice(1) : path;
-  if (p === '~') p = homedir();
-  else if (p.startsWith('~/')) p = join(homedir(), p.slice(2));
-  return canonical(resolve(cwd, p));
+  return canonical(piResolveReadPath(path, cwd));
 }
 
 /**

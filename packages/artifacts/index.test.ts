@@ -56,3 +56,22 @@ it('open reports the stored kind, not a markdown default', async () => {
   const res = await tool.execute('id', { action: 'open', title: 'Page' }, undefined, undefined, ctx);
   expect(res.details.kind).toBe('html');
 });
+
+it('create stops without writing or opening when the signal is aborted', async () => {
+  const { openInBrowser, artifactExists } = await import('./utils.js');
+  vi.mocked(openInBrowser).mockClear();
+  const controller = new AbortController();
+  controller.abort();
+  const ctx = { ui: { setStatus: () => {}, theme: { fg: (_: string, s: string) => s } } };
+  const res = (await tool.execute(
+    'id',
+    { action: 'create', title: 'Gone', kind: 'markdown', content: '# hi' },
+    controller.signal,
+    undefined,
+    ctx,
+  )) as unknown as { isError?: boolean; content: { text: string }[] };
+  expect(res.isError).toBe(true);
+  expect(res.content[0]!.text).toMatch(/cancelled/);
+  expect(artifactExists('gone')).toBe(false);
+  expect(openInBrowser).not.toHaveBeenCalled();
+});

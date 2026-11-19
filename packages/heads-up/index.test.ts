@@ -17,6 +17,12 @@ import { readStore } from './config.js';
 import headsUp, { Panel, type View } from './index.js';
 import { parse } from './parse.js';
 
+// Wrap readStore so tests can count store reads; behavior is unchanged.
+vi.mock('./config.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./config.js')>();
+  return { ...actual, readStore: vi.fn(actual.readStore) };
+});
+
 const NOTE = `learn: The agent skipped the migration test because it needs a live database.
 tag: Heads up
 explain:
@@ -94,6 +100,8 @@ function harness(reply = NOTE, registry: Record<string, unknown> = {}, sessionMa
     },
   } as unknown as ExtensionContext;
 
+  const storeReads = vi.mocked(readStore);
+  storeReads.mockClear();
   headsUp(pi);
   const fire = (name: string, event: unknown = {}) => handlers.get(name)?.(event, ctx);
   const band = () => widget?.({}, theme).render(200).join('\n');
@@ -119,6 +127,7 @@ function harness(reply = NOTE, registry: Record<string, unknown> = {}, sessionMa
     renderers,
     sendUserMessage,
     sessionManager,
+    storeReads,
   };
 }
 
@@ -511,7 +520,17 @@ describe('heads-up', () => {
     await h.commands.get('heads-up')!('off', h.ctx);
     await h.fire('before_agent_start');
     for (let i = 0; i < 8; i += 1) await h.fire('tool_execution_start');
+    h.storeReads.mockClear();
+    // First tick finds the store off and starts the 300s cooldown.
     await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.storeReads).toHaveBeenCalledTimes(1);
+    // Ticks inside the cooldown skip the store entirely.
+    await vi.advanceTimersByTimeAsync(290_000);
+    expect(h.storeReads).toHaveBeenCalledTimes(1);
+    // The first tick past the cooldown re-reads exactly once.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.storeReads).toHaveBeenCalledTimes(2);
+    expect(h.complete).not.toHaveBeenCalled();
     await h.commands.get('heads-up')!('on', h.ctx);
     await vi.advanceTimersByTimeAsync(10_000);
     expect(h.complete).toHaveBeenCalledTimes(1);
