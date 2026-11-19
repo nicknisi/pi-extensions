@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   parseThreshold,
   resolveThresholds,
+  resolveThresholdsWithDefaults,
   resolveTokens,
   tokensToPercent,
   type FlagInputs,
@@ -166,5 +167,34 @@ describe('resolveThresholds', () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('expected invalid');
     expect(result.error).toContain('--compact-prompt');
+  });
+});
+
+describe('resolveThresholdsWithDefaults', () => {
+  const none = { softAt: undefined, at: undefined, buffer: undefined };
+
+  it('uses the token defaults when they fit the window', () => {
+    const result = resolveThresholdsWithDefaults(none, 1_000_000);
+    if (!result.ok) throw new Error(result.error);
+    expect(result.thresholds).toMatchObject({ softTokens: 225000, warningTokens: 250000, hardTokens: 270000 });
+  });
+
+  it.each([200000, 272000, 128000])('falls back to 60%%/70%%/10%% on a %d window', (window) => {
+    const result = resolveThresholdsWithDefaults(none, window);
+    if (!result.ok) throw new Error(result.error);
+    expect(result.thresholds.softTokens).toBe(Math.round(0.6 * window));
+    expect(result.thresholds.warningTokens).toBe(Math.round(0.7 * window));
+    expect(result.thresholds.hardTokens).toBe(Math.round(0.8 * window));
+  });
+
+  it('fills only unsupplied flags with the fallback and never replaces explicit values', () => {
+    const result = resolveThresholdsWithDefaults({ ...none, buffer: '0' }, 200000);
+    if (!result.ok) throw new Error(result.error);
+    expect(result.thresholds.hardTokens).toBe(result.thresholds.warningTokens);
+  });
+
+  it('fails closed when explicit flags cannot fit', () => {
+    expect(resolveThresholdsWithDefaults({ softAt: '225k', at: '250k', buffer: '20k' }, 200000).ok).toBe(false);
+    expect(resolveThresholdsWithDefaults({ ...none, at: '250k' }, 200000).ok).toBe(false);
   });
 });

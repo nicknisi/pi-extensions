@@ -20,7 +20,15 @@
 
 import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent';
 import type { AutocompleteItem } from '@earendil-works/pi-tui';
-import { load, spinnerFrames, STATES, type ComposerConfig, type LoadResult, type StateName } from './config.js';
+import {
+  load,
+  loadFrom,
+  spinnerFrames,
+  STATES,
+  type ComposerConfig,
+  type LoadResult,
+  type StateName,
+} from './config.js';
 import { setDataListener, usageHealth } from './data.js';
 import { Composer } from './editor.js';
 import { disableFocusTracking, enableFocusTracking, paneFocused } from './focus.js';
@@ -44,11 +52,21 @@ export function streamedChars(content: unknown): number {
   }
   return n;
 }
+
+/** Characters one streaming event adds (text, thinking, or tool-call argument deltas). */
+export function deltaChars(event: unknown): number {
+  const e = event as { type?: unknown; delta?: unknown } | null | undefined;
+  if (e?.type !== 'text_delta' && e?.type !== 'thinking_delta' && e?.type !== 'toolcall_delta') return 0;
+  return typeof e.delta === 'string' ? e.delta.length : 0;
+}
 const CONTEXT_COLORS = new Set(['success', 'accent', 'warning', 'error', 'dim']);
 
 export default function composer(pi: ExtensionAPI) {
   const rt: Runtime = createRuntime();
-  let loaded: LoadResult = load();
+  // Defaults only: session_start reads composer.json (and reports its errors).
+  let loaded: LoadResult = loadFrom(undefined);
+  /** Characters streamed so far in the current assistant message. */
+  let streamed = 0;
   /** `/composer style <name>`: lasts until pi exits or `/composer style`. */
   let sessionStyle: StyleName | undefined;
   let animTimer: ReturnType<typeof setInterval> | undefined;
@@ -281,6 +299,9 @@ export default function composer(pi: ExtensionAPI) {
     if (ctx.mode !== 'tui') return;
     agentRunning = false;
     endBusy();
+    // turn_end can be skipped, so the shimmer must not outlive the run.
+    stopShimmer();
+    ctx.ui.setWorkingMessage();
   });
 
   pi.on('turn_start', async (_event, ctx) => {
@@ -318,17 +339,30 @@ export default function composer(pi: ExtensionAPI) {
   // Live tokens: ~4 characters per token of what has actually streamed. Providers
   // may report usage early (or only at the end), so the exact figure is used
   // once the message ends.
-  pi.on('message_update', async (event) => {
-    const message = event.message as { role?: string; content?: unknown };
-    if (message.role !== 'assistant') return;
-    noteTokens(rt, rt.tokensDone + Math.ceil(streamedChars(message.content) / 4));
+  // Count each event's delta rather than re-measuring the whole partial message,
+  // which would be quadratic over a large streamed tool call.
+  pi.on('message_start', async (event, ctx) => {
+    if (ctx.mode !== 'tui') return;
+    if ((event.message as { role?: string }).role === 'assistant') streamed = 0;
   });
 
-  pi.on('message_end', async (event) => {
+  pi.on('message_update', async (event, ctx) => {
+    if (ctx.mode !== 'tui') return;
+    const message = event.message as { role?: string };
+    if (message.role !== 'assistant') return;
+    const added = deltaChars(event.assistantMessageEvent);
+    if (added === 0) return;
+    streamed += added;
+    noteTokens(rt, rt.tokensDone + Math.ceil(streamed / 4));
+  });
+
+  pi.on('message_end', async (event, ctx) => {
+    if (ctx.mode !== 'tui') return;
     const message = event.message as { role?: string; content?: unknown; usage?: { output?: number } };
     if (message.role !== 'assistant') return;
     noteTokens(rt, rt.tokensDone + (message.usage?.output || Math.ceil(streamedChars(message.content) / 4)));
     rt.tokensDone = rt.tokens;
+    streamed = 0;
   });
 
   pi.on('session_shutdown', async (_event, ctx) => {
@@ -407,6 +441,10 @@ export default function composer(pi: ExtensionAPI) {
       return options.filter((o) => o.startsWith(prefix)).map((o) => ({ value: o, label: o }));
     },
     handler: async (args, ctx) => {
+      if (ctx.mode !== 'tui') {
+        ctx.ui.notify('composer: only available in the interactive TUI', 'warning');
+        return;
+      }
       const [sub, name] = args.trim().split(/\s+/);
       if (sub === 'preview') {
         preview(ctx);

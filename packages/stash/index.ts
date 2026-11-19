@@ -185,14 +185,17 @@ export default function stash(pi: ExtensionAPI) {
     run(ctx, () => updateWidget(ctx));
   };
 
+  // Only the terminal UI has a real editor; RPC's getEditorText() is always ''.
+  const tui = (ctx: ExtensionContext) => ctx.hasUI && ctx.mode === 'tui';
+
   pi.on('session_start', async (_event, ctx) => {
-    if (ctx.hasUI) run(ctx, () => updateWidget(ctx));
+    if (tui(ctx)) run(ctx, () => updateWidget(ctx));
   });
 
   pi.registerShortcut('ctrl+s', {
     description: 'Stash / restore the typed message',
     handler: async (ctx) => {
-      if (!ctx.hasUI) return;
+      if (!tui(ctx)) return;
       const text = ctx.ui.getEditorText();
       if (text.trim().length === 0) {
         run(ctx, () =>
@@ -215,11 +218,21 @@ export default function stash(pi: ExtensionAPI) {
     },
   });
 
-  // After a message is submitted, auto-restore this session's most recent
+  // Where the last prompt came from. Runs started by other extensions
+  // (sendUserMessage, triggerTurn) must not pull a draft into the editor.
+  let lastInputSource: string | undefined;
+  pi.on('input', async (event) => {
+    lastInputSource = event.source;
+    return { action: 'continue' };
+  });
+
+  // After the user submits a message, auto-restore this session's most recent
   // stash into the now-empty editor (mirrors Claude Code's behavior). Drafts
   // stashed by other windows stay put until restored with ctrl+s.
-  pi.on('before_agent_start', async (_event, ctx) => {
-    if (!ctx.hasUI || ctx.ui.getEditorText().trim().length > 0) return;
+  pi.on('before_agent_start', async (event, ctx) => {
+    const typed = event.messageType === 'user' && lastInputSource === 'interactive';
+    lastInputSource = undefined;
+    if (!typed || !tui(ctx) || ctx.ui.getEditorText().trim().length > 0) return;
     const session = ctx.sessionManager.getSessionId();
     run(ctx, () =>
       restore(

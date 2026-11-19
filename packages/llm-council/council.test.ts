@@ -79,6 +79,7 @@ function harness(mode: ExtensionContext['mode'] = 'tui') {
   const ctx = {
     cwd: dir,
     isIdle: () => true,
+    isProjectTrusted: () => true,
     mode,
     hasUI: mode === 'tui' || mode === 'rpc',
     modelRegistry: { getAvailable: () => models },
@@ -322,6 +323,66 @@ describe('council selection and execution', () => {
     expect(spawn).not.toHaveBeenCalled();
   });
 
+  it('marks failed councils as tool errors while keeping details for the UI', async () => {
+    const h = harness();
+    spawn.mockResolvedValue({ ok: false, text: '', error: 'Provider unavailable' });
+    const allFailed = await h.run();
+    expect(allFailed).toMatchObject({ isError: true, details: { stage: 'error' } });
+    spawn.mockReset().mockResolvedValueOnce({ ok: true, text: 'Member answer' }).mockResolvedValue({
+      ok: false,
+      text: '',
+      error: 'Connection lost',
+    });
+    expect(await h.run()).toMatchObject({ isError: true, details: { stage: 'complete' } });
+    spawn.mockReset().mockResolvedValue({ ok: true, text: 'Answer' });
+    expect((await h.run()).isError).toBeUndefined();
+
+    const header = (isError: boolean) =>
+      h.tool.renderCall({ question: 'Q' }, theme, { isPartial: false, isError, state: {} }).render(80).join('\n');
+    expect(header(true)).toContain('✗');
+    expect(header(false)).toContain('✓');
+    const errorTree = h.tool
+      .renderResult({ content: allFailed.content, details: allFailed.details }, { expanded: false }, theme, {
+        state: {},
+        keyText: () => '',
+      })
+      .render(100)
+      .join('\n');
+    expect(errorTree).toContain('Not run');
+    expect(errorTree).not.toContain('Waiting for members');
+  });
+
+  it('stops the header spinner once its tool call is no longer running', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+      let finish!: (value: unknown) => void;
+      spawn.mockImplementation(() => new Promise((resolve) => (finish = resolve)));
+      const renderCtx = { isPartial: true, toolCallId: 'test', state: {} as any, invalidate: vi.fn() };
+      // Not running yet (e.g. a restored call with no result): no interval.
+      h.tool.renderCall({ question: 'Q' }, theme, renderCtx);
+      expect(renderCtx.state.spinnerInterval).toBeUndefined();
+      const running = h.run();
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
+      h.tool.renderCall({ question: 'Q' }, theme, renderCtx);
+      expect(renderCtx.state.spinnerInterval).toBeDefined();
+      vi.advanceTimersByTime(200);
+      expect(renderCtx.invalidate).toHaveBeenCalled();
+      // The component is dropped without a final render; the interval must still stop.
+      finish({ ok: true, text: 'Answer' });
+      spawn.mockResolvedValue({ ok: true, text: 'Answer' });
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
+      await running;
+      vi.advanceTimersByTime(200);
+      expect(renderCtx.state.spinnerInterval).toBeUndefined();
+      renderCtx.invalidate.mockClear();
+      vi.advanceTimersByTime(1000);
+      expect(renderCtx.invalidate).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('uses configured defaults unchanged when no overrides are supplied', async () => {
     const h = harness();
     await h.run();
@@ -421,7 +482,7 @@ describe('council selection and execution', () => {
     expect(h.editor).not.toHaveBeenCalled();
     expect(spawn).not.toHaveBeenCalled();
     expect(restoreSelection(h.ctx)).toEqual(selection);
-    expect(loadCouncil(dir).member.council).toHaveLength(1);
+    expect(loadCouncil(dir, true).member.council).toHaveLength(1);
   });
 
   it('requires explicit confirmation to save defaults and guards non-TUI modes', async () => {
@@ -430,7 +491,7 @@ describe('council selection and execution', () => {
     h.confirm.mockResolvedValue(false);
     await h.commands.get('council')!('settings', h.ctx);
     expect(h.appendEntry).not.toHaveBeenCalled();
-    expect(loadCouncil(dir).member.council).toHaveLength(1);
+    expect(loadCouncil(dir, true).member.council).toHaveLength(1);
     const rpc = harness('rpc');
     await rpc.commands.get('council')!('', rpc.ctx);
     expect(rpc.custom).not.toHaveBeenCalled();
@@ -457,11 +518,14 @@ describe('config persistence', () => {
       member: { tools: ['read'] },
       chairman: { systemPrompt: 'Synthesize.' },
     });
-    expect(loadCouncil(dir).member.council.map((m) => m.systemPrompt)).toEqual(['Original persona.', 'New persona.']);
-    expect(loadCouncil(dir).chairman.displayName).toBeUndefined();
+    expect(loadCouncil(dir, true).member.council.map((m) => m.systemPrompt)).toEqual([
+      'Original persona.',
+      'New persona.',
+    ]);
+    expect(loadCouncil(dir, true).chairman.displayName).toBeUndefined();
     writeConfig({ chairman: { model: apiAstra } }, join(dir, '.pi/configs/llm-council.json'));
-    expect(loadCouncil(dir).chairman.model).toBe(apiAstra);
-    expect(applySelection(loadCouncil(dir), selection).chairman.model).toBe(fable);
+    expect(loadCouncil(dir, true).chairman.model).toBe(apiAstra);
+    expect(applySelection(loadCouncil(dir, true), selection).chairman.model).toBe(fable);
   });
 
   it('preserves personas and labels when a bare configured model ID becomes canonical', async () => {
@@ -471,32 +535,67 @@ describe('config persistence', () => {
       },
       chairman: { model: 'claude-fable-5-1', displayName: 'Chair Fable' },
     });
-    expect(applySelection(loadCouncil(dir), selection).member.council[0]).toMatchObject({
+    expect(applySelection(loadCouncil(dir, true), selection).member.council[0]).toMatchObject({
       model: fable,
       systemPrompt: 'Keep me.',
       label: 'Skeptic',
     });
     await saveCouncilDefaults(selection);
-    expect(loadCouncil(dir).member.council[0]).toMatchObject({
+    expect(loadCouncil(dir, true).member.council[0]).toMatchObject({
       model: fable,
       systemPrompt: 'Keep me.',
       label: 'Skeptic',
       displayName: 'Fable',
     });
-    expect(loadCouncil(dir).chairman.displayName).toBe('Chair Fable');
+    expect(loadCouncil(dir, true).chairman.displayName).toBe('Chair Fable');
   });
 
   it('preserves default thinking when saving and reloading global or project settings', async () => {
     await saveCouncilDefaults({ ...selection, memberThinking: null, chairmanThinking: null });
-    expect(loadCouncil(dir).member.thinking).toBeNull();
-    expect(loadCouncil(dir).chairman.thinking).toBeNull();
+    expect(loadCouncil(dir, true).member.thinking).toBeNull();
+    expect(loadCouncil(dir, true).chairman.thinking).toBeNull();
     writeConfig({ member: { thinking: 'high' }, chairman: { thinking: 'high' } });
     writeConfig(
       { member: { thinking: null }, chairman: { thinking: null } },
       join(dir, '.pi/configs/llm-council.json'),
     );
-    expect(loadCouncil(dir).member.thinking).toBeNull();
-    expect(loadCouncil(dir).chairman.thinking).toBeNull();
+    expect(loadCouncil(dir, true).member.thinking).toBeNull();
+    expect(loadCouncil(dir, true).chairman.thinking).toBeNull();
+  });
+
+  it('ignores project config for untrusted projects', () => {
+    writeConfig(
+      { member: { council: [{ model: astra }], tools: ['bash', 'write'] }, chairman: { model: apiAstra } },
+      join(dir, '.pi/configs/llm-council.json'),
+    );
+    expect(loadCouncil(dir, true)).toMatchObject({
+      member: { council: [{ model: astra }], tools: ['bash', 'write'] },
+      chairman: { model: apiAstra },
+    });
+    expect(loadCouncil(dir, false)).toMatchObject({
+      member: { council: [{ model: fable }], tools: ['read'] },
+      chairman: { model: fable },
+    });
+    const h = harness();
+    Object.assign(h.ctx, { isProjectTrusted: () => false });
+    return h.run().then(() => {
+      expect(spawn.mock.calls[0]![0]).toMatchObject({ model: fable, tools: ['read'] });
+    });
+  });
+
+  it('tolerates malformed config shapes instead of throwing', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const project = join(dir, '.pi/configs/llm-council.json');
+    writeConfig(null, project);
+    expect(loadCouncil(dir, true).member.council.map((m) => m.model)).toEqual([fable]);
+    writeConfig({ member: { council: 'nope' } }, project);
+    expect(loadCouncil(dir, true).member.council.map((m) => m.model)).toEqual([fable]);
+    writeConfig({ member: { council: [null, { label: 'x' }, { model: '' }, { model: astra }] } }, project);
+    expect(loadCouncil(dir, true).member.council).toEqual([expect.objectContaining({ model: astra, label: '1' })]);
+    writeConfig([1, 2]);
+    expect(loadCouncil(dir, true).member.council.map((m) => m.model)).toEqual([astra]);
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
   });
 
   it('updates symlink targets without replacing links and refuses to overwrite malformed config', async () => {

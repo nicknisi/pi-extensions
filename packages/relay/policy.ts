@@ -72,7 +72,7 @@ export class OutboundPolicy {
   }
 }
 
-/** Inbound guard: PI_RELAY_INBOUND=refuse drops all peer mail. */
+/** Inbound guard: PI_RELAY_INBOUND=refuse never claims peer mail; it stays queued on disk, undelivered. */
 export function inboundAccepts(env: string | undefined = process.env.PI_RELAY_INBOUND): boolean {
   return env !== 'refuse';
 }

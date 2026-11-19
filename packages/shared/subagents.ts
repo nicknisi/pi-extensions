@@ -746,7 +746,13 @@ export function createSubagentRuntime(options: {
   let modelRuntimePromise: Promise<ModelRuntime> | undefined;
 
   function modelRuntime(): Promise<ModelRuntime> {
-    modelRuntimePromise ??= piSdk().then((sdk) => sdk.ModelRuntime.create());
+    // Don't cache a rejection: one transient failure must not poison every later spawn.
+    modelRuntimePromise ??= piSdk()
+      .then((sdk) => sdk.ModelRuntime.create())
+      .catch((err: unknown) => {
+        modelRuntimePromise = undefined;
+        throw err;
+      });
     return modelRuntimePromise;
   }
 
@@ -798,6 +804,13 @@ export function createSubagentRuntime(options: {
     } catch {
       // artifact persistence is best-effort; never fail a run over it
     }
+  }
+
+  /** Fail a run and persist it, so its artifact never stays 'queued'/'running' on disk. */
+  function failRun(record: RunRecord, result: SpawnFailure): SpawnFailure {
+    markFailed(record, result);
+    persist(record);
+    return result;
   }
 
   function recordRun(record: RunRecord): void {
@@ -863,7 +876,7 @@ export function createSubagentRuntime(options: {
 
     // Ecosystem recursion guard — honored, not namespaced. See header.
     if (process.env.PI_SUBAGENT_DEPTH || process.env.PI_SUBAGENT_CHILD) {
-      return markFailed(
+      return failRun(
         record,
         fail(
           runId,
@@ -878,7 +891,7 @@ export function createSubagentRuntime(options: {
       opts.thinkingLevel !== undefined &&
       !THINKING_LEVELS.includes(opts.thinkingLevel as (typeof THINKING_LEVELS)[number])
     ) {
-      return markFailed(
+      return failRun(
         record,
         fail(
           runId,
@@ -913,19 +926,17 @@ export function createSubagentRuntime(options: {
     try {
       sdk = await piSdk();
     } catch (err) {
-      const result = markFailed(
+      return failRun(
         record,
         fail(runId, 'crashed', `Cannot load pi: ${err instanceof Error ? err.message : String(err)}`, startedAt),
       );
-      persist(record);
-      return result;
     }
     let cwd = opts.cwd ?? process.cwd();
     const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
     const { parent, error: parentError } = parentState();
     if (parentError) {
-      return markFailed(
+      return failRun(
         record,
         fail(runId, 'crashed', `${parentError}; refusing to fall back to the default provider`, startedAt),
       );
@@ -941,14 +952,14 @@ export function createSubagentRuntime(options: {
     } else if (opts.worktree) {
       const repoRoot = findRepoRoot(cwd);
       if (!repoRoot) {
-        return markFailed(
+        return failRun(
           record,
           fail(runId, 'crashed', `worktree requested but ${cwd} is not inside a git repository`, startedAt),
         );
       }
       const added = addWorktree(repoRoot, runId);
       if ('error' in added) {
-        return markFailed(record, fail(runId, 'crashed', `worktree setup failed: ${added.error}`, startedAt));
+        return failRun(record, fail(runId, 'crashed', `worktree setup failed: ${added.error}`, startedAt));
       }
       record.worktree = { path: added.path, repoRoot };
       createdWorktree = true;
@@ -1070,8 +1081,10 @@ export function createSubagentRuntime(options: {
         settingsManager: sdk.SettingsManager.inMemory(),
       }));
     } catch (err) {
-      cleanupFailedSetup(err instanceof Error ? err.message : String(err));
-      throw err;
+      // spawn() never rejects: a setup throw settles as a typed crash.
+      const error = err instanceof Error ? err.message : String(err);
+      cleanupFailedSetup(error);
+      return fail(runId, 'crashed', error, startedAt);
     }
 
     let abortReason: string | undefined;

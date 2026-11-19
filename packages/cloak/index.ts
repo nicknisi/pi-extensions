@@ -2,7 +2,7 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 
 type CloakPatternSpec =
   | string
@@ -54,7 +54,8 @@ function missingConfigMessage(configPath: string): string {
   return `pi-cloak config not found at ${configPath}`;
 }
 
-const CLOAKED_TOOLS = new Set(['read', 'bash', 'grep']);
+const CLOAKED_TOOLS = new Set(['read', 'bash', 'powershell', 'grep']);
+const SHELL_TOOLS = new Set(['bash', 'powershell']);
 
 const DEFAULT_CONFIG_PATH = join(getAgentDir(), 'cloak.json');
 const DEFAULT_CONFIG: CloakConfig = {
@@ -88,12 +89,16 @@ function stripLeadingAt(value: string): string {
   return value.startsWith('@') ? value.slice(1) : value;
 }
 
+function stripLeadingDotSlash(value: string): string {
+  return value.replace(/^(?:\.\/)+/, '');
+}
+
 function escapeRegex(value: string): string {
   return value.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
 }
 
 function globToRegExp(glob: string): RegExp {
-  const normalized = normalizePath(glob);
+  const normalized = stripLeadingDotSlash(normalizePath(glob));
   let pattern = '^';
 
   for (let index = 0; index < normalized.length; index++) {
@@ -211,8 +216,18 @@ export function loadState(configPath: string = DEFAULT_CONFIG_PATH): RuntimeStat
 function getPathCandidates(rawPath: string, cwd: string): string[] {
   const cleanPath = normalizePath(stripLeadingAt(rawPath));
   const absolutePath = normalizePath(resolve(cwd, expandHome(stripLeadingAt(rawPath))));
+  // cwd-relative form, so `config/secrets.json` also matches `/abs/cwd/config/secrets.json` and `./config/secrets.json`.
+  const relativePath = normalizeSlashes(relative(cwd, absolutePath));
+  const candidates = [
+    cleanPath,
+    stripLeadingDotSlash(cleanPath),
+    absolutePath,
+    basename(cleanPath),
+    basename(absolutePath),
+  ];
+  if (relativePath && !relativePath.startsWith('..') && !isAbsolute(relativePath)) candidates.push(relativePath);
 
-  return Array.from(new Set([cleanPath, absolutePath, basename(cleanPath), basename(absolutePath)]));
+  return Array.from(new Set(candidates));
 }
 
 function ruleMatchesPath(rule: CompiledCloakRule, rawPath: string, cwd: string): boolean {
@@ -387,8 +402,50 @@ export function cloakText(rawText: string, rawPaths: string | string[], cwd: str
   return changed ? updated : rawText;
 }
 
+// pi's grep tool prints `<path>:<n>: <text>` for matches and `<path>-<n>- <text>` for context lines.
+const GREP_LINE = /^(.*?)(?::\d+: |-\d+- )/;
+
+/**
+ * Cloak grep tool output line by line: each line's file path (relative to the searched directory) selects rules,
+ * and patterns run only on the text after the `<path>:<n>: ` prefix so `^` anchors at the file line's start.
+ * `inputPaths` (grep's `path` and `glob`) select rules for every line, as before.
+ */
+export function cloakGrepText(
+  rawText: string,
+  inputPaths: string[],
+  searchPath: string | undefined,
+  cwd: string,
+  state: RuntimeState,
+): string {
+  if (!state.config.enabled) return rawText;
+
+  let changed = false;
+  const lines = rawText.split('\n').map((line) => {
+    const prefix = GREP_LINE.exec(line);
+    let cloaked: string;
+    if (prefix && prefix[1]) {
+      const linePath = prefix[1];
+      const paths = [...inputPaths, linePath, join(searchPath ?? '.', linePath)];
+      cloaked = prefix[0] + cloakText(line.slice(prefix[0].length), paths, cwd, state);
+    } else {
+      cloaked = cloakText(line, inputPaths, cwd, state);
+    }
+    if (cloaked !== line) changed = true;
+    return cloaked;
+  });
+
+  return changed ? lines.join('\n') : rawText;
+}
+
 export default function (pi: ExtensionAPI) {
   let state = loadState();
+  // Truncated shell output is saved in full to a temp file; remember which paths selected rules for it, so a later
+  // read of that file is cloaked the same way. Keyed by absolute path.
+  const fullOutputSources = new Map<string, string[]>();
+  const withFullOutputSources = (paths: string[], cwd: string): string[] => {
+    const extra = paths.flatMap((path) => fullOutputSources.get(resolve(cwd, expandHome(stripLeadingAt(path)))) ?? []);
+    return extra.length > 0 ? [...paths, ...extra] : paths;
+  };
 
   const reloadConfig = () => {
     state = loadState();
@@ -396,6 +453,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on('session_start', async (_event, ctx) => {
     reloadConfig();
+    fullOutputSources.clear();
 
     if (state.error) {
       if (ctx.hasUI) ctx.ui.notify(state.error, 'warning');
@@ -435,10 +493,19 @@ export default function (pi: ExtensionAPI) {
     } else if (event.toolName === 'grep') {
       rawPaths = strings(input.path, input.glob);
     } else {
-      // shortcut: bash output is matched to rules by the file names its command mentions (`cat .env`); a secret
+      // shortcut: shell output is matched to rules by the file names its command mentions (`cat .env`); a secret
       // printed without naming its file (`env`, `rg KEY`) needs a `global` rule.
       rawPaths = typeof input.command === 'string' ? input.command.split(/[\s;|&<>()'"`=]+/).filter(Boolean) : [];
     }
+    rawPaths = withFullOutputSources(rawPaths, ctx.cwd);
+
+    if (SHELL_TOOLS.has(event.toolName)) {
+      const fullOutputPath = (event.details as { fullOutputPath?: unknown } | undefined)?.fullOutputPath;
+      if (typeof fullOutputPath === 'string' && rawPaths.length > 0) {
+        fullOutputSources.set(resolve(ctx.cwd, fullOutputPath), rawPaths);
+      }
+    }
+    const searchPath = event.toolName === 'grep' && typeof input.path === 'string' ? input.path : undefined;
 
     let changed = false;
     const content = event.content.map((part) => {
@@ -446,7 +513,10 @@ export default function (pi: ExtensionAPI) {
         return part;
       }
 
-      const cloakedText = cloakText(part.text, rawPaths, ctx.cwd, state);
+      const cloakedText =
+        event.toolName === 'grep'
+          ? cloakGrepText(part.text, rawPaths, searchPath, ctx.cwd, state)
+          : cloakText(part.text, rawPaths, ctx.cwd, state);
       if (cloakedText === part.text) {
         return part;
       }

@@ -6,7 +6,7 @@ import hljs from 'highlight.js';
 import { render as renderDiagram } from 'pele';
 
 import { EVENT_HUB_JS } from './events.js';
-import { BASE_CSS, D2H_CSS, HLJS_CSS } from './styles.js';
+import { BASE_CSS, getD2hCss, HLJS_CSS } from './styles.js';
 import { READER_FONT, readerBody, READER_ATTRIBUTES, READER_SCRIPT, READER_STYLES } from './reader.js';
 
 export interface RenderFlags {
@@ -165,7 +165,7 @@ export function buildShell(opts: {
 
   const styles: string[] = [`<style data-base>${BASE_CSS}</style>`];
   if (kind === 'markdown') styles.push(READER_STYLES);
-  if (flags.hasDiff) styles.push(`<style data-d2h>${D2H_CSS}</style>`);
+  if (flags.hasDiff) styles.push(`<style data-d2h>${getD2hCss()}</style>`);
   if (flags.hasCode) styles.push(`<style data-hljs>${HLJS_CSS}</style>`);
 
   const scripts: string[] = kind === 'markdown' ? [READER_SCRIPT] : [];

@@ -196,3 +196,41 @@ export const FLAG_PROMPT = 'compact-prompt';
 export const DEFAULT_SOFT_AT = '225k';
 export const DEFAULT_AT = '250k';
 export const DEFAULT_BUFFER = '20k';
+
+/**
+ * Window-relative defaults used for any threshold flag the user did not supply
+ * when the token defaults cannot fit the model window (e.g. a 200k model).
+ * Valid on every window: soft 60% < warning 70% <= hard 80% <= 90% cap.
+ */
+export const FALLBACK_SOFT_AT = '60%';
+export const FALLBACK_AT = '70%';
+export const FALLBACK_BUFFER = '10%';
+
+/** Raw flag values; `undefined` means the flag was not supplied. */
+export interface RawFlagInputs {
+  softAt: string | undefined;
+  at: string | undefined;
+  buffer: string | undefined;
+  compactPrompt?: string | undefined;
+}
+
+/**
+ * Resolve flags, filling unsupplied thresholds with the token defaults. If those
+ * do not fit the window, retry the unsupplied thresholds with the
+ * window-relative fallback so a no-flag install never fails closed. Explicitly
+ * supplied values are never replaced; if they still cannot fit, the original
+ * error is returned so the caller fails closed.
+ */
+export function resolveThresholdsWithDefaults(inputs: RawFlagInputs, contextWindow: number): ConfigResult {
+  const fill = (soft: string, at: string, buffer: string): FlagInputs => ({
+    softAt: inputs.softAt ?? soft,
+    at: inputs.at ?? at,
+    buffer: inputs.buffer ?? buffer,
+    compactPrompt: inputs.compactPrompt,
+  });
+  const primary = resolveThresholds(fill(DEFAULT_SOFT_AT, DEFAULT_AT, DEFAULT_BUFFER), contextWindow);
+  if (primary.ok) return primary;
+  if (inputs.softAt !== undefined && inputs.at !== undefined && inputs.buffer !== undefined) return primary;
+  const fallback = resolveThresholds(fill(FALLBACK_SOFT_AT, FALLBACK_AT, FALLBACK_BUFFER), contextWindow);
+  return fallback.ok ? fallback : primary;
+}

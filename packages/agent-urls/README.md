@@ -7,7 +7,7 @@ It no longer reads anything from nicobailon/pi-subagents (session JSONLs, tmpdir
 ## Install
 
 ```bash
-pi install /Users/nicknisi/Developer/pi-extensions/packages/agent-urls
+pi install npm:@nicknisi/pi-agent-urls
 ```
 
 ## What it adds
@@ -16,9 +16,10 @@ pi install /Users/nicknisi/Developer/pi-extensions/packages/agent-urls
 - Tool: `list_agent_runs` — list recent persisted subagent runs and their `agent://` URLs
 - Tool: `read_agent_url` — read `agent://` URLs (run summaries, outputs, errors, raw records)
 - Custom message type: `agent-url` (results of `/agent` commands are posted into the conversation as `display: true` custom messages with `details.kind = "agent-url-command"`)
-- Argument completion for `/agent`: completes `list`/`read`, then `agent://<namespace>/<runId>` for the 20 most recent runs
+- Argument completion for `/agent`: completes `list`/`read`, then (after `read`/`show`/`cat`) `agent://<namespace>/<runId>` for up to 20 of the most recent runs matching what you've typed. Completions list filenames only (no record parsing).
+- Event hook: `session_start` — declares the two tools directly (`setActiveTools`) when pi's `tool_search` is not active (see [Tool exposure](#tool-exposure))
 
-No keybindings, widgets, overlays, or event hooks.
+No keybindings, widgets, or overlays.
 
 ## URI scheme
 
@@ -59,7 +60,7 @@ Tool usage (as called by the LLM):
 
 ## Run discovery
 
-Runs are discovered on every invocation by scanning `~/.pi/agent/subagent-runs/<namespace>/*.json` (or `$PI_SUBAGENTS_DIR/runs/<namespace>/*.json`, see below). Each file is a JSON `RunRecord`:
+Runs are discovered on every invocation by scanning `<agentDir>/subagent-runs/<namespace>/*.json` (`<agentDir>` is pi's `getAgentDir()`, default `~/.pi/agent`) (or `$PI_SUBAGENTS_DIR/runs/<namespace>/*.json`, see below). Each file is a JSON `RunRecord`:
 
 ```json
 {
@@ -75,7 +76,7 @@ Runs are discovered on every invocation by scanning `~/.pi/agent/subagent-runs/<
 }
 ```
 
-Unreadable files, invalid JSON, and records without a string `runId` are skipped; a record missing `namespace` inherits its directory name. Sort order is `endedAt ?? startedAt ?? file mtime`, newest first. Usage fields accept both `input`/`output` and `inputTokens`/`outputTokens` spellings. Scan caps: 2500 records.
+Unreadable files, invalid JSON, and records without a string `runId` are skipped; a record missing `namespace` inherits its directory name. Sort order is `endedAt ?? startedAt ?? file mtime`, newest first. Usage fields accept both `input`/`output` and `inputTokens`/`outputTokens` spellings. Scan cap: the 2500 most recently modified record files (by file mtime) are parsed, so the newest runs are never dropped. Records still `queued`/`running` whose `hostPid` process no longer exists (a host that died mid-run) are reported with status `stale`.
 
 ## Configuration
 
@@ -83,20 +84,20 @@ No config files are read. No per-run options.
 
 Environment variables:
 
-- `PI_CODING_AGENT_DIR` — pi agent directory. Defaults to `~/.pi/agent`. A leading `~/` is expanded. This determines where `subagent-runs/` is scanned.
+- `PI_CODING_AGENT_DIR` — pi agent directory, resolved via pi's `getAgentDir()` on every call (same normalization as the extensions that write runs). Defaults to `~/.pi/agent`. This determines where `subagent-runs/` is scanned.
 - `PI_SUBAGENTS_DIR` — when set, runs are read from `$PI_SUBAGENTS_DIR/runs/` instead, matching where the shared runtime writes them. Read on every call.
 
 Constants (hardcoded in `index.ts`):
 
-- `MAX_SCAN_FILES = 2500` — record cap per scan
+- `MAX_SCAN_FILES = 2500` — record cap per scan (newest files first)
 - `DEFAULT_LIMIT = 20` — runs listed by default (tool clamps `limit` to 1–100)
 - `DEFAULT_MAX_LINES = 500` — rendered line cap for reads (tool clamps `maxLines` to 20–5000)
 
 ## Dependencies
 
-- `@earendil-works/pi-coding-agent` (peer, `*`) — `ExtensionAPI` (`registerTool`, `registerCommand`, `sendMessage`, `on`, `getActiveTools`, `setActiveTools`) and `ExtensionCommandContext` (`ctx.ui.notify`) types/APIs only.
-- `@nicknisi/pi-shared` (`workspace:*`) — `declareUnlessSearchable` (deferred tool fallback) and `subagentsDir` (`PI_SUBAGENTS_DIR` resolution).
-- Node builtins: `fs`, `os`, `path`. No other runtime dependencies.
+- `@earendil-works/pi-coding-agent` (peer, `*`) — `getAgentDir`, `ExtensionAPI` (`registerTool`, `registerCommand`, `sendMessage`, `on`, `getActiveTools`, `setActiveTools`) and `ctx.ui.notify`.
+- `@nicknisi/pi-shared` (`workspace:*`) — `declareUnlessSearchable` (deferred tool fallback), `subagentsDir` (`PI_SUBAGENTS_DIR` resolution), and `pidAlive` (stale-run detection).
+- Node builtins: `fs`, `path`. No other runtime dependencies.
 
 ## Tool exposure
 
@@ -104,8 +105,8 @@ Constants (hardcoded in `index.ts`):
 
 ## Caveats
 
-- Depends on the shared runtime's on-disk record layout (`~/.pi/agent/subagent-runs/<namespace>/<runId>.json` and the `RunRecord` shape), which is not a stable API; a schema change silently reduces discovery to partial or empty results (all parse failures are swallowed).
+- Depends on the shared runtime's on-disk record layout (`<agentDir>/subagent-runs/<namespace>/<runId>.json` and the `RunRecord` shape), which is not a stable API; a schema change silently reduces discovery to partial or empty results (all parse failures are swallowed).
 - Records carry bounded output, not transcripts — there is no equivalent of the old `history://` rendered-session reads.
 - Discovery is synchronous filesystem I/O on every command/tool call; very large `subagent-runs/` trees are mitigated only by the record cap.
 - Truncated reads append a `[truncated: N more line(s)]` marker.
-- Results of `/agent` are injected as custom `agent-url` messages with `display: true`; themes or UIs that don't handle unknown custom message types may render them differently.
+- Results of `/agent` are injected as custom `agent-url` messages with `display: true`; themes or UIs that don't handle unknown custom message types may render them differently. These messages also enter the LLM context: an `/agent read` can add up to 500 lines (`DEFAULT_MAX_LINES`) to the conversation.

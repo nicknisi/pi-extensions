@@ -1,14 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 
 const calls: string[][] = [];
+let hang = false;
 vi.mock('node:child_process', () => ({
   execFile: (_bin: string, args: string[], _opts: object, cb: () => void) => {
     calls.push(args);
-    cb();
+    if (!hang) cb();
   },
 }));
 
-const { default: sidepulse } = await import('./index.js');
+const { default: sidepulse, SHUTDOWN_WAIT_MS } = await import('./index.js');
 
 function harness(hasUI = true) {
   calls.length = 0;
@@ -64,5 +65,23 @@ describe('sidepulse', () => {
     emit('session_start');
     emit('agent_start');
     expect(await states()).toEqual([]);
+  });
+
+  it('does not hold up shutdown on a hung CLI', async () => {
+    vi.useFakeTimers();
+    try {
+      const { emit } = harness();
+      hang = true;
+      emit('agent_start');
+      let done = false;
+      void (emit('session_shutdown') as Promise<void>).then(() => (done = true));
+      await vi.advanceTimersByTimeAsync(SHUTDOWN_WAIT_MS - 1);
+      expect(done).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(done).toBe(true);
+    } finally {
+      hang = false;
+      vi.useRealTimers();
+    }
   });
 });

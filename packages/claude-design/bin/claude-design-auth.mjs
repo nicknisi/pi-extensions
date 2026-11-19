@@ -34,7 +34,9 @@ const commands = {
     const start = startLogin();
     console.log(`Open to authorize Claude Design access:\n\n${start.url}\n`);
     if (process.platform === 'darwin') {
-      spawn('open', [start.url], { detached: true, stdio: 'ignore' }).unref();
+      spawn('open', [start.url], { detached: true, stdio: 'ignore' })
+        .on('error', () => {})
+        .unref();
     }
     await completeLogin(start, await ask('Paste the CODE#STATE value shown after approval > '));
     console.log(`\nAuthorized. Credentials saved to ${STORE_PATH}`);
@@ -65,7 +67,7 @@ const commands = {
 
 const run = commands[process.argv[2] || 'token'];
 if (!run) {
-  console.error('Usage: claude-design-auth <login|token|status|logout>');
+  console.error('Usage: claude-design-auth <login|token|status|logout|selfcheck>');
   process.exit(2);
 }
 run().catch((error) => {

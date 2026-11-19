@@ -81,7 +81,7 @@ vi.mock('@earendil-works/pi-coding-agent', () => ({
   SettingsManager: { inMemory: vi.fn(() => ({})) },
 }));
 
-import { resolveCliModel } from '@earendil-works/pi-coding-agent';
+import { ModelRuntime, resolveCliModel } from '@earendil-works/pi-coding-agent';
 import { childExtensions, createSubagentRuntime } from './subagents.js';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -196,6 +196,44 @@ describe('subagent runtime robustness', () => {
     }
   });
 
+  it("doesn't cache a failed model runtime: the next spawn retries it", async () => {
+    vi.spyOn(ModelRuntime, 'create').mockRejectedValueOnce(new Error('transient'));
+    const runtime = createSubagentRuntime({ namespace: 'runtime-retry' });
+    expect(await runtime.spawn({ prompt: 'one', timeoutMs: 0 })).toMatchObject({
+      ok: false,
+      kind: 'crashed',
+      error: 'transient',
+    });
+    harness.turns.push(async (_emit, reply) => reply('ok'));
+    expect(await runtime.spawn({ prompt: 'two', timeoutMs: 0 })).toMatchObject({ ok: true, text: 'ok' });
+  });
+
+  it('persists early validation failures so the artifact never stays queued', async () => {
+    const artifactsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-subagents-early-'));
+    try {
+      const runtime = createSubagentRuntime({ namespace: 'early', artifactsDir });
+      const read = (runId: string) =>
+        JSON.parse(fs.readFileSync(path.join(artifactsDir, 'early', `${runId}.json`), 'utf8'));
+
+      const bad = await runtime.spawn({ prompt: 'x', thinkingLevel: 'galaxy-brain' as never });
+      expect(bad).toMatchObject({ ok: false, kind: 'crashed' });
+      expect(read(bad.runId).status).toBe('failed');
+
+      const noRepo = await runtime.spawn({ prompt: 'x', cwd: artifactsDir, worktree: true, timeoutMs: 0 });
+      expect(noRepo).toMatchObject({ ok: false, kind: 'crashed' });
+      expect(read(noRepo.runId).status).toBe('failed');
+
+      process.env.PI_SUBAGENT_DEPTH = '1';
+      const nested = await runtime.spawn({ prompt: 'x' });
+      delete process.env.PI_SUBAGENT_DEPTH;
+      expect(nested).toMatchObject({ ok: false, kind: 'crashed' });
+      expect(read(nested.runId).status).toBe('failed');
+    } finally {
+      delete process.env.PI_SUBAGENT_DEPTH;
+      fs.rmSync(artifactsDir, { recursive: true, force: true });
+    }
+  });
+
   describe('worktree runs', () => {
     const savedDir = process.env.PI_SUBAGENTS_DIR;
     let root: string;
@@ -277,9 +315,9 @@ describe('subagent runtime robustness', () => {
     it('removes the worktree and marks the run failed when session setup throws', async () => {
       harness.reloadError = new Error('loader exploded');
       const runtime = createSubagentRuntime({ namespace: 'wt-throw', artifactsDir: path.join(root, 'runs') });
-      await expect(runtime.spawn({ prompt: 'build', cwd: repo, worktree: true, timeoutMs: 0 })).rejects.toThrow(
-        'loader exploded',
-      );
+      // spawn() never rejects: a setup throw resolves as a typed crash.
+      const result = await runtime.spawn({ prompt: 'build', cwd: repo, worktree: true, timeoutMs: 0 });
+      expect(result).toMatchObject({ ok: false, kind: 'crashed', error: 'loader exploded' });
       expect(leftoverWorktrees()).toEqual([]);
       const run = runtime.listRuns()[0]!;
       expect(run).toMatchObject({ status: 'failed', error: 'loader exploded', worktree: undefined });

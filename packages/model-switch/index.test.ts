@@ -398,6 +398,17 @@ describe('model-switch extension', () => {
     expect(existsSync(modelCycleConfigPath())).toBe(false);
   });
 
+  it('refuses the picker in RPC mode before resolving auth', async () => {
+    const { commands, ctx, notify, custom } = harness({ mode: 'rpc' });
+    const getAuth = vi.spyOn(ctx.modelRegistry, 'getApiKeyAndHeaders');
+
+    await commands.get('model-switch')!('', ctx);
+
+    expect(custom).not.toHaveBeenCalled();
+    expect(getAuth).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledWith('/model-switch picker requires the terminal UI', 'warning');
+  });
+
   it('refuses custom catalog UI in RPC mode', async () => {
     const { commands, ctx, notify, custom } = harness({ mode: 'rpc' });
 

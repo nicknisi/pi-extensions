@@ -45,7 +45,11 @@ export default function turnTimer(pi: ExtensionAPI) {
   let promptStart: number | undefined;
   let waited = 0;
 
+  // agent_start fires again for each low-level run inside one settled run
+  // (retry, compaction retry, queued follow-ups), so only the first one
+  // starts the clock.
   pi.on('agent_start', () => {
+    if (start !== undefined) return;
     start = Date.now();
     promptStart = undefined;
     waited = 0;
@@ -63,6 +67,10 @@ export default function turnTimer(pi: ExtensionAPI) {
 
   pi.on('agent_settled', (event) => {
     if (start === undefined) return;
+    if (promptStart !== undefined) {
+      waited += Date.now() - promptStart;
+      promptStart = undefined;
+    }
     const seconds = (Date.now() - start - waited) / 1000;
     start = undefined;
     pi.appendEntry(CUSTOM_TYPE, event.aborted ? { seconds, aborted: true } : { seconds });

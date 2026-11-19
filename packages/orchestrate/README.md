@@ -5,7 +5,7 @@ Evidence-aware `/goal` and recurring `/loop` for pi. `/goal <condition>` keeps w
 ## What it adds
 
 - Slash commands: `/goal`, `/loop`
-- Status line entry (`pi-goal`): shows active/paused goal (duration, runs/budget) or loop (pace, runs)
+- Status line entry (`pi-goal`): shows active/paused goal (duration, runs/budget, `↻ loop` if a loop is also set) or loop (pace, runs)
 - Events hooked: `session_start`, `agent_end`, `agent_settled`, `session_compact`, `session_shutdown`, `turn_start`
 - Files read/written: `<cwd>/.pi-goal/<session>.json`, `<cwd>/.pi-loop.md`
 - No tools, no widgets, no keybindings, no custom message/entry types
@@ -21,7 +21,7 @@ Evidence-aware `/goal` and recurring `/loop` for pi. `/goal <condition>` keeps w
 /goal clear          remove the active or paused goal
 ```
 
-Clear aliases: `clear`, `stop`, `off`, `reset`, `none`, `cancel`. Tab completion is provided for `clear`, `stop`, and `resume`. Stop means stop: clearing also stops a running `/loop` (a runaway "goal" is usually a loop, which `/goal` subcommands otherwise can't see) and aborts the in-flight turn so the stop is immediate.
+Clear aliases: `clear`, `stop`, `off`, `reset`, `none`, `cancel`. Tab completion is provided for `clear`, `stop`, and `resume`. Stop means stop: clearing also stops a running `/loop` (a runaway "goal" is usually a loop, which `/goal` subcommands otherwise can't see) and aborts the in-flight turn so the stop is immediate. Clearing an already-paused goal (with no loop running) does not abort the current turn.
 
 Setting a goal immediately sends the condition as a user message (`deliverAs: "followUp"` when idle, `"steer"` mid-turn). After each `agent_end`, a tool-free evaluator reads bounded evidence from the active session branch and returns a structured verdict:
 
@@ -29,7 +29,7 @@ Setting a goal immediately sends the condition as a user message (`deliverAs: "f
 - **`not_met`**: the reason becomes guidance for the next run.
 - **`unknown`**: missing, stale, truncated, or ambiguous evidence triggers one attempt to gather the missing checks. Two consecutive unknown verdicts pause the goal rather than guessing success.
 
-Provider failures, malformed responses, invalid evidence citations, evaluator timeouts, or an aborted/failed agent run **pause immediately**. Pausing preserves the condition and reason, stops any concurrent `/loop`, and does not queue more work. `/goal resume` resets the budget and unknown counter; `/goal clear` discards the goal. A replacement goal cannot receive a stale evaluator result.
+Provider failures, malformed responses, invalid evidence citations, evaluator timeouts, or an aborted/failed agent run **pause immediately**. An agent run that ends in an error pauses only once pi settles (`agent_settled`), so errors pi recovers from by auto-retry or compaction do not pause the goal. Pressing Escape while the evaluator is running cancels the evaluation and pauses the goal. Pausing preserves the condition and reason, stops any concurrent `/loop`, and does not queue more work. `/goal resume` resets the budget and unknown counter; `/goal clear` discards the goal. A replacement goal cannot receive a stale evaluator result.
 
 Automatic continuation is limited to **10 completed agent runs or 30 minutes**, whichever comes first. These are boundary checks at `agent_end` and compaction continuation, **not a hard timeout on the main agent or individual tools**. An agent run may contain many model/tool turns. Pauses survive `--resume`, and compaction cannot restart a paused goal.
 
@@ -49,8 +49,8 @@ Example:
 
 Two pacing modes:
 
-- **Timer-paced**: leading interval token — `Nms`, `Ns`, `Nm`, `Nh` (e.g. `5m`, `30s`). Fires on a `setTimeout` regardless of session activity.
-- **Self-paced**: no interval. The prompt is re-sent from `agent_settled` (pi defers runs requested there until every settled handler finishes, so the message is never lost at the teardown boundary).
+- **Timer-paced**: leading interval token — `Nms`, `Ns`, `Nm`, `Nh` (e.g. `5m`, `30s`), minimum 1 second (`0s` or `500ms` is rejected with a warning). Fires on a `setTimeout` regardless of session activity (sent as a steer when the agent is busy).
+- **Self-paced**: no interval. The prompt is re-sent from `agent_settled` (pi defers runs requested there until every settled handler finishes, so the message is never lost at the teardown boundary). While an active `/goal` is driving the session, a self-paced loop waits; it resumes after the goal is achieved. (A paused or cleared goal stops the loop.)
 
 ```
 /loop 5m check if the deploy finished
@@ -130,18 +130,17 @@ No settings file and no environment variables. Behavior is controlled entirely b
 
 ## Caveats
 
-- **Package name vs. content**: `package.json` describes this as "Multi-agent orchestration across pi sessions", but the current code implements goal/loop, not cross-session orchestration.
 - **Pi APIs**: evidence, model selection, and the evaluator call (`ctx.modelRegistry.streamSimple()`) use public extension APIs only; no private pi internals.
 - **Evidence limitations**: the evaluator sees bounded text, not the filesystem or screenshots. Citation validation prevents invented IDs, not an incorrect interpretation of a real result. Unknown means unverified, never success.
-- **Stale contexts**: the extension caches the last `ExtensionContext` and probes `ctx.isIdle()` before reuse; timer callbacks silently no-op if the context has gone stale. Errors matching `stale|invalid|session replacement|assertActive` are treated as expected.
+- **Stale contexts**: the extension caches the last `ExtensionContext` and probes `ctx.isIdle()` before reuse; timer callbacks silently no-op if the context has gone stale. Errors from sending a continuation on a stale context are swallowed.
 - **Evaluator cost**: one model call per `agent_end` while a goal is active, using the session's current model. No tools and minimal thinking reduce overhead, but the current model may be expensive. Each completed run adds an evaluation call until the goal completes or pauses.
-- **`ms` intervals**: `parseInterval` accepts `Nms` (e.g. `/loop 500ms ...`), which yields sub-second loops. Use deliberately.
+- **`ms` intervals**: `Nms` is accepted, but intervals under 1 second are rejected.
 - No platform-specific behavior (no tmux/ghostty/macOS dependencies); persistence is plain fs.
 
 ## Install
 
 ```
-pi install /Users/nicknisi/Developer/pi-extensions/packages/orchestrate
+pi install npm:@nicknisi/pi-orchestrate
 ```
 
 Add `<cwd>/.pi-goal/` to your global gitignore if you don't want state files showing up in repo status.

@@ -28,8 +28,8 @@ None. The CLI path is fixed to `~/.local/bin/sidepulse`, the installer's default
 
 ## Caveats
 
-- **Best-effort.** Reports are spawned in order and never block pi. If the CLI is missing or the background service is down, they fail silently.
-- **Interactive sessions only.** Runs without a UI (`pi -p`) don't report, so one-shot scripts don't leave stale sessions behind.
+- **Best-effort.** Reports are spawned in order and never block pi; on shutdown pi waits at most 0.5s for the final `clear`. If the CLI is missing or the background service is down, they fail silently.
+- **UI sessions only.** Runs without a UI (`pi -p`, JSON mode) don't report, so one-shot scripts don't leave stale sessions behind. Interactive (TUI) and RPC sessions both report, since RPC hosts can show `ctx.ui` prompts too, so SDK/RPC embeddings get their own SidePulse rows.
 - **Killed sessions.** If pi is killed instead of quitting cleanly (for example, the terminal is closed), `clear` may not be sent. The SidePulse service expires old sessions on its own.
 - Each report starts a short-lived `sidepulse` process (about 0.1s on an M-series Mac), a handful per prompt.
 - Depends on the SidePulse `report` CLI interface (`--scope`, `--state`, `--app`, `--title`, `--kind`, `--msg`), documented in SidePulse's [program status protocol](https://github.com/inteliwear/sidepulse/blob/main/docs/protocol/program-status.md).

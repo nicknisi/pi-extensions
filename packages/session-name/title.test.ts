@@ -45,6 +45,13 @@ describe('buildTitle', () => {
     );
   });
 
+  it('inserts names literally, without replacement patterns or nested placeholders', () => {
+    process.env.PI_PACKAGE_DIR = brandedPackageDir('arc');
+    expect(buildTitle("why does $' break {dir} $&", '/tmp/work', '{summary} — {dir}')).toBe(
+      "why does $' break {dir} $& — work",
+    );
+  });
+
   it('substitutes {app} in the format', () => {
     process.env.PI_PACKAGE_DIR = brandedPackageDir('arc');
     expect(buildTitle('Fix the parser', '/tmp/work', '{app}: {summary} ({dir})')).toBe('arc: Fix the parser (work)');

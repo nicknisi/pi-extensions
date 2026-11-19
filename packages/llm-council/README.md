@@ -5,7 +5,7 @@ An LLM Council tool for pi: multiple models answer the same question independent
 ## Install
 
 ```sh
-pi install /Users/nicknisi/Developer/pi-extensions/packages/llm-council
+pi install npm:@nicknisi/pi-llm-council
 ```
 
 ## What it adds
@@ -31,8 +31,8 @@ Prompt guidance registered with the tool tells the agent to use it for complex q
 ## How it works
 
 1. **Members** — each council member receives the same question and answers independently, in parallel (`Promise.all`). Each runs as a hermetic in-process child session spawned through pi's SDK (`createAgentSession`), shared via `@nicknisi/pi-shared`'s `createSubagentRuntime`; the answer is the child's final assistant message.
-2. **Chairman** — receives the question plus all successful member answers (labeled Member A/B/C) and synthesizes a unified answer. If `chairman.exposePersonas` is `true`, each member's system prompt is included as `(persona: "...")`. The chairman's text is the tool's final content.
-3. If every member fails, the tool returns an error result; the chairman never runs. If the chairman fails, its error is returned and any partial synthesis is labeled incomplete.
+2. **Chairman** — receives the question plus all successful member answers (each tagged with its member `label` — `Member A`/`B`/`C` for the built-in lineup, `1`, `2`, … for configured members without a label) and synthesizes a unified answer. If `chairman.exposePersonas` is `true`, each member's system prompt is included as `(persona: "...")`. The chairman's text is the tool's final content.
+3. If every member fails, the tool returns an error result (`isError: true`, with the member tree kept for the UI); the chairman never runs and shows as not run. If the chairman fails, the result is also an error and any partial synthesis is labeled incomplete.
 
 ### Exec config → spawn options
 
@@ -106,12 +106,12 @@ Or steer it directly: "use llm_council to compare these two designs". The tool r
 
 ## Configuration
 
-Lineup precedence is **per-call overrides > session selection > project config > global config > built-in defaults**. `/council reset` removes the session selection. A global save does not overwrite project overrides or other sessions' saved selections.
+Lineup precedence is **per-call overrides > session selection > project config (trusted projects only) > global config > built-in defaults**. Malformed files are ignored, a non-array `member.council` falls through to the next layer, and council entries without a non-empty string `model` are dropped with a warning on stderr. `/council reset` removes the session selection. A global save does not overwrite project overrides or other sessions' saved selections.
 
 Two config files:
 
 1. **Global:** `~/.pi/agent/configs/llm-council.json` — copy [`llm-council.example.json`](llm-council.example.json). Execution settings reload per call. Display settings load once at module load, and this is the only source for `shared` settings. The path follows pi's agent dir, so it moves with `PI_CODING_AGENT_DIR` if you set it.
-2. **Project-local:** `<cwd>/.pi/configs/llm-council.json` — copy [`llm-council.project.example.json`](llm-council.project.example.json). Deep-merged over the global file per tool call, so only differing keys are needed — typically `member.council` and `chairman.model` to give a work project a different lineup. Display (`shared`) settings do **not** apply from the project file.
+2. **Project-local:** `<cwd>/.pi/configs/llm-council.json` — copy [`llm-council.project.example.json`](llm-council.project.example.json). Read only when the project is trusted (`ctx.isProjectTrusted()`), because it can grant member/chairman tools and system prompts; in an untrusted project it is ignored. Deep-merged over the global file per tool call, so only differing keys are needed — typically `member.council` and `chairman.model` to give a work project a different lineup. Display (`shared`) settings do **not** apply from the project file.
 
 No environment variables are read for configuration. (`PI_SUBAGENT_DEPTH` is set internally to block recursion.)
 
@@ -125,9 +125,9 @@ No environment variables are read for configuration. (`PI_SUBAGENT_DEPTH` is set
 | `display.modelColor`  | `string`           | `"dim"`                       | Model name color                                                                                                  |
 | `tools`               | `string[] \| null` | `["read","grep","find","ls"]` | Tool allowlist for member child sessions (`null`/`[]` → no tools)                                                 |
 | `thinking`            | `string \| null`   | `"medium"`                    | Thinking level (`null` → pi default)                                                                              |
-| `extensions`          | `string[] \| null` | `[]`                          | Extension names, resolved to `~/.pi/agent/extensions/<name>/src/index.ts` (`null` → pi defaults)                  |
-| `skills`              | `string[] \| null` | `[]`                          | Skill names, resolved to `~/.pi/agent/skills/<name>/SKILL.md` (`null` → pi defaults)                              |
-| `contextFiles`        | `boolean`          | `false`                       | `false` → `--no-context-files`                                                                                    |
+| `extensions`          | `string[] \| null` | `[]`                          | Extension names, resolved to `~/.pi/agent/extensions/<name>/src/index.ts` (`null`/`[]` → none)                    |
+| `skills`              | `string[] \| null` | `[]`                          | Skill names, resolved to `~/.pi/agent/skills/<name>/SKILL.md` (`null`/`[]` → none)                                |
+| `contextFiles`        | `boolean`          | `false`                       | Load AGENTS.md / project context files into the child session (`includeContextFiles`)                             |
 
 ### `chairman`
 
@@ -142,8 +142,8 @@ No environment variables are read for configuration. (`PI_SUBAGENT_DEPTH` is set
 | `display.modelColor` | `string`           | `"dim"`                       | Chairman model name color                                          |
 | `tools`              | `string[] \| null` | `[]`                          | Chairman tool allowlist (none by default)                          |
 | `thinking`           | `string \| null`   | `"medium"`                    | Thinking level                                                     |
-| `extensions`         | `string[] \| null` | `[]`                          | Extensions (`null` → pi defaults)                                  |
-| `skills`             | `string[] \| null` | `[]`                          | Skills (`null` → pi defaults)                                      |
+| `extensions`         | `string[] \| null` | `[]`                          | Extension names (`null`/`[]` → none)                               |
+| `skills`             | `string[] \| null` | `[]`                          | Skill names (`null`/`[]` → none)                                   |
 | `contextFiles`       | `boolean`          | `false`                       | Context files for chairman                                         |
 
 ### `shared` (display — global config only)
@@ -174,7 +174,7 @@ Any color field accepts a pi theme token (`"text"`, `"accent"`, `"success"`, `"e
 ## Dependencies
 
 - `@earendil-works/pi-coding-agent` (peer) — `ExtensionAPI` (`pi.registerTool`), `Theme`/`ThemeColor`, `getMarkdownTheme`.
-- `@earendil-works/pi-tui` (peer) — `Markdown` and `Text` render components, `getKeybindings` (for the expand-hint key label).
+- `@earendil-works/pi-tui` (peer) — `Markdown` and `Text` render components. The expand-hint key label comes from the render context's `keyText`.
 - `typebox` — tool parameter schema (`Type.Object`).
 - `@nicknisi/pi-shared` (workspace) — the in-process subagent runtime (`createSubagentRuntime`) that members and the chairman spawn through.
 - No `pi` binary requirement: children are in-process SDK sessions, not subprocesses.
@@ -187,7 +187,7 @@ Any color field accepts a pi theme token (`"text"`, `"accent"`, `"success"`, `"e
 
 - **Extension resolution path is hardcoded.** `extensions: ["name"]` resolves to `~/.pi/agent/extensions/<name>/src/index.ts` — only directory-style extensions with that layout work. Single-file `.ts` extensions and npm-package extensions don't match; the code comments recommend keeping `extensions: []` for members. Same for `skills` → `~/.pi/agent/skills/<name>/SKILL.md`.
 - **Depends on pi's SDK surface:** `createAgentSession`, `DefaultResourceLoader` (its `noExtensions`/`additionalExtensionPaths` semantics), `SessionManager.inMemory`, `SettingsManager.inMemory`, `ModelRuntime`/`resolveCliModel`. These are pi internals that could change across versions; the runtime is version-matched at runtime because pi aliases `@earendil-works/*` imports to the host, but type-level drift would surface at extension load.
-- **Pi internals:** the spinner relies on the `renderCall`/`renderResult` `ctx.state` bag and `ctx.invalidate()`. A module-level `liveDetails` bridges `onUpdate` → `renderCall` as a workaround for an `isPartial` bug (per code comment); only one council can render live at a time.
+- **Pi internals:** the spinner relies on the `renderCall`/`renderResult` `ctx.state` bag and `ctx.invalidate()`. Pi gives tool components no dispose hook, so each spinner stops itself once its tool call finishes, and all spinners stop on `session_shutdown`.
 - **Recursion guard:** the shared runtime refuses to spawn when `PI_SUBAGENT_DEPTH`/`PI_SUBAGENT_CHILD` are set — this tool won't work if invoked from inside a pi-subagents child session.
 - Global and project execution settings are re-read on every tool call. Display changes still require `/reload` or a restart. Session selections override model and thinking settings until `/council reset`.
 - Members and chairman run with the current working directory as `cwd`; `contextFiles: false` keeps CLAUDE.md/AGENTS.md out of member context by default.

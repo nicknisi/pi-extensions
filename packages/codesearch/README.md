@@ -47,15 +47,15 @@ Returns repository, path, source URL, license information when supplied, and lin
 | `startLine` | Inclusive 1-based positive integer                                 | `1`                       |
 | `endLine`   | Inclusive positive integer at least startLine                      | EOF                       |
 
-URL parsing takes the segment after `blob` as the ref. Use explicit repo/path/ref for branches containing slashes. URL line fragments are ignored, use the range parameters. Ranges past EOF are clipped, a start beyond EOF is an error. A genuinely empty file is reported as such. Binary files containing NUL are rejected. GitHub Enterprise and directory listings are unsupported.
+URL parsing takes the segment after `blob` as the ref. Use explicit repo/path/ref for branches containing slashes. URL line fragments are ignored, use the range parameters. Ranges past EOF are clipped, a start beyond EOF is an error. A genuinely empty file is reported as such for any range, and a single blank requested line is shown as `(Blank line)`. When output is truncated, the notice names the last returned line and the `startLine` to continue from. Binary files containing NUL are rejected. GitHub Enterprise and directory listings are unsupported.
 
-The tool first runs asynchronous `gh api --hostname github.com` with the raw-content accept header. Missing gh, failed authentication, and command failures fall back to an unauthenticated request to `api.github.com`. Cancellation never triggers fallback. Failed public fetches throw errors.
+The tool first runs asynchronous `gh api --hostname github.com` with the raw-content accept header. Missing gh, failed authentication, and command failures fall back to an unauthenticated request to `api.github.com`. Cancellation never triggers fallback. gh output over the body limit is reported as an error rather than retried publicly. Failed public fetches throw errors that include gh's exit code and stderr.
 
 ## Dependencies and limits
 
-Pi is a runtime peer supplied by the host. `typebox` is a runtime dependency. Node's standard fetch, streams, and AbortController handle HTTP. `gh` is optional, must be on PATH, and uses existing GitHub authentication. There is no dependency, install, or runtime import of dot-pi or another Pi extension.
+Pi is a runtime peer supplied by the host. `typebox` is a peer dependency, also supplied by pi. Node's standard fetch, streams, and AbortController handle HTTP. `gh` is optional, must be on PATH, and uses existing GitHub authentication. There is no dependency, install, or runtime import of dot-pi or another Pi extension.
 
-Each HTTP request and gh command has a 30-second timeout and accepts the tool AbortSignal. HTTP timeout remains active through body consumption. HTTP bodies are limited to 2 MiB. gh output is checked against that limit after Pi buffers it, so that path is not a streaming memory cap. HTTP redirects are rejected. Both tools use Pi truncation with a total budget of 50 KiB / 2000 lines including the notice. Narrow search filters or request a smaller file range when truncated. A single oversized line cannot be retrieved by line slicing. No complete-output temporary files are written.
+Each HTTP request and gh command has a 30-second timeout and accepts the tool AbortSignal. HTTP timeout remains active through body consumption. HTTP bodies are limited to 2 MiB. gh output is capped at that limit plus 64 KiB for headers via Pi's `maxBuffer`, so the command is stopped rather than fully buffered. HTTP redirects are rejected. Both tools use Pi truncation with a total budget of 50 KiB / 2000 lines including the notice. Narrow search filters or request a smaller file range when truncated. A single oversized line cannot be retrieved by line slicing. No complete-output temporary files are written.
 
 ## Tool exposure
 

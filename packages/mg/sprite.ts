@@ -103,8 +103,8 @@ export function getSpriteGrid(mouthOpen: boolean): string[] {
   });
 }
 
-/** Stamp the sprite onto an RGB background grid at position (ox, oy) */
-export function stampSprite(bg: RGB[][], grid: string[], ox: number, oy: number): void {
+/** Stamp the sprite onto an RGB background grid at position (ox, oy), blended by `alpha` (0..1). */
+export function stampSprite(bg: RGB[][], grid: string[], ox: number, oy: number, alpha = 1): void {
   for (let y = 0; y < grid.length; y++) {
     for (let x = 0; x < grid[y]!.length; x++) {
       const idx = decodeChar(grid[y]![x]!);
@@ -112,7 +112,16 @@ export function stampSprite(bg: RGB[][], grid: string[], ox: number, oy: number)
       const bx = ox + x;
       const by = oy + y;
       if (by >= 0 && by < bg.length && bx >= 0 && bx < bg[0]!.length) {
-        bg[by]![bx] = MG_PALETTE[idx]!;
+        const fg = MG_PALETTE[idx]!;
+        const under = bg[by]![bx]!;
+        bg[by]![bx] =
+          alpha >= 1
+            ? fg
+            : [
+                Math.round(under[0] + (fg[0] - under[0]) * alpha),
+                Math.round(under[1] + (fg[1] - under[1]) * alpha),
+                Math.round(under[2] + (fg[2] - under[2]) * alpha),
+              ];
       }
     }
   }
@@ -306,72 +315,6 @@ export function stampFlyer(bg: RGB[][], px: number, py: number, scale: number, f
             bg[by]![bx] = FLY_PALETTE[idx]!;
           }
         }
-      }
-    }
-  }
-}
-
-/** Draw the actual MG face sprite scaled, for the departure scene.
- *  Stamps the real face sprite (with arms added as coat pixels) onto the grid. */
-export function stampFlyingMG(bg: RGB[][], px: number, py: number, scale: number, _frame: number): void {
-  const grid = getSpriteGrid(false);
-  // Add coat arms on the sides of the face sprite for the flying pose
-  // The face is 32 wide; we extend with coat pixels on rows 10-20
-  const _flyerW = Math.floor(SPRITE_W * scale) + Math.floor(10 * scale);
-  const _flyerH = Math.floor(SPRITE_H * scale) + Math.floor(14 * scale);
-  const offsetX = Math.floor(5 * scale);
-  const offsetY = Math.floor(14 * scale);
-
-  // First draw coat arms (T-pose) behind the face
-  const coatColor: RGB = [25, 35, 55];
-  const armLen = Math.floor(5 * scale);
-  const armY = py + Math.floor(16 * scale);
-  // Arms extend from body
-  for (let i = 0; i < armLen; i++) {
-    // Left arm
-    const lx = px + offsetX - i - 1;
-    // Right arm
-    const rx = px + offsetX + Math.floor(SPRITE_W * scale) + i;
-    for (let dy = 0; dy < Math.max(1, Math.floor(2 * scale)); dy++) {
-      if (armY + dy >= 0 && armY + dy < bg.length) {
-        if (lx >= 0 && lx < bg[0]!.length) bg[armY + dy]![lx] = coatColor;
-        if (rx >= 0 && rx < bg[0]!.length) bg[armY + dy]![rx] = coatColor;
-      }
-    }
-  }
-
-  // Draw the face sprite scaled
-  for (let y = 0; y < SPRITE_H; y++) {
-    for (let x = 0; x < SPRITE_W; x++) {
-      const ch = grid[y]![x];
-      if (!ch) continue;
-      const idx = decodeChar(ch);
-      if (MG_TRANSPARENT.has(idx)) continue;
-      const sx = Math.floor(px + offsetX + x * scale);
-      const sy = Math.floor(py + offsetY + y * scale);
-      const sw = Math.max(1, Math.floor(scale));
-      for (let dy = 0; dy < sw; dy++) {
-        for (let dx = 0; dx < sw; dx++) {
-          const bx = sx + dx;
-          const by = sy + dy;
-          if (by >= 0 && by < bg.length && bx >= 0 && bx < bg[0]!.length) {
-            bg[by]![bx] = MG_PALETTE[idx]!;
-          }
-        }
-      }
-    }
-  }
-
-  // Draw coat body below the face
-  const coatY = py + offsetY + Math.floor(SPRITE_H * scale);
-  const coatW = Math.floor(SPRITE_W * scale * 0.6);
-  const coatStartX = px + offsetX + Math.floor(SPRITE_W * scale * 0.2);
-  for (let dy = 0; dy < Math.floor(10 * scale); dy++) {
-    for (let dx = 0; dx < coatW; dx++) {
-      const bx = coatStartX + dx;
-      const by = coatY + dy;
-      if (by >= 0 && by < bg.length && bx >= 0 && bx < bg[0]!.length) {
-        bg[by]![bx] = coatColor;
       }
     }
   }

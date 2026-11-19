@@ -361,23 +361,50 @@ interface RunRequest {
   relaunch?: string | undefined;
 }
 
+interface LaunchRequest {
+  script: string;
+  args: unknown;
+  label: string;
+  relaunch?: string | undefined;
+  /** Working directory for the run; defaults to the session's. A relaunch keeps the original run's. */
+  cwd?: string | undefined;
+}
+
+/**
+ * A relaunch replays journal results produced in the original run's
+ * directory, so the rest of the run must work there too, not in whatever
+ * project the relaunching session has open.
+ */
+function relaunchCwd(stored: { id: string; cwd?: string }): { cwd?: string } | { error: string } {
+  if (stored.cwd === undefined) return {};
+  try {
+    if (fs.statSync(stored.cwd).isDirectory()) return { cwd: stored.cwd };
+  } catch {
+    // missing — reported below
+  }
+  return { error: `Workflow ${stored.id} ran in ${stored.cwd}, which no longer exists; it can't be relaunched.` };
+}
+
 /** Resolve what to run: a saved workflow, an inline script, or a relaunch. */
 function resolveRunRequest(
   req: RunRequest,
   cwd: string,
   trusted: boolean,
   runs: WorkflowRuns,
-): { script: string; args: unknown; label: string; relaunch?: string } | { error: string } {
+): LaunchRequest | { error: string } {
   if (req.relaunch) {
     const id = findWorkflowRun(runs, req.relaunch)?.id ?? req.relaunch;
     if (runs.get(id)?.status === 'running') return { error: `Workflow ${id} is still running; stop it first.` };
     const stored = readStoredRun(workflowRunsRoot(), id);
     if (!stored) return { error: `No workflow run '${req.relaunch}' to relaunch.` };
+    const runCwd = relaunchCwd(stored);
+    if ('error' in runCwd) return runCwd;
     return {
       script: req.script ?? stored.script,
       args: req.args !== undefined ? req.args : stored.args,
       label: stored.label,
       relaunch: id,
+      ...runCwd,
     };
   }
   if (req.name) {
@@ -579,18 +606,25 @@ export default function workflows(pi: ExtensionAPI): void {
     const sessionFile = ctx.sessionManager.getSessionFile();
     if (!ctx.hasUI || !sessionFile) return;
     const ids = findInterruptedRuns(workflowRunsRoot(), sessionFile);
+    let relaunched = 0;
     for (const id of ids) {
       const stored = readStoredRun(workflowRunsRoot(), id);
       if (!stored) continue;
+      const runCwd = relaunchCwd(stored);
+      if ('error' in runCwd) {
+        ctx.ui.notify(runCwd.error, 'warning');
+        continue;
+      }
       launch(
         ctx,
-        { script: stored.script, args: stored.args, label: stored.label, relaunch: id },
+        { script: stored.script, args: stored.args, label: stored.label, relaunch: id, ...runCwd },
         { onSettled: (run) => deliver(run, false, true) },
       );
+      relaunched++;
     }
-    if (ids.length > 0) {
+    if (relaunched > 0) {
       ctx.ui.notify(
-        `Relaunching ${ids.length} workflow${ids.length === 1 ? '' : 's'} interrupted when pi last exited (finished agents replay). Watch with /workflows.`,
+        `Relaunching ${relaunched} workflow${relaunched === 1 ? '' : 's'} interrupted when pi last exited (finished agents replay). Watch with /workflows.`,
         'info',
       );
     }
@@ -606,23 +640,24 @@ export default function workflows(pi: ExtensionAPI): void {
   /** Start a run; `onSettled` fires once with the finished run. */
   function launch(
     ctx: ExtensionContext,
-    req: { script: string; args: unknown; label: string; relaunch?: string | undefined },
+    req: LaunchRequest,
     opts: { timeoutMs?: number | undefined; signal?: AbortSignal | undefined; onSettled?: (run: WorkflowRun) => void },
   ): WorkflowRun {
     const ownerSession = ctx.sessionManager.getSessionFile();
+    const cwd = req.cwd ?? ctx.cwd;
     const run = startRun(runs, {
       root: workflowRunsRoot(),
       script: req.script,
       args: req.args,
       label: req.label,
-      cwd: ctx.cwd,
+      cwd,
       relaunch: req.relaunch,
       ownerSession,
       stallMs: workflowStallMs(),
       timeoutMs: opts.timeoutMs,
       signal: opts.signal,
       spawn: (runSignal) =>
-        makeSpawnFn(cancellables, runtime, ctx.cwd, ownerSession, runSignal, createPrefixStagger(workflowStaggerMs())),
+        makeSpawnFn(cancellables, runtime, cwd, ownerSession, runSignal, createPrefixStagger(workflowStaggerMs())),
       ...(ctx.hasUI ? { ui: ctx.ui } : {}),
       onChange: footer,
     });
@@ -733,7 +768,9 @@ export default function workflows(pi: ExtensionAPI): void {
       `${workflowMaxConcurrent()} agents run at once; at most 1000 agents per run and 4096 items per call.`,
       'checkpoint(label?) gates the run on a human confirm (dismiss or reject throws and stops the',
       'run). ask(question, options?) asks the human mid-run: select when options are given, yes/no',
-      'otherwise, undefined when dismissed. Use them before destructive or expensive steps.',
+      'otherwise, undefined when dismissed. Use them before destructive or expensive steps. Without a',
+      'UI (print/json mode) checkpoint is skipped (logged, the run continues) and ask throws, so guard',
+      'destructive steps some other way when no human is watching.',
       'The script runs in the host process with full Node access, the same trust boundary as bash.',
     ].join(' '),
     promptSnippet: 'Run a JS workflow script orchestrating subagents',

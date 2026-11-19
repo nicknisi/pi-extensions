@@ -1,7 +1,7 @@
 {
   "name": "@nicknisi/pi-answer",
   "version": "0.3.6",
-  "description": "One-off LLM answers to side questions without touching main agent context",
+  "description": "Extract questions from the last assistant reply into an interactive Q&A form and send the answers back",
   "keywords": [
     "pi",
     "pi-coding-agent",

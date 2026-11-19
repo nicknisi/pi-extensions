@@ -1,16 +1,16 @@
-import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
-import { declareUnlessSearchable, subagentsDir } from '@nicknisi/pi-shared';
+import { getAgentDir, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { declareUnlessSearchable, pidAlive, subagentsDir } from '@nicknisi/pi-shared';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 
-const AGENT_DIR = process.env.PI_CODING_AGENT_DIR?.startsWith('~/')
-  ? path.join(os.homedir(), process.env.PI_CODING_AGENT_DIR.slice(2))
-  : process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), '.pi', 'agent');
+// Resolved per call, like the writers (subagents, workflows), so PI_CODING_AGENT_DIR
+// normalization (bare `~`, relative paths) matches where runs are written.
+const runsRoot = () => subagentsDir('runs') ?? path.join(getAgentDir(), 'subagent-runs');
 
 const MAX_SCAN_FILES = 2500;
 const DEFAULT_LIMIT = 20;
 const DEFAULT_MAX_LINES = 500;
+const READ_SUBCOMMANDS = ['read', 'show', 'cat'];
 
 // Optionals are widened with `| undefined`: these are parsed out of on-disk
 // JSON, where a field may be absent or explicitly undefined.
@@ -56,48 +56,71 @@ function statMtime(file: string): number {
   }
 }
 
+interface RunFile {
+  namespace: string;
+  runId: string;
+  file: string;
+  mtime: number;
+}
+
 /**
- * Enumerate persisted run records under ~/.pi/agent/subagent-runs/<ns>/*.json,
- * or $PI_SUBAGENTS_DIR/runs/<ns>/*.json when set (written by @nicknisi/pi-shared's
- * in-process runtime). Unreadable or
- * invalid files are skipped; a record missing `namespace` inherits its
- * directory name.
+ * List candidate record files (no parsing), newest first by mtime, so callers
+ * that cap work keep the most recent runs regardless of namespace/readdir order.
  */
-function discoverRuns(): LocatedRun[] {
-  const root = subagentsDir('runs') ?? path.join(AGENT_DIR, 'subagent-runs');
-  const runs: LocatedRun[] = [];
+function listRunFiles(): RunFile[] {
+  const root = runsRoot();
+  const files: RunFile[] = [];
   let namespaces: string[];
   try {
-    namespaces = fs.readdirSync(root).sort();
+    namespaces = fs.readdirSync(root);
   } catch {
-    return runs;
+    return files;
   }
   for (const namespace of namespaces) {
     const dir = path.join(root, namespace);
-    let files: string[];
+    let names: string[];
     try {
-      files = fs.readdirSync(dir).filter((name) => name.endsWith('.json'));
+      names = fs.readdirSync(dir).filter((name) => name.endsWith('.json'));
     } catch {
       continue;
     }
-    for (const name of files) {
-      if (runs.length >= MAX_SCAN_FILES) break;
+    for (const name of names) {
       const file = path.join(dir, name);
-      let parsed: any;
-      try {
-        parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));
-      } catch {
-        continue;
-      }
-      if (!parsed || typeof parsed.runId !== 'string') continue;
-      const record = parsed as RunRecord;
-      if (typeof record.namespace !== 'string') record.namespace = namespace;
-      runs.push({
-        record,
-        file,
-        updatedAt: record.endedAt ?? record.startedAt ?? statMtime(file),
-      });
+      files.push({ namespace, runId: name.slice(0, -'.json'.length), file, mtime: statMtime(file) });
     }
+  }
+  return files.sort((a, b) => b.mtime - a.mtime);
+}
+
+/**
+ * Enumerate persisted run records under <agentDir>/subagent-runs/<ns>/*.json,
+ * or $PI_SUBAGENTS_DIR/runs/<ns>/*.json when set (written by @nicknisi/pi-shared's
+ * in-process runtime). The newest MAX_SCAN_FILES files (by mtime) are parsed.
+ * Unreadable or invalid files are skipped; a record missing `namespace`
+ * inherits its directory name. 'queued'/'running' records whose host process
+ * is gone are reported as 'stale'.
+ */
+function discoverRuns(): LocatedRun[] {
+  const runs: LocatedRun[] = [];
+  for (const { namespace, file, mtime } of listRunFiles().slice(0, MAX_SCAN_FILES)) {
+    let parsed: any;
+    try {
+      parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed.runId !== 'string') continue;
+    const record = parsed as RunRecord;
+    if (typeof record.namespace !== 'string') record.namespace = namespace;
+    if (
+      (record.status === 'running' || record.status === 'queued') &&
+      typeof record.hostPid === 'number' &&
+      record.hostPid !== process.pid &&
+      !pidAlive(record.hostPid)
+    ) {
+      record.status = 'stale';
+    }
+    runs.push({ record, file, updatedAt: record.endedAt ?? record.startedAt ?? mtime });
   }
   return runs.sort((a, b) => b.updatedAt - a.updatedAt);
 }
@@ -249,8 +272,7 @@ function readAgentUri(uri: string, maxLines = DEFAULT_MAX_LINES): string {
   throw new Error(`Unknown leaf '${leaf}' for ${uri}. Try summary, output, error, or raw.`);
 }
 
-function postCommandResult(pi: ExtensionAPI, ctx: ExtensionCommandContext, text: string) {
-  ctx.ui.notify('Agent URL result shown.', 'info');
+function postCommandResult(pi: ExtensionAPI, text: string) {
   pi.sendMessage({
     customType: 'agent-url',
     content: text,
@@ -370,24 +392,33 @@ export default function agentUrls(pi: ExtensionAPI) {
           .filter((item) => item.startsWith(parts[0] ?? ''))
           .map((item) => ({ value: item, label: item }));
       }
-      return discoverRuns()
+      const [sub = '', typed = ''] = parts;
+      if (!READ_SUBCOMMANDS.includes(sub) || parts.length > 2 || (parts.length === 2 && prefix.endsWith(' '))) {
+        return null;
+      }
+      // pi-tui replaces the whole argument text with `value`, so keep the
+      // subcommand. Filenames only (no JSON parsing) — this runs per keystroke.
+      const items = listRunFiles()
+        .map((run) => `agent://${run.namespace}/${run.runId}`)
+        .filter((uri) => uri.startsWith(typed) || (!typed.startsWith('agent://') && uri.includes(typed)))
         .slice(0, 20)
-        .map((run) => ({ value: runUri(run.record), label: runUri(run.record) }));
+        .map((uri) => ({ value: `${sub} ${uri}`, label: uri }));
+      return items.length ? items : null;
     },
     handler: async (args, ctx) => {
       const [sub = 'list', ...rest] = args.trim().split(/\s+/).filter(Boolean);
       if (['list', 'ls'].includes(sub)) {
-        postCommandResult(pi, ctx, formatRunList(discoverRuns(), rest.join(' ') || undefined, DEFAULT_LIMIT));
+        postCommandResult(pi, formatRunList(discoverRuns(), rest.join(' ') || undefined, DEFAULT_LIMIT));
         return;
       }
-      if (['read', 'show', 'cat'].includes(sub)) {
+      if (READ_SUBCOMMANDS.includes(sub)) {
         const uri = rest[0];
         if (!uri) {
           ctx.ui.notify('Usage: /agent read agent://<namespace>/<runId>', 'warning');
           return;
         }
         try {
-          postCommandResult(pi, ctx, readAgentUri(uri, DEFAULT_MAX_LINES));
+          postCommandResult(pi, readAgentUri(uri, DEFAULT_MAX_LINES));
         } catch (error) {
           ctx.ui.notify(error instanceof Error ? error.message : String(error), 'error');
         }

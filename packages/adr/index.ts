@@ -15,7 +15,7 @@
  * Recomputed per prompt, so the index is never stale within a session.
  * No-ops when no docs/decisions/ exists.
  */
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
@@ -28,7 +28,7 @@ export function findAdrDir(start: string): string | null {
   let dir = start;
   for (;;) {
     const candidate = join(dir, ADR_DIR);
-    if (existsSync(candidate)) return candidate;
+    if (statSync(candidate, { throwIfNoEntry: false })?.isDirectory()) return candidate;
     // `.git` is a directory in a checkout and a file in a worktree; either marks the repo root.
     if (existsSync(join(dir, '.git'))) return null;
     const parent = dirname(dir);
@@ -37,11 +37,15 @@ export function findAdrDir(start: string): string | null {
   }
 }
 
-/** Active ADR filenames, sorted by number. Templates excluded. */
+/** Active ADR filenames, sorted by number. Templates excluded. Unreadable dirs yield []. */
 export function listAdrs(dir: string): string[] {
-  return readdirSync(dir)
-    .filter((f) => ADR_FILE.test(f) && !f.startsWith('0000-'))
-    .sort();
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  return entries.filter((f) => ADR_FILE.test(f) && !f.startsWith('0000-')).sort();
 }
 
 const FRAMING = `## Decision records

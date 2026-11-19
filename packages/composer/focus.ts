@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { isViewportTUI, type TUI } from '@earendil-works/pi-tui';
 import { paneHasFocusedClient, parseFocusInput } from './utils.js';
 
@@ -14,25 +14,36 @@ let removeFocusListener: (() => void) | undefined;
 let ownsFocusReporting = false;
 let exitHookInstalled = false;
 
-function detectPaneFocus(): boolean {
-  if (!process.env.TMUX_PANE) return true;
+/** Ask tmux whether this pane is focused, off the render path: a slow or hung tmux must not block the TUI. */
+function detectPaneFocus(onResult: (focused: boolean) => void): void {
+  const pane = process.env.TMUX_PANE;
+  if (!pane) return;
   try {
-    return paneHasFocusedClient(
-      process.env.TMUX_PANE,
-      // A hung tmux must not block the TUI, and its errors must not land on screen.
-      execFileSync('tmux', ['list-clients', '-F', '#{client_flags}\t#{pane_id}'], {
-        encoding: 'utf8',
-        timeout: 1000,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      }),
-    );
+    execFile(
+      'tmux',
+      ['list-clients', '-F', '#{client_flags}\t#{pane_id}'],
+      // Its errors must not land on screen; on failure the pane stays "focused".
+      { encoding: 'utf8', timeout: 1000 },
+      (error, stdout) => {
+        if (!error) onResult(paneHasFocusedClient(pane, stdout));
+      },
+    ).stdin?.end();
   } catch {
-    return true;
+    /* tmux missing: stay focused */
   }
 }
 
+/** Bumped on every enable/disable so a stale tmux answer can't overwrite newer state. */
+let generation = 0;
+
 export function enableFocusTracking(tui: TUI): void {
-  paneFocused = detectPaneFocus();
+  const gen = ++generation;
+  paneFocused = true;
+  detectPaneFocus((focused) => {
+    if (gen !== generation) return;
+    paneFocused = focused;
+    tui.requestRender();
+  });
   ownsFocusReporting = !isViewportTUI(tui);
   process.stdout.write('\x1b[?1004h');
   if (!exitHookInstalled) {
@@ -51,6 +62,7 @@ export function enableFocusTracking(tui: TUI): void {
     const parsed = parseFocusInput(focusCarry, String(data));
     focusCarry = parsed.carry;
     if (parsed.focused === undefined) return;
+    generation++; // a live focus event beats a pending tmux answer
     paneFocused = parsed.focused;
     tui.requestRender();
   };
@@ -59,6 +71,7 @@ export function enableFocusTracking(tui: TUI): void {
 }
 
 export function disableFocusTracking(): void {
+  generation++;
   if (ownsFocusReporting) {
     try {
       process.stdout.write('\x1b[?1004l');

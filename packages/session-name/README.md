@@ -5,7 +5,7 @@ Name pi sessions so they're easy to search and resume. Pi's built-in `/name` wor
 ## What it adds
 
 - **Commands**
-  - `/sn [name]` — Set the session name. With no argument, shows the current name via `ctx.ui.notify`. `/sn clear` (also `-c`, `--clear`) clears it. Argument completion suggests `clear`.
+  - `/sn [name]` — Set the session name. With no argument, shows the current name via `ctx.ui.notify`. `/sn clear` (also `-c`, `--clear`) clears it. A name that is empty after removing control characters is rejected with an error. Argument completion suggests `clear`.
   - `/sessions [query] [--all]` — Interactive picker of sessions for the current project (`SessionManager.list(ctx.cwd)`), or across every project with `--all` / `-a` (`SessionManager.listAll()`). Selecting an entry resumes that session via `ctx.switchSession`. Requires interactive mode (`ctx.hasUI`).
 - **Terminal title** — Sets the window/tab title via `ctx.ui.setTitle` to reflect the session name (e.g. `fix login bug — dotfiles`). Reaches whatever pi's terminal layer drives (Ghostty, tmux panes, etc.).
 - **Auto-naming** — When the first prompt of an unnamed session starts a run (`before_agent_start`), derives a name from that prompt (heuristic mode) or a one-off LLM call (llm mode), then calls `pi.setSessionName`. Runs alongside the agent rather than delaying it. Fires at most once per session instance. A prompt with fewer than three words (`ok`, `hello`) is skipped and the next prompt gets another try, so a session isn't named "Empty start".
@@ -19,14 +19,14 @@ Name pi sessions so they're easy to search and resume. Pi's built-in `/name` wor
 | `session_shutdown`     | Aborts any in-flight LLM title call and clears the pending title timer so a resolved name never lands on a torn-down/replaced session.  |
 | `before_agent_start`   | Triggers auto-naming when the first prompt is sent, without blocking the run.                                                           |
 
-No custom tools, keybindings, widgets, or message/entry types.
+No custom tools, keybindings, widgets, or message types. `/sn clear` writes one custom entry type, `session-name-cleared` (not sent to the model).
 
 ## Usage
 
 ```
 /sn refactor auth flow        # name the current session
 /sn                           # show the current name
-/sn clear                     # clear it (won't be re-auto-named)
+/sn clear                     # clear it (won't be re-auto-named, even after /reload or resume)
 
 /sessions                     # picker: all sessions in this project
 /sessions auth                # filter by name, first message, or session id
@@ -77,11 +77,11 @@ LLM selection uses `selectSideModel` from `@nicknisi/pi-shared`, checking the pr
 ## How auto-naming works
 
 1. On `before_agent_start`, skip if already named (via `/sn`, `/name`, `--name`, or a prior auto-name), if `autoName` is `"off"`, or if the run was started by a custom message rather than a user prompt. Slash commands never start a run, so they never trigger naming.
-2. Use the first user message already in the branch that has at least three words (`ctx.sessionManager.getBranch()`, so a resumed unnamed session is named from its first real prompt), else the prompt being sent if it has three words. Otherwise wait for the next prompt. Naming then runs in the background; the agent run does not wait for it.
+2. Use the first user message already in the branch that has at least three words (`ctx.sessionManager.getBranch()`, so a resumed unnamed session is named from its first real prompt), else the prompt being sent if it has three words. Otherwise wait for the next prompt. A skill invocation (`/skill:name args`) arrives expanded into a `<skill …>` block; naming uses its args, or the skill name when the args are missing or under three words, never the skill body. Naming then runs in the background; the agent run does not wait for it.
 3. Heuristic mode: first non-empty line, whitespace-collapsed, truncated to `heuristicMaxLength`.
 4. LLM mode: one `ctx.modelRegistry.complete()` call (applies `models.json` overrides, extension-registered providers, and request-time auth) with a system prompt asking for a ≤ `llmMaxWords`-word title, fed the first user prompt (truncated to 1000 chars). The response is cleaned (first line; leading `#`, `**`/`__` emphasis around words (not inside identifiers like `foo__bar`), quotes and trailing punctuation stripped) and truncated to `heuristicMaxLength`. A `ctx.modelRegistry.getApiKeyAndHeaders(model)` pre-check falls back to the heuristic when no API key is available.
 5. A name manually set while the LLM call is in flight wins — the result is discarded. So does a session replaced or shut down meanwhile.
-6. Manually naming or clearing a session sets the per-session guard so auto-naming never fires afterward in that session instance.
+6. Manually naming or clearing a session sets the per-session guard so auto-naming never fires afterward in that session instance. `/sn clear` also appends a `session-name-cleared` custom entry to the session, so the opt-out survives `/reload` and resume.
 
 Every name, from either mode or `/sn`, has control and bidi characters replaced with spaces before it's saved, and the terminal title is cleaned the same way. Pi writes the title inside an escape sequence, so a stray ESC or BEL in a name could otherwise break out of it.
 
@@ -91,7 +91,7 @@ Every name, from either mode or `/sn`, has control and bidi characters replaced 
 
 - `@earendil-works/pi-coding-agent` (peer, `>=0.86.0`) — `ExtensionAPI`, `ExtensionContext`, `SessionEntry`, `SessionInfo`, `SessionManager` (used for `list`/`listAll` in `/sessions`).
 - `@earendil-works/pi-ai` (peer) — `Message` type for the LLM title request.
-- Node builtins: `node:fs`, `node:os`, `node:path`.
+- Node builtins: `node:fs`, `node:path`.
 
 ## Caveats
 

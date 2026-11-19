@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { declareUnlessSearchable } from '@nicknisi/pi-shared';
 import { Type, type Static } from 'typebox';
-import { bounded, fetchFile, search } from './client.js';
+import { bounded, fetchAdvice, fetchFile, search } from './client.js';
 
 const searchSchema = Type.Object({
   query: Type.String({ minLength: 1, description: 'Literal code pattern, not a natural-language question' }),
@@ -51,10 +51,8 @@ export default function (pi: ExtensionAPI) {
     parameters: fetchSchema,
     async execute(_id, params, signal) {
       const file = await fetchFile(pi, params, signal);
-      const result = bounded(
-        file.text || '(Empty file)',
-        `Use codefetch with a narrower startLine/endLine range after line ${file.startLine}. A single oversized line cannot be returned.`,
-      );
+      const text = file.totalLines === 0 ? '(Empty file)' : file.text || '(Blank line)';
+      const result = bounded(text, (truncation) => fetchAdvice(file.startLine, truncation));
       return {
         ...result,
         details: {

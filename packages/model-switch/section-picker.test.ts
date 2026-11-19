@@ -86,4 +86,25 @@ describe('SectionPicker filtering', () => {
 
     expect(done).toHaveBeenCalledWith('fireworks/accounts/fireworks/models/kimi-k3');
   });
+
+  it('keeps the highlighted item when a key does not change the query', () => {
+    const done = vi.fn();
+    const picker = new SectionPicker(sections(), theme, done);
+
+    picker.handleInput('\x1b[B'); // down → second item
+    picker.handleInput('\x1b[D'); // left arrow moves the input cursor only
+    picker.handleInput('\r');
+
+    expect(done).toHaveBeenCalledWith('cloudflare-ai-gateway/claude-opus-5');
+  });
+
+  it('forwards pageDown to the list', () => {
+    const done = vi.fn();
+    const picker = new SectionPicker(sections(), theme, done);
+
+    picker.handleInput('\x1b[6~'); // pageDown
+    picker.handleInput('\r');
+
+    expect(done).toHaveBeenCalledWith('fireworks/accounts/fireworks/models/kimi-k3');
+  });
 });

@@ -33,14 +33,16 @@ import {
   DEFAULT_AT,
   DEFAULT_BUFFER,
   DEFAULT_SOFT_AT,
+  FALLBACK_AT,
+  FALLBACK_BUFFER,
+  FALLBACK_SOFT_AT,
   FLAG_AT,
   FLAG_BUFFER,
   FLAG_PROMPT,
   FLAG_SOFT_AT,
-  resolveThresholds,
+  resolveThresholdsWithDefaults,
   tokensToPercent,
   type ConfigResult,
-  type FlagInputs,
 } from './config.js';
 import { contextBarLine, latestApplicableCacheRead } from './bar.js';
 import {
@@ -122,13 +124,43 @@ function isCustomEntry(entry: SessionEntry, customType: string): entry is Custom
   return entry.type === 'custom' && (entry as CustomEntryLike).customType === customType;
 }
 
-/** Latest handoff state on the branch, or undefined if there is none. */
+const HANDOFF_PHASES: ReadonlySet<string> = new Set<HandoffPhase>([
+  'pending',
+  'compacting',
+  'failed',
+  'ready-to-deliver',
+  'delivered',
+]);
+
+/** Normalize persisted handoff data, or undefined when its shape is unusable. */
+function parseHandoffState(data: unknown): HandoffState | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  const d = data as Record<string, unknown>;
+  if (typeof d.cycleId !== 'string' || typeof d.note !== 'string') return undefined;
+  if (typeof d.phase !== 'string' || !HANDOFF_PHASES.has(d.phase)) return undefined;
+  if (!Array.isArray(d.originalActiveTools)) return undefined;
+  return {
+    cycleId: d.cycleId,
+    phase: d.phase as HandoffPhase,
+    note: d.note,
+    originalActiveTools: d.originalActiveTools.filter((n): n is string => typeof n === 'string'),
+    completedCycles:
+      typeof d.completedCycles === 'number' && Number.isSafeInteger(d.completedCycles) && d.completedCycles >= 0
+        ? d.completedCycles
+        : 0,
+    ...(typeof d.sessionId === 'string' ? { sessionId: d.sessionId } : {}),
+    ...(typeof d.lastError === 'string' ? { lastError: d.lastError } : {}),
+    ...(typeof d.acknowledged === 'boolean' ? { acknowledged: d.acknowledged } : {}),
+  };
+}
+
+/** Latest well-formed handoff state on the branch, or undefined if there is none. */
 export function readHandoffState(entries: SessionEntry[]): HandoffState | undefined {
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
     if (entry && isCustomEntry(entry, STATE_ENTRY)) {
-      const data = entry.data;
-      if (data && typeof data === 'object') return data as HandoffState;
+      const state = parseHandoffState(entry.data);
+      if (state) return state;
     }
   }
   return undefined;
@@ -213,10 +245,13 @@ function isLockedPhase(phase: HandoffPhase): boolean {
 
 export default function (
   pi: ExtensionAPI,
+  // Prefer the session's live effective settings (no file IO); fall back to
+  // reading settings files on hosts without pi.getSettings().
   getKeepRecentTokens = (ctx: ExtensionContext): number =>
-    SettingsManager.create(ctx.cwd, undefined, {
-      projectTrusted: ctx.isProjectTrusted(),
-    }).getCompactionKeepRecentTokens(ctx.model),
+    (typeof pi.getSettings === 'function'
+      ? SettingsManager.inMemory(pi.getSettings())
+      : SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() })
+    ).getCompactionKeepRecentTokens(ctx.model),
 ) {
   // In-memory coordination only. Durable truth lives in branch custom entries.
   let busy = false;
@@ -233,6 +268,8 @@ export default function (
   let toolsBeforeTree: string[] | undefined;
   let contextBarPresent = false;
   let lastUiContext: ExtensionContext | undefined;
+  // compactable() is evaluated on every request; memoize per branch leaf.
+  let compactableCache: { key: string; value: boolean } | undefined;
   const unsubscribeContextBar = pi.events.on('composer:context-bar', (available) => {
     contextBarPresent = available === true;
     if (!disposed && lastUiContext) updateWidget(lastUiContext);
@@ -241,30 +278,26 @@ export default function (
   // late callback cannot touch a replaced session.
   const reconcileTimers = new Set<ReturnType<typeof setTimeout>>();
 
-  function flagString(name: string): string {
-    const value = pi.getFlag(name);
-    return typeof value === 'string' ? value : '';
-  }
-
   function flagOptional(name: string): string | undefined {
     const value = pi.getFlag(name);
     return typeof value === 'string' ? value : undefined;
   }
 
-  /** Resolve flags against the current model window; notify on an invalid ordering. */
   /** Compute (without side effects) the threshold config for the current model. */
   function computeConfig(ctx: ExtensionContext): ConfigResult {
     const window = ctx.model?.contextWindow;
     if (typeof window !== 'number') {
       return { ok: false, error: 'self-compact: no model selected; cannot resolve thresholds' };
     }
-    const inputs: FlagInputs = {
-      softAt: flagString(FLAG_SOFT_AT),
-      at: flagString(FLAG_AT),
-      buffer: flagString(FLAG_BUFFER),
-      compactPrompt: flagOptional(FLAG_PROMPT),
-    };
-    return resolveThresholds(inputs, window);
+    return resolveThresholdsWithDefaults(
+      {
+        softAt: flagOptional(FLAG_SOFT_AT),
+        at: flagOptional(FLAG_AT),
+        buffer: flagOptional(FLAG_BUFFER),
+        compactPrompt: flagOptional(FLAG_PROMPT),
+      },
+      window,
+    );
   }
 
   /** Re-resolve flags against the current model window; notify on an invalid ordering. */
@@ -373,7 +406,12 @@ export default function (
           note: existing.note,
           originalActiveTools: existing.originalActiveTools,
           completedCycles: existing.completedCycles,
-          ...(existing.sessionId !== undefined ? { sessionId: existing.sessionId } : {}),
+          // Bind to the session retrying it (a fork/clone carries the old id).
+          ...(sessionId !== undefined
+            ? { sessionId }
+            : existing.sessionId !== undefined
+              ? { sessionId: existing.sessionId }
+              : {}),
         };
         persist(rearmed);
       }
@@ -399,7 +437,13 @@ export default function (
   }
 
   function compactable(ctx: ExtensionContext): boolean {
-    return hasCompactionMaterial(branch(ctx), getKeepRecentTokens(ctx));
+    const entries = branch(ctx);
+    const keepRecentTokens = getKeepRecentTokens(ctx);
+    const key = `${entries.length}:${entries.at(-1)?.id ?? ''}:${keepRecentTokens}`;
+    if (compactableCache?.key === key) return compactableCache.value;
+    const value = hasCompactionMaterial(entries, keepRecentTokens);
+    compactableCache = { key, value };
+    return value;
   }
 
   /** Reconcile only from journaled messages, never from sendMessage returning. */
@@ -609,6 +653,23 @@ export default function (
     }
   }
 
+  function safeHasPendingMessages(ctx: ExtensionContext): boolean {
+    try {
+      return typeof ctx.hasPendingMessages === 'function' && ctx.hasPendingMessages();
+    } catch {
+      return false;
+    }
+  }
+
+  function continuationJournaled(ctx: ExtensionContext, cycleId: string): boolean {
+    return branch(ctx).some(
+      (entry) =>
+        entry.type === 'custom_message' &&
+        entry.customType === CONTINUATION_MESSAGE_TYPE &&
+        (entry.details as { cycleId?: string } | undefined)?.cycleId === cycleId,
+    );
+  }
+
   async function coordinate(ctx: ExtensionContext): Promise<void> {
     if (disposed || busy) return;
     const state = currentState(ctx);
@@ -771,18 +832,15 @@ export default function (
 
   pi.registerFlag(FLAG_SOFT_AT, {
     type: 'string',
-    default: DEFAULT_SOFT_AT,
-    description: 'Optional heads-up threshold: tokens (e.g. 225k) or a window percentage (e.g. 60%).',
+    description: `Optional heads-up threshold: tokens (e.g. 225k) or a window percentage (e.g. 60%). Default ${DEFAULT_SOFT_AT}, or ${FALLBACK_SOFT_AT} when the defaults do not fit the model window.`,
   });
   pi.registerFlag(FLAG_AT, {
     type: 'string',
-    default: DEFAULT_AT,
-    description: 'Warning threshold at which to save a note and self-compact.',
+    description: `Warning threshold at which to save a note and self-compact. Default ${DEFAULT_AT}, or ${FALLBACK_AT} when the defaults do not fit the model window.`,
   });
   pi.registerFlag(FLAG_BUFFER, {
     type: 'string',
-    default: DEFAULT_BUFFER,
-    description: 'Additional tokens or percentage points past --compact-at before ordinary tools are paused.',
+    description: `Additional tokens or percentage points past --compact-at before ordinary tools are paused. Default ${DEFAULT_BUFFER}, or ${FALLBACK_BUFFER} when the defaults do not fit the model window.`,
   });
   pi.registerFlag(FLAG_PROMPT, {
     type: 'string',
@@ -793,8 +851,9 @@ export default function (
   function buildInfoReport(ctx: ExtensionContext): string {
     ensureConfig(ctx);
     const lines: string[] = ['self-compact info:'];
+    const shown = (name: string): string => flagOptional(name) ?? '(default)';
     lines.push(
-      `  flags: --compact-soft-at=${flagString(FLAG_SOFT_AT)} --compact-at=${flagString(FLAG_AT)} --compact-buffer=${flagString(FLAG_BUFFER)}`,
+      `  flags: --compact-soft-at=${shown(FLAG_SOFT_AT)} --compact-at=${shown(FLAG_AT)} --compact-buffer=${shown(FLAG_BUFFER)}`,
     );
     const promptFlag = flagOptional(FLAG_PROMPT);
     lines.push(
@@ -853,6 +912,16 @@ export default function (
       }
       const state = currentState(ctx);
       if (state?.phase === 'ready-to-deliver') {
+        if (continuationJournaled(ctx, state.cycleId)) {
+          acknowledgeDelivery(ctx);
+          ctx.ui.notify('self-compact: the continuation was already delivered.', 'info');
+          return;
+        }
+        if (deliveryRequested === state.cycleId && (!safeIsIdle(ctx) || safeHasPendingMessages(ctx))) {
+          ctx.ui.notify('self-compact: the continuation is already queued.', 'info');
+          return;
+        }
+        // Re-submit only a continuation that was requested but never queued or journaled.
         deliveryRequested = undefined;
         if (safeIsIdle(ctx)) await coordinate(ctx);
         return;
@@ -970,11 +1039,24 @@ export default function (
     lastReservedMessageId = undefined;
     hardActive = false;
     hardOriginalTools = undefined;
+    compactableCache = undefined;
     sessionId = ctx.sessionManager.getSessionId();
 
     resolveConfig(ctx);
 
     let state = currentState(ctx);
+    // A /fork or /clone copies the branch (and its handoff) into a session with a
+    // new id. Rebind a locked handoff so coordinate() can still compact it.
+    if (
+      state &&
+      isLockedPhase(state.phase) &&
+      sessionId !== undefined &&
+      state.sessionId !== undefined &&
+      state.sessionId !== sessionId
+    ) {
+      state = { ...state, sessionId };
+      persist(state);
+    }
     if (state) {
       const entries = branch(ctx);
       const cycleId = state.cycleId;

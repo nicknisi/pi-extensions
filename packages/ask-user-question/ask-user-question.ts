@@ -85,11 +85,17 @@ function rejectWithoutUi() {
 }
 
 /** Sequential native-dialog walker for RPC hosts; brackets it with the blocked-event pair + terminal bell. */
-async function runRpcPath(pi: ExtensionAPI, ui: DialogUI, typed: QuestionParams, toolCallId: string) {
+async function runRpcPath(
+  pi: ExtensionAPI,
+  ui: DialogUI,
+  typed: QuestionParams,
+  toolCallId: string,
+  signal: AbortSignal | undefined,
+) {
   emitAskUserBlockedEvent(pi, true, toolCallId);
   try {
     emitTerminalAttention();
-    return buildQuestionnaireResponse(await runRpcQuestionnaire(ui, typed), typed);
+    return buildQuestionnaireResponse(await runRpcQuestionnaire(ui, typed, signal), typed);
   } finally {
     emitAskUserBlockedEvent(pi, false, toolCallId);
   }
@@ -134,13 +140,7 @@ type SessionModule = typeof import('./state/questionnaire-session.js');
 
 type SessionRef = { current: import('./state/questionnaire-session.js').QuestionnaireSession | null };
 type OverlayHandleRef = { current: OverlayHandle | undefined };
-/**
- * Pi's `custom()` options plus `blocked` (OSC 7501 program status): honoured inline on Pi 1.5.0+
- * and for overlays on 1.5.1+, ignored by older Pi, whose typings lack it.
- */
-type CustomOptions = NonNullable<Parameters<ExtensionContext['ui']['custom']>[1]> & {
-  blocked?: { kind: 'question'; message: string };
-};
+type CustomOptions = NonNullable<Parameters<ExtensionContext['ui']['custom']>[1]>;
 
 type SessionLoad =
   | { ok: true; module: SessionModule }
@@ -374,9 +374,9 @@ async function mountQuestionnaire(config: {
  * that predate ctx.mode land here: run the dialog walker when the host has the
  * primitives; otherwise tell the model the user never saw the questions.
  */
-async function resolveUndefinedResult(ctx: ExtensionContext, typed: QuestionParams) {
+async function resolveUndefinedResult(ctx: ExtensionContext, typed: QuestionParams, signal: AbortSignal | undefined) {
   if (hasDialogUI(ctx.ui)) {
-    return buildQuestionnaireResponse(await runRpcQuestionnaire(ctx.ui, typed), typed);
+    return buildQuestionnaireResponse(await runRpcQuestionnaire(ctx.ui, typed, signal), typed);
   }
   return buildToolResult(ERROR_NO_CUSTOM_UI, { answers: [], cancelled: true, error: 'no_custom_ui' });
 }
@@ -386,7 +386,13 @@ async function resolveUndefinedResult(ctx: ExtensionContext, typed: QuestionPara
  * Each mount races `open.answeredEarly`, so an inbound answer accepted before any dialog
  * took it ends the call — a host that mounts later closes the dialog on sight (factory).
  */
-async function runTuiPath(pi: ExtensionAPI, ctx: ExtensionContext, typed: QuestionParams, open: OpenQuestionnaire) {
+async function runTuiPath(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  typed: QuestionParams,
+  open: OpenQuestionnaire,
+  signal: AbortSignal | undefined,
+) {
   const itemsByTab: WrappingSelectItem[][] = typed.questions.map((q) => buildItemsForQuestion(q));
   let presentation: Presentation | undefined;
 
@@ -443,7 +449,7 @@ async function runTuiPath(pi: ExtensionAPI, ctx: ExtensionContext, typed: Questi
     if (result === undefined) {
       // The RPC walker takes over; its prompts cannot be answered from outside.
       open.host = 'rpc';
-      return await resolveUndefinedResult(ctx, typed);
+      return await resolveUndefinedResult(ctx, typed, signal);
     }
 
     return buildQuestionnaireResponse(result, typed);
@@ -462,10 +468,31 @@ async function runTuiPath(pi: ExtensionAPI, ctx: ExtensionContext, typed: Questi
  * re-imports and surfaces it through loadQuestionnaireSession's structured
  * envelope. unref keeps the timer from holding a non-TUI embedder's process
  * open.
+ *
+ * Fork: scheduled from `session_start`, and only in the terminal UI — print/json
+ * runs never show the tool and RPC hosts use the dialog walker, so neither needs
+ * the render graph. Scheduled once per process; `session_shutdown` cancels a
+ * pending timer.
  */
-function prewarmSessionGraph(): void {
-  const timer = setTimeout(() => void loadQuestionnaireSession().catch(() => undefined), PREWARM_DELAY_MS);
-  timer.unref?.();
+function registerSessionGraphPrewarm(pi: ExtensionAPI): void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let scheduled = false;
+  pi.on('session_start', (_event, ctx) => {
+    if (scheduled || !ctx.hasUI || ctx.mode !== 'tui') return;
+    scheduled = true;
+    timer = setTimeout(() => {
+      timer = undefined;
+      void loadQuestionnaireSession().catch(() => undefined);
+    }, PREWARM_DELAY_MS);
+    timer.unref?.();
+  });
+  pi.on('session_shutdown', () => {
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    timer = undefined;
+    // Not run yet: let a later session in this process schedule it again.
+    scheduled = false;
+  });
 }
 
 export function buildItemsForQuestion(question: QuestionData): WrappingSelectItem[] {
@@ -545,18 +572,18 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 
       // RPC hosts (VSCode pendant, ACP clients like Zed/Paseo — issue #78):
       // ui.custom() cannot render there, but the select/input dialog
-      // sub-protocol works. Hosts that advertise ctx.mode (pi ≥0.79) route to
-      // the sequential dialog walker up front, skipping the TUI render-graph
-      // import entirely; RPC builds that predate ctx.mode are caught by the
-      // custom()-resolved-undefined backstop below. See ./rpc-fallback.ts.
-      const viaRpc = (ctx as { mode?: string }).mode === 'rpc' && hasDialogUI(ctx.ui);
+      // sub-protocol works, so route to the sequential dialog walker up front,
+      // skipping the TUI render-graph import entirely. A host whose custom()
+      // resolves undefined anyway is caught by the backstop in runTuiPath.
+      // See ./rpc-fallback.ts.
+      const viaRpc = ctx.mode === 'rpc' && hasDialogUI(ctx.ui);
       // Open for inbound answers before the prompt goes out: an emitter may answer
       // straight from its prompt listener.
       const open = answers.open(toolCallId, typed.questions, viaRpc ? 'rpc' : 'tui');
       try {
         // Emit event for external listeners (e.g., notification plugins)
         emitAskUserPromptEvent(pi, typed, toolCallId);
-        if (viaRpc) return await runRpcPath(pi, ctx.ui, typed, toolCallId);
+        if (viaRpc) return await runRpcPath(pi, ctx.ui, typed, toolCallId, signal);
         // Fork: an untouched questionnaire closes after QUESTION_TIMEOUT_MS. It settles like an inbound
         // answer, so it closes the dialog whether or not it is mounted yet.
         // shortcut: no timeout once the RPC walker takes over (open.host === 'rpc'); add one if RPC hosts need it.
@@ -577,7 +604,7 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
         signal?.addEventListener('abort', onAbort, { once: true });
         if (signal?.aborted) onAbort();
         try {
-          return await runTuiPath(pi, ctx, typed, open);
+          return await runTuiPath(pi, ctx, typed, open, signal);
         } finally {
           stopTimer();
           signal?.removeEventListener('abort', onAbort);
@@ -588,7 +615,7 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
     },
   });
 
-  prewarmSessionGraph();
+  registerSessionGraphPrewarm(pi);
 }
 
 export { buildQuestionnaireResponse, buildToolResult };

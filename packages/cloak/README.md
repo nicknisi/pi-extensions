@@ -1,13 +1,13 @@
 # @nicknisi/pi-cloak
 
-Redacts secrets and other sensitive content from `read`, `bash`, and `grep` tool results before they enter model context. Rules are defined per-file-glob in a JSON config; when the agent reads a matching file, matched text is replaced with a masked string (e.g. `S********`) so credentials, tokens, and private values never reach the model while the agent can still see file structure and read around the masked regions.
+Redacts secrets and other sensitive content from `read`, `bash`, `powershell`, and `grep` tool results before they enter model context. Rules are defined per-file-glob in a JSON config; when the agent reads a matching file, matched text is replaced with a masked string (e.g. `S********`) so credentials, tokens, and private values never reach the model while the agent can still see file structure and read around the masked regions.
 
 ## What it adds
 
 - **Command:** `/cloak-status` — reloads the config and notifies with current status: `pi-cloak enabled=<bool> patterns=<n> config=<path>`, or the load error if the config is missing/invalid.
 - **Event hooks:**
   - `session_start` — reloads config; notifies a warning if the config file is missing, failed to parse, or had rules skipped. Without a UI (print/RPC mode), parse errors and skipped rules are written to stderr; a missing config stays silent.
-  - `tool_result` — intercepts results from the `read`, `bash`, and `grep` tools and rewrites text content parts in place. A rule applies when its `filePattern` matches the file the output came from: the `read` path, a file the `bash` command names (`cat .env`, `source ./.env.local`), or `grep`'s `path`/`glob`. Rules with `"global": true` apply to every `read`, `bash` and `grep` result. Other tools and non-text content parts pass through untouched. Returns `undefined` (no modification) when disabled, when no rule matches, or when nothing changed.
+  - `tool_result` — intercepts results from the `read`, `bash`, `powershell`, and `grep` tools and rewrites text content parts in place. A rule applies when its `filePattern` matches the file the output came from: the `read` path, a file the `bash`/`powershell` command names (`cat .env`, `source ./.env.local`, `Get-Content .env`), or `grep`'s `path`/`glob`. `grep` output is cloaked line by line: each `<path>:<n>: ` (or context `<path>-<n>- `) line also selects rules by its own file path, and patterns run on the text after that prefix, so `^` anchors at the start of the file's line. When truncated shell output is saved to a temp file (`Full output: <path>`), a later `read` of that file uses the same rules as the original command. Rules with `"global": true` apply to every `read`, `bash`, `powershell` and `grep` result. Other tools and non-text content parts pass through untouched. Returns `undefined` (no modification) when disabled, when no rule matches, or when nothing changed.
 - **Config file:** `<agentDir>/cloak.json` (see below).
 - **Exports (for other extensions/tests):** `loadState(configPath?)` and `cloakText(rawText, rawPaths, cwd, state)` are exported from `index.ts`. `rawPaths` is one path or a list; rules matching any of them, plus `global` rules, apply.
 
@@ -16,7 +16,7 @@ No tools, keybindings, widgets, or custom entry types.
 ## Install
 
 ```bash
-pi install /Users/nicknisi/Developer/pi-extensions/packages/cloak
+pi install npm:@nicknisi/pi-cloak
 ```
 
 ## Configuration
@@ -24,7 +24,7 @@ pi install /Users/nicknisi/Developer/pi-extensions/packages/cloak
 Config is read from `DEFAULT_CONFIG_PATH = join(getAgentDir(), "cloak.json")` — i.e. `~/.pi/agent/cloak.json` with a default pi setup. It is loaded at extension init and reloaded on `session_start` and `/cloak-status`. There is no live file watcher; edits take effect on the next session start or `/cloak-status`.
 
 - **Missing file:** no rules; tool results pass through unchanged (a warning is shown on session start in UI sessions).
-- **File exists but cannot be read or parsed** (e.g. invalid JSON): the extension **fails closed** — every `read`/`bash`/`grep` result is replaced with a `[pi-cloak: <tool> output withheld because the cloak config could not be loaded. …]` placeholder until the config is fixed and reloaded. The error is reported as above.
+- **File exists but cannot be read or parsed** (e.g. invalid JSON): the extension **fails closed** — every `read`/`bash`/`powershell`/`grep` result is replaced with a `[pi-cloak: <tool> output withheld because the cloak config could not be loaded. …]` placeholder until the config is fixed and reloaded. The error is reported as above.
 - **Invalid rule** (e.g. a bad regex): that rule is skipped and reported (`pi-cloak skipped rule #<n> …`); the other rules stay active.
 
 ### Top-level options
@@ -47,12 +47,12 @@ Config is read from `DEFAULT_CONFIG_PATH = join(getAgentDir(), "cloak.json")` �
 }
 ```
 
-| Key            | Type                        | Required | Description                                                                                                                                                                                                                                                                                                                                                                             |
-| -------------- | --------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `filePattern`  | `string \| string[]`        | yes      | Glob(s) matched against the read path. Supports `*` (within a segment), `**` (across segments, `**/` also matches zero directories), and `?`. Matching is attempted against the raw path, the cwd-resolved absolute path, and each path's basename, so both `**/.env*` and `.env` work. A leading `@` on the read path is stripped; `~` is expanded; backslashes are normalized to `/`. |
-| `cloakPattern` | `string \| object \| array` | yes      | Regex source string(s) applied to the whole text. Object form: `{ "pattern": string, "replace"?: string, "flags"?: string }`. The `g` and `m` flags are always added, so `^`/`$` anchor at line boundaries.                                                                                                                                                                             |
-| `replace`      | `string`                    | no       | Rule-level default replacement template; a per-pattern `replace` overrides it.                                                                                                                                                                                                                                                                                                          |
-| `global`       | `boolean`                   | no       | Apply this rule to every `read`, `bash` and `grep` result, not only to output from files matching `filePattern`. Use it for patterns specific enough to run on any output, such as known token prefixes (`sk-…`, `ghp_…`). Default `false`.                                                                                                                                             |
+| Key            | Type                        | Required | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| -------------- | --------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `filePattern`  | `string \| string[]`        | yes      | Glob(s) matched against the read path. Supports `*` (within a segment), `**` (across segments, `**/` also matches zero directories), and `?`. Matching is attempted against the raw path, the path without a leading `./`, the cwd-resolved absolute path, the cwd-relative path, and each path's basename, so `**/.env*`, `.env`, and `config/secrets.json` (for `/abs/cwd/config/secrets.json` or `./config/secrets.json`) all work. A leading `@` on the read path and a leading `./` on the glob are stripped; `~` is expanded; backslashes are normalized to `/`. |
+| `cloakPattern` | `string \| object \| array` | yes      | Regex source string(s) applied to the whole text. Object form: `{ "pattern": string, "replace"?: string, "flags"?: string }`. The `g` and `m` flags are always added, so `^`/`$` anchor at line boundaries.                                                                                                                                                                                                                                                                                                                                                            |
+| `replace`      | `string`                    | no       | Rule-level default replacement template; a per-pattern `replace` overrides it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `global`       | `boolean`                   | no       | Apply this rule to every `read`, `bash`, `powershell` and `grep` result, not only to output from files matching `filePattern`. Use it for patterns specific enough to run on any output, such as known token prefixes (`sk-…`, `ghp_…`). Default `false`.                                                                                                                                                                                                                                                                                                              |
 
 ### Replacement semantics
 
@@ -103,7 +103,7 @@ Effect: in `.env` files `API_KEY=sk-abc123` becomes `API_KEY=*********`; in `.pe
 /cloak-status
 ```
 
-Typical workflow: add rules to `~/.pi/agent/cloak.json`, run `/cloak-status` in a session to reload and verify the pattern count, then any `read` of a matching file, and any `bash`/`grep` output from a matching file (or matching a `global` rule), is masked before the model sees it.
+Typical workflow: add rules to `~/.pi/agent/cloak.json`, run `/cloak-status` in a session to reload and verify the pattern count, then any `read` of a matching file, and any `bash`/`powershell`/`grep` output from a matching file (or matching a `global` rule), is masked before the model sees it.
 
 ## Dependencies
 
@@ -112,11 +112,10 @@ Typical workflow: add rules to `~/.pi/agent/cloak.json`, run `/cloak-status` in 
 
 ## Caveats
 
-- **Only `read`, `bash`, and `grep` are cloaked.** `bash` output is matched to rules only through the file names its command mentions, so a secret printed without naming its file (`env`, `printenv`, `rg API_KEY`) is masked only by `global` rules; keep `global` patterns specific enough not to mask unrelated output. Content reaching the model via `edit` diffs, other tools, or encodings your patterns don't match (e.g. `base64 .env`) is not masked. Rules that depend on secrecy should assume shell access can bypass the cloak.
-- Depends on the `tool_result` event returning `{ content }` to mutate results, and on `event.input.path` being a string — both are pi internals that could change across versions.
+- **Only `read`, `bash`, `powershell`, and `grep` are cloaked.** Output of user `!cmd` shell commands is **not** cloaked: it goes into model context through pi's `user_bash` path, which never fires `tool_result` (use `!!cmd` to keep it out of context). `bash` output is matched to rules only through the file names its command mentions, so a secret printed without naming its file (`env`, `printenv`, `rg API_KEY`) is masked only by `global` rules; keep `global` patterns specific enough not to mask unrelated output. Content reaching the model via `edit` diffs, other tools, or encodings your patterns don't match (e.g. `base64 .env`) is not masked. Rules that depend on secrecy should assume shell access can bypass the cloak.
+- Depends on the `tool_result` event returning `{ content }` to mutate results, on `event.input.path` being a string, on grep's `<path>:<n>: ` line format, and on shell results' `details.fullOutputPath` — all pi internals that could change across versions.
 - Regexes are compiled with `new RegExp(spec)` directly from config, one rule at a time; a rule with an invalid regex is skipped and reported, the rest stay active.
 - Patterns run over the whole text. `.` does not cross line breaks unless you add the `s` flag, but `\s`, `\n`, and negated classes like `[^"]` can; use a lazy quantifier (`.*?`) for block patterns so one match doesn't swallow everything between the first BEGIN and the last END.
 - Glob matching is a hand-rolled `globToRegExp`, not a full glob library — no character classes (`[...]`) or brace expansion.
 - The masked output length can leak the original secret length when `cloakLength` is `null` (default). Set `cloakLength` to a fixed number to avoid this.
 - Config is not hot-reloaded on file change; reload requires a new session or `/cloak-status`.
-- Package name is `@nicknisi/pi-cloak`, private, single-file extension. (Directory renamed `cloak`; package name kept.)

@@ -59,6 +59,21 @@ describe('CLI safety', () => {
     expect(exec.mock.calls[1]![1]).toContain('--update-all');
     for (const args of exec.mock.calls) expect(args[2]).toEqual({ cwd, signal, timeout: 1234 });
   });
+  it('reports a nonexistent rewrite file clearly without invoking the CLI', async () => {
+    const { call, exec } = setup();
+    await expect(call('ast_rewrite', { ...rewrite, path: join(cwd, 'missing.ts') })).rejects.toThrow(
+      /ast_rewrite: file not found: .*missing\.ts/,
+    );
+    expect(exec).not.toHaveBeenCalled();
+  });
+  it('runs the version check once and reuses a successful result', async () => {
+    const { call, exec } = setup();
+    await call('ast_search', { pattern: 'x' });
+    await call('ast_search', { pattern: 'y' });
+    expect(exec.mock.calls.filter((c) => c[1][0] === '--version')).toHaveLength(1);
+    exec.mockResolvedValue({ ...ok, code: 1, stderr: 'spawn ast-grep ENOENT' });
+    await expect(call('ast_search', { pattern: 'z' })).rejects.toThrow(/not found/);
+  });
   it('rejects missing, empty, and directory rewrite paths without invoking the CLI', async () => {
     const { call, exec } = setup();
     for (const path of [undefined, '', cwd]) {
@@ -67,12 +82,13 @@ describe('CLI safety', () => {
     expect(exec).not.toHaveBeenCalled();
   });
   it('recognizes empty exit 1 only after a successful version check', async () => {
-    const { call, exec } = setup({ ...ok, code: 1 });
+    const { call } = setup({ ...ok, code: 1 });
     expect((await call('ast_search', { pattern: 'absent' })).content).toEqual([
       { type: 'text', text: 'Search results.\nNo matches found.' },
     ]);
-    exec.mockResolvedValue({ ...ok, code: 1 });
-    await expect(call('ast_search', { pattern: 'absent' })).rejects.toThrow(/executable unavailable/);
+    const fresh = setup();
+    fresh.exec.mockResolvedValue({ ...ok, code: 1 });
+    await expect(fresh.call('ast_search', { pattern: 'absent' })).rejects.toThrow(/executable unavailable/);
   });
   it('reports diagnostics and nonzero exits as errors', async () => {
     for (const code of [1, 2, 127]) {

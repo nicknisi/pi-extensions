@@ -1,7 +1,7 @@
 {
   "name": "@nicknisi/pi-handoff",
   "version": "0.1.13",
-  "description": "Compact the session into a handoff document for another agent",
+  "description": "Hand off context to a new linked session with a generated, editable prompt",
   "keywords": [
     "pi",
     "pi-coding-agent",

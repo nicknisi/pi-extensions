@@ -21,6 +21,14 @@ describe('findAdrDir', () => {
     expect(findAdrDir(join(repo))).toBeNull();
   });
 
+  it('ignores a docs/decisions that is a file', () => {
+    const root = mkdtempSync(join(tmpdir(), 'adr-'));
+    mkdirSync(join(root, 'docs'), { recursive: true });
+    writeFileSync(join(root, 'docs', 'decisions'), '');
+    mkdirSync(join(root, '.git'));
+    expect(findAdrDir(root)).toBeNull();
+  });
+
   it('returns null when nothing exists', () => {
     const root = mkdtempSync(join(tmpdir(), 'adr-'));
     expect(findAdrDir(root)).toBeNull();
@@ -39,6 +47,16 @@ describe('listAdrs', () => {
     writeFileSync(join(dir, 'README.md'), '');
     writeFileSync(join(dir, 'superseded', '0009-old.md'), '');
     expect(listAdrs(dir)).toEqual(['0001-first.md', '0002-second.md', '0003-template-rendering.md']);
+  });
+});
+
+describe('listAdrs errors', () => {
+  it('returns [] when the directory cannot be read', () => {
+    const root = mkdtempSync(join(tmpdir(), 'adr-'));
+    const file = join(root, 'not-a-dir');
+    writeFileSync(file, '');
+    expect(listAdrs(file)).toEqual([]);
+    expect(listAdrs(join(root, 'missing'))).toEqual([]);
   });
 });
 

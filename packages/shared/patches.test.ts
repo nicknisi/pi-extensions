@@ -74,9 +74,50 @@ index 7777777..8888888 100644
     const bin = p.files[1]!;
     expect(bin.header.some((l) => l.startsWith('diff --git a/bin/logo.png'))).toBe(true);
     expect(bin.header.some((l) => l.startsWith('Binary files'))).toBe(true);
+    // no ---/+++ lines: the path comes from the diff --git header
+    expect(bin.path).toBe('bin/logo.png');
+    expect(bin.sourcePath).toBe('bin/logo.png');
     // the following file still parses normally
     expect(p.files[2]!.path).toBe('src/d.ts');
     expect(p.hunks.filter((h) => h.fileIndex === 2)).toHaveLength(1);
+  });
+
+  it('takes paths for hunkless git-binary, rename, mode-only and spaced/quoted files from headers', () => {
+    const text = `diff --git a/img/new.png b/img/new.png
+new file mode 100644
+index 0000000..1234567
+GIT binary patch
+literal 3
+KcmZ?wbN~PV0RR91
+
+literal 0
+HcmV?d00001
+
+diff --git a/old name.ts b/new name.ts
+similarity index 100%
+rename from old name.ts
+rename to new name.ts
+diff --git a/my file.sh b/my file.sh
+old mode 100644
+new mode 100755
+diff --git "a/caf\\303\\251.txt" "b/caf\\303\\251.txt"
+index 1111111..2222222 100644
+--- "a/caf\\303\\251.txt"
++++ "b/caf\\303\\251.txt"
+@@ -1 +1 @@
+-a
++b
+diff --git a/gone.bin b/gone.bin
+deleted file mode 100644
+index 3333333..0000000
+Binary files a/gone.bin and /dev/null differ
+`;
+    const p = parseUnifiedDiff(text);
+    expect(p.files.map((f) => f.path)).toEqual(['img/new.png', 'new name.ts', 'my file.sh', 'café.txt', 'gone.bin']);
+    expect(p.files[0]).toMatchObject({ created: true, deleted: false });
+    expect(p.files[1]!.sourcePath).toBe('old name.ts');
+    expect(p.files[3]!.sourcePath).toBe('café.txt');
+    expect(p.files[4]).toMatchObject({ deleted: true, sourcePath: 'gone.bin' });
   });
 
   it('round-trips an empty patch', () => {

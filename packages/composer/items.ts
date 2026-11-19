@@ -20,7 +20,7 @@ import {
   resolveColor,
   type Runtime,
 } from './state.js';
-import { applyColor, truncateCells } from './utils.js';
+import { applyColor, sanitize, truncateCells } from './utils.js';
 
 export const DEFAULT_PRIORITY: Record<ItemName, number> = {
   working: 95,
@@ -184,7 +184,7 @@ function body(name: string, o: ItemOptions, env: ItemEnv): Body | null {
   }
   switch (name as ItemName) {
     case 'label': {
-      const text = rt.labelOverride ?? rt.sessionName;
+      const text = sanitize(rt.labelOverride ?? rt.sessionName ?? '');
       if (!text) return null;
       return { forms: [paint(env, o.color, text)], shrink: (w) => paint(env, o.color, truncateCells(text, w)) };
     }
@@ -355,14 +355,6 @@ function body(name: string, o: ItemOptions, env: ItemEnv): Body | null {
     }
   }
   return null;
-}
-
-/** Fold whitespace so a stray newline in an extension status can't break a row. */
-function sanitize(text: string): string {
-  return text
-    .replace(/[\r\n\t]/g, ' ')
-    .replace(/ +/g, ' ')
-    .trim();
 }
 
 /** Truncate styled text by visible width (keeps the leading SGR codes). */

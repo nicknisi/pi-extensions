@@ -29,20 +29,19 @@ export async function resolveAvailableModels(
   references: readonly string[],
   registry: ModelRegistryLike,
 ): Promise<Model<Api>[]> {
-  const available: Model<Api>[] = [];
-
+  const candidates: Model<Api>[] = [];
   for (const value of references) {
     const reference = parseModelReference(value);
     if (!reference) continue;
 
     const model = registry.find(reference.provider, reference.modelId);
-    if (!model) continue;
-
-    const auth = await registry.getApiKeyAndHeaders(model);
-    if (auth.ok) available.push(model);
+    if (model) candidates.push(model);
   }
 
-  return available;
+  // Resolve credentials concurrently (each may refresh OAuth or run a key
+  // command) while preserving config order in the result.
+  const auths = await Promise.all(candidates.map((model) => registry.getApiKeyAndHeaders(model)));
+  return candidates.filter((_model, index) => auths[index]?.ok);
 }
 
 export function findActiveSection(

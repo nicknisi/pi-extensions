@@ -29,7 +29,7 @@ The animation takes over the screen via `ctx.ui.custom()`. Press **Escape** or *
 6. **The departure** — the pixel guy spreads his arms and flies off across the landscape in an S-curve, shrinking into the distance with a whoosh
 7. **Finale** — "100% COMPLETE" with `File: {name} │ Status: REFINED │ WorkOS`
 
-Total runtime is roughly 30 seconds, driven by a 20fps (50ms) tick. The address phase ends when `say` exits, with a hard fallback timeout so a missing/silent `say` can't stall the sequence.
+Total runtime is roughly 35–40 seconds, driven by a 20fps (50ms) tick. The address phase ends when `say` exits (the monologue takes ~22 seconds), with a 24-second fallback timeout so a missing/silent `say` can't stall the sequence. The departure (5s) and finale (3s) then play in full.
 
 ## Files
 
@@ -50,11 +50,11 @@ None. No config file, no options, no environment variables (other than `$USER` f
 
 ## Caveats
 
-- **macOS only for audio.** `sound.ts` shells out to `afplay` and `say`. On other platforms the animation still renders, but silently, and the address phase falls back to its fixed timeout instead of tracking speech.
+- **macOS only for audio.** `sound.ts` shells out to `afplay` and `say`, and skips audio entirely on other platforms. There the animation still renders, but silently, and the address phase falls back to its fixed timeout instead of tracking speech. If either binary is missing on macOS, the failure is ignored the same way.
 - Audio is written to temp WAV files (`os.tmpdir()`) and played as child processes; all spawned processes are killed on dispose/exit.
 - TUI-only: in non-`tui` modes the command notifies and returns.
 - Requires a truecolor terminal — the renderer emits 24-bit ANSI color with half-block characters. In 256-color terminals the palette will be approximated at best.
-- It's ~30 seconds of full-screen animation and noise. Do not run it on a shared screen share unless that is exactly what you want.
+- It's ~40 seconds of full-screen animation and noise. Do not run it on a shared screen share unless that is exactly what you want.
 
 ## Install
 

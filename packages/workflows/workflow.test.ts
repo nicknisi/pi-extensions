@@ -12,7 +12,14 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createRunGate, runScript, type EngineSpawnFn, type EngineSpawnResult } from './engine.js';
+import {
+  compileScript,
+  createRunGate,
+  readStaticMeta,
+  runScript,
+  type EngineSpawnFn,
+  type EngineSpawnResult,
+} from './engine.js';
 
 const tmpdirs: string[] = [];
 
@@ -98,6 +105,72 @@ describe('engine: meta export + vm compile', () => {
     expect(r.meta?.name).toBe('lanes');
     expect(r.meta?.phases).toEqual([{ title: 'Execute' }]);
     expect(r.value).toBe(1);
+  });
+});
+
+describe('engine: compile never runs the script body', () => {
+  it('compileScript reads static meta without executing anything else', async () => {
+    const g = globalThis as { __wfSideEffects?: number };
+    g.__wfSideEffects = 0;
+    const compiled = compileScript(
+      [
+        "export const meta = { name: 'once', description: 'side effect; runs once' };",
+        'globalThis.__wfSideEffects++;',
+        'await checkpoint("gate");',
+        'globalThis.__wfSideEffects++;',
+        'return 1;',
+      ].join('\n'),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(compiled.meta).toEqual({ name: 'once', description: 'side effect; runs once' });
+    expect(g.__wfSideEffects).toBe(0);
+    delete g.__wfSideEffects;
+  });
+
+  it('runs side effects exactly once per run', async () => {
+    const g = globalThis as { __wfSideEffects?: number };
+    g.__wfSideEffects = 0;
+    await runScript({
+      script:
+        "export const meta = { name: 'x' };\nglobalThis.__wfSideEffects++;\nawait agent('a');\nglobalThis.__wfSideEffects++;",
+      spawn: fakeSpawn(),
+      cwd: '/tmp',
+    });
+    expect(g.__wfSideEffects).toBe(2);
+    delete g.__wfSideEffects;
+  });
+
+  it('a retry loop on agent() does not spin while compiling', () => {
+    // Under the old stub dry-run agent() resolved null forever and this froze the process.
+    const compiled = compileScript(
+      "export const meta = { name: 'retry' };\nlet r;\ndo { r = await agent('x'); } while (!r);\nreturn r;",
+    );
+    expect(compiled.meta?.name).toBe('retry');
+  });
+
+  it('meta derived from args is read from the real run', async () => {
+    const script = 'export const meta = { name: args.name };\nreturn meta.name;';
+    expect(compileScript(script).meta).toBeUndefined();
+    const metas: unknown[] = [];
+    const r = await runScript({
+      script,
+      args: { name: 'dyn' },
+      spawn: fakeSpawn(),
+      cwd: '/tmp',
+      onMeta: (m) => metas.push(m),
+    });
+    expect(r.meta).toEqual({ name: 'dyn' });
+    expect(metas).toEqual([{ name: 'dyn' }]);
+  });
+
+  it('readStaticMeta handles multi-line meta, separators inside strings, and odd input', () => {
+    expect(
+      readStaticMeta("export const meta = {\n  name: 'a;b',\n  description: `line\nbreak`, // c\n};\nreturn 1;"),
+    ).toEqual({ name: 'a;b', description: 'line\nbreak' });
+    expect(readStaticMeta('return 1;')).toBeUndefined();
+    expect(readStaticMeta("export const meta = 'str';")).toBeUndefined();
+    expect(readStaticMeta('export const meta = (() => { while (true); })();')).toBeUndefined();
+    expect(readStaticMeta('export const meta = { name: process.pid };')).toBeUndefined();
   });
 });
 

@@ -87,30 +87,70 @@ describe('ask_user_question.execute — lazy session-graph load guards (#107)', 
   });
 });
 
-describe('ask_user_question — registration pre-warm (#107)', () => {
-  it('schedules a background import of the session graph PREWARM_DELAY_MS after registration', async () => {
+/** Fire every handler the extension registered for `event`. */
+async function fire(captured: ReturnType<typeof createMockPi>['captured'], event: string, ctx: unknown = {}) {
+  for (const handler of captured.events.get(event) ?? []) await handler({ type: event }, ctx);
+}
+
+const TUI_CTX = { hasUI: true, mode: 'tui' };
+
+describe('ask_user_question — session pre-warm (#107)', () => {
+  it('schedules a background import of the session graph PREWARM_DELAY_MS after a TUI session starts', async () => {
     vi.useFakeTimers();
     const factory = vi.fn(() => ({ QuestionnaireSession: class {} }));
     vi.doMock(SESSION_SPECIFIER, factory);
     const { registerAskUserQuestionTool, PREWARM_DELAY_MS } = await import('./ask-user-question.js');
-    const { pi } = createMockPi();
+    const { pi, captured } = createMockPi();
     registerAskUserQuestionTool(pi);
 
     // Registration itself must stay off the render-graph critical path.
+    await vi.advanceTimersByTimeAsync(PREWARM_DELAY_MS);
     expect(factory).not.toHaveBeenCalled();
 
+    await fire(captured, 'session_start', TUI_CTX);
+    expect(factory).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(PREWARM_DELAY_MS);
     expect(factory).toHaveBeenCalled();
   });
 
-  it('swallows a pre-warm failure so registration-time churn never crashes the extension', async () => {
+  it.each([
+    ['print', { hasUI: false, mode: 'print' }],
+    ['json', { hasUI: false, mode: 'json' }],
+    ['rpc', { hasUI: true, mode: 'rpc' }],
+  ])('does not pre-warm in %s mode', async (_mode, ctx) => {
+    vi.useFakeTimers();
+    const factory = vi.fn(() => ({ QuestionnaireSession: class {} }));
+    vi.doMock(SESSION_SPECIFIER, factory);
+    const { registerAskUserQuestionTool, PREWARM_DELAY_MS } = await import('./ask-user-question.js');
+    const { pi, captured } = createMockPi();
+    registerAskUserQuestionTool(pi);
+    await fire(captured, 'session_start', ctx);
+    await vi.advanceTimersByTimeAsync(PREWARM_DELAY_MS * 2);
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it('cancels a pending pre-warm on session_shutdown', async () => {
+    vi.useFakeTimers();
+    const factory = vi.fn(() => ({ QuestionnaireSession: class {} }));
+    vi.doMock(SESSION_SPECIFIER, factory);
+    const { registerAskUserQuestionTool, PREWARM_DELAY_MS } = await import('./ask-user-question.js');
+    const { pi, captured } = createMockPi();
+    registerAskUserQuestionTool(pi);
+    await fire(captured, 'session_start', TUI_CTX);
+    await fire(captured, 'session_shutdown');
+    await vi.advanceTimersByTimeAsync(PREWARM_DELAY_MS * 2);
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it('swallows a pre-warm failure so session-start churn never crashes the extension', async () => {
     vi.useFakeTimers();
     vi.doMock(SESSION_SPECIFIER, () => {
       throw new Error("Cannot find module '/replaced/store/pi-coding-agent/dist/index.js'");
     });
     const { registerAskUserQuestionTool, PREWARM_DELAY_MS } = await import('./ask-user-question.js');
-    const { pi } = createMockPi();
+    const { pi, captured } = createMockPi();
     registerAskUserQuestionTool(pi);
+    await fire(captured, 'session_start', TUI_CTX);
     // Would reject unhandled (failing the test run) if the pre-warm didn't swallow.
     await vi.advanceTimersByTimeAsync(PREWARM_DELAY_MS);
   });

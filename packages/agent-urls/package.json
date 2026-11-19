@@ -1,7 +1,7 @@
 {
   "name": "@nicknisi/pi-agent-urls",
   "version": "0.2.8",
-  "description": "agent:// and history:// URL tools for reading pi-subagents runs, outputs, and transcripts",
+  "description": "agent:// URL tools for listing and reading subagent run records (status, usage, output, errors) persisted by the shared runtime",
   "keywords": [
     "pi",
     "pi-coding-agent",

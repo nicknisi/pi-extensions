@@ -100,7 +100,7 @@ it('compacts built-in and unknown rows, preserves results, and matches native ex
   bash.setExpanded(false);
   for (const component of [bash, row('mcp__test__query')]) {
     component.updateResult(result);
-    expect(plain(component)).toEqual(['', expect.stringContaining('▸ '), '  first … [ctrl+o]']);
+    expect(plain(component)).toEqual(['', expect.stringContaining('▸ '), '   first … [ctrl+o]']);
     component.setExpanded(true);
     expect(plain(component).join('\n')).toContain('third');
     component.setExpanded(false);
@@ -127,8 +127,8 @@ it('restores custom self-shell renderers and allows per-row clicks without sendi
   const component = row('custom', definition);
   component.updateResult(result);
   expect(plain(component)).toHaveLength(3);
-  expect(plain(component)[1]).toBe('▸ Original header');
-  expect(plain(component)[2]).toBe('  Original result … [ctrl+o]');
+  expect(plain(component)[1]).toBe(' ▸ Original header');
+  expect(plain(component)[2]).toBe('   Original result … [ctrl+o]');
   expect(click(component, 'click', 'right')).toBeUndefined();
   expect(click(component, 'wheel')).toBeUndefined();
   expect(click(component, 'drag')).toBeUndefined();
@@ -178,7 +178,7 @@ it('fills both compact lines with the native outcome background and never dumps 
   };
   const component = row('custom');
   component.updateArgs({ path: 'src/index.ts', content: 'private payload', extra: { nested: true } });
-  expect(plain(component)[1]).toBe('▸ custom src/index.ts');
+  expect(plain(component)[1]).toBe(' ▸ custom src/index.ts');
   for (const [isPartial, isError, background] of [
     [true, false, 'toolPendingBg'],
     [false, false, 'toolSuccessBg'],
@@ -202,11 +202,47 @@ it('summarizes JSON-only results instead of showing braces or serialized payload
     ['{\n  "partial":', 'Structured output …'],
   ]) {
     component.updateResult({ content: [{ type: 'text', text: text! }], isError: false });
-    expect(plain(component)[2]).toBe(`  ${preview} [ctrl+o]`);
+    expect(plain(component)[2]).toBe(`   ${preview} [ctrl+o]`);
     component.setExpanded(true);
     expect(plain(component).join('\n')).toContain(text!.split('\n')[0]);
     component.setExpanded(false);
   }
+});
+
+it('previews long bash output instead of the truncation hint', () => {
+  install();
+  const component = row('bash', createBashToolDefinition(process.cwd()));
+  const lines = Array.from({ length: 12 }, (_, index) => `line ${index + 1}`);
+  component.updateResult({ content: [{ type: 'text', text: lines.join('\n') }], isError: false });
+  const preview = plain(component)[2]!;
+  expect(preview).toMatch(/^ {3}line \d+ … \[ctrl\+o\]$/);
+  expect(preview).not.toContain('earlier lines');
+});
+
+it('indents collapsed rows by outputPad like the expanded shell', () => {
+  install();
+  const component = row('custom');
+  component.updateResult(result);
+  component.setOutputPad(0);
+  expect(plain(component).slice(1)).toEqual(['▸ custom printf "first\\nsecond\\nthird"', '  first … [ctrl+o]']);
+  component.setOutputPad(3);
+  expect(plain(component).slice(1)).toEqual(['   ▸ custom printf "first\\nsecond\\nthird"', '     first … [ctrl+o]']);
+  expect(component.render(80).slice(1).map(visibleWidth)).toEqual([80, 80]);
+});
+
+it('caps the text scanned for unrendered previews and caches per width', () => {
+  install();
+  const component = row('mcp__big');
+  const big = JSON.stringify({ items: Array.from({ length: 20_000 }, (_, id) => ({ id })) });
+  const parse = vi.spyOn(JSON, 'parse');
+  component.updateResult({ content: [{ type: 'text', text: big }], isError: false });
+  expect(plain(component)[2]).toBe('   Structured output [ctrl+o]');
+  component.render(80);
+  component.render(80);
+  const calls = parse.mock.calls.filter(([text]) => typeof text === 'string' && text.startsWith('{"items"'));
+  expect(calls.length).toBeLessThanOrEqual(1);
+  expect(calls.every(([text]) => (text as string).length <= 64 * 1024)).toBe(true);
+  parse.mockRestore();
 });
 
 it('does not touch the expansion state of print, JSON, and RPC runtimes', () => {

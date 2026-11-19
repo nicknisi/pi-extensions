@@ -5,8 +5,20 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { completeLogin, logout, startLogin, statusText } from './auth.js';
 
 function openBrowser(url: string): void {
-  const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
-  spawn(opener, [url], { detached: true, stdio: 'ignore' }).unref();
+  const [cmd, args]: [string, string[]] =
+    process.platform === 'darwin'
+      ? ['open', [url]]
+      : process.platform === 'win32'
+        ? ['rundll32', ['url.dll,FileProtocolHandler', url]] // avoids cmd.exe splitting the URL on '&'
+        : ['xdg-open', [url]];
+  try {
+    // A missing opener emits 'error' asynchronously; without a listener it would crash pi.
+    spawn(cmd, args, { detached: true, stdio: 'ignore' })
+      .on('error', () => {})
+      .unref();
+  } catch {
+    // The URL is also shown via notify, so the user can open it manually.
+  }
 }
 
 export default function claudeDesignExtension(pi: ExtensionAPI) {
@@ -14,6 +26,7 @@ export default function claudeDesignExtension(pi: ExtensionAPI) {
     description: 'Authorize Claude Design MCP access (opens browser, paste CODE#STATE back)',
     handler: async (_args, ctx) => {
       const start = startLogin();
+      ctx.ui.notify(`Open this URL to authorize Claude Design access:\n${start.url}`, 'info');
       openBrowser(start.url);
       const pasted = await ctx.ui.input(
         'Approve Claude Design access in the browser, then paste the CODE#STATE value:',

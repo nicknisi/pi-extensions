@@ -16,7 +16,7 @@ Extracts unanswered questions from the last completed assistant message and pres
 
 1. Walks `ctx.sessionManager.getBranch()` backwards to find the last assistant message with `stopReason === "stop"` and non-empty text. Incomplete (e.g. aborted or tool-loop) assistant messages are skipped, with a warning if any were skipped.
 2. Sends that message's text to an extraction model with a system prompt instructing it to return `{"questions": [{question, context?}]}` JSON — only questions that require user input, each self-contained.
-3. Parses the response leniently: tries the raw text, ` ```json ` fenced blocks, and the first `{`..`}` span. If parsing fails or the response is empty, falls back to a regex-based extractor that pulls `?`-terminated sentences out of the original message. Questions are trimmed and case-insensitively deduped.
+3. Parses the response leniently: tries the raw text, ` ```json ` fenced blocks, and the first `{`..`}` span. If parsing fails or the response is empty, falls back to a regex-based extractor that pulls `?`-terminated sentences out of the original message (ignoring code blocks, inline code, and URLs). A failed extraction request (auth, rate limit, network) is reported as an error instead of falling back. Questions are trimmed and case-insensitively deduped.
 4. Opens the answer form. On submit, builds a message:
 
    ```text
@@ -33,7 +33,7 @@ Extracts unanswered questions from the last completed assistant message and pres
 
 After each completed reply that contains a `?`, a classifier (TypeSafe's Jev by default) judges whether the reply asks you questions that need answers. If it does (probability at least 0.5), the footer shows `? ctrl+. to answer`. The hint clears on your next prompt or when you run `/answer`. A reply without a `?` skips the classifier.
 
-The hint is optional. With no credentials for any of the `hintModels`, an older pi without classifier support, a failed classifier call, or `"hintModels": []`, no hint shows and `/answer` works as before. The last 16,000 characters of the reply go to the classifier's provider.
+The hint is optional. With no credentials for any of the `hintModels`, an older pi without classifier support, a failed classifier call, or `"hintModels": []`, no hint shows and `/answer` works as before. The last 16,000 characters of the reply go to the classifier's provider. A missing classifier is looked up again on the next question-like reply, so logging in mid-session turns the hint on. A pending classifier call is aborted on your next prompt or session shutdown.
 
 ## Usage
 
@@ -92,7 +92,7 @@ No third-party npm dependencies.
 - **Editor render slicing.** `AnswerComponent.render` strips the first and last lines of the embedded `Editor.render()` output (`editorLines[1..len-2]`) assuming the Editor wraps its content in a border frame. If pi-tui's `Editor` render shape changes, answers will render wrong.
 - **Extraction is heuristic at the edges.** The LLM prompt tries to keep questions self-contained, but the regex fallback (`fallbackExtractQuestions`) is naive — it splits on sentence boundaries ending in `?` and can produce context-free or false-positive questions when extraction JSON parsing fails.
 - **Multi-part assistant messages** are flattened by joining all text parts with `\n`; non-text parts (tool calls, thinking) are ignored.
-- Requires interactive UI (`ctx.hasUI`); errors out in headless mode.
+- Requires the interactive TUI (`ctx.mode === "tui"`); in RPC mode it reports an error, and in print/JSON mode it does nothing. The answer hint is also TUI-only.
 
 ## Install
 

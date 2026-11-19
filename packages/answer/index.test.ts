@@ -12,14 +12,12 @@ const reply = (text: string) => ({
 });
 
 /** `probability` undefined means no classifier is available at all. */
-function harness(probability?: number) {
+function harness(probability?: number, mode = 'tui') {
   const handlers = new Map<string, Handler>();
   const setStatus = vi.fn();
   const classify = vi.fn(async () => ({ stopReason: 'stop', answers: { q: { type: 'bool', probability } } }));
-  const registry =
-    probability === undefined
-      ? {}
-      : { getAvailableOfType: async () => [{ provider: 'typesafe', id: 'jev-latest' }], classify };
+  const available = vi.fn(async () => [{ provider: 'typesafe', id: 'jev-latest' }]);
+  const registry = probability === undefined ? {} : { getAvailableOfType: available, classify };
   const pi = {
     on: (name: string, handler: Handler) => handlers.set(name, handler),
     registerCommand: () => {},
@@ -27,13 +25,14 @@ function harness(probability?: number) {
   } as unknown as ExtensionAPI;
   const ctx = {
     hasUI: true,
+    mode,
     modelRegistry: registry,
     ui: { setStatus, notify: vi.fn(), theme: { fg: (_c: string, s: string) => s } },
   } as unknown as ExtensionContext;
   answer(pi);
   const fire = (name: string, event: unknown = {}) => handlers.get(name)!(event, ctx);
   const hint = () => [...setStatus.mock.calls].reverse().find(([key]) => key === 'answer-hint')?.[1];
-  return { classify, fire, hint };
+  return { available, classify, fire, hint };
 }
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -89,5 +88,40 @@ describe('answer hint', () => {
     await h.fire('input', { source: 'interactive', text: 'postgres' });
     await settle();
     expect(h.hint()).toBeUndefined();
+  });
+
+  it('retries the classifier lookup after none was found', async () => {
+    const h = harness(0.9);
+    h.available.mockResolvedValueOnce([]);
+    await h.fire('session_start');
+    await h.fire('agent_end', reply('Which database should I use?'));
+    await settle();
+    expect(h.hint()).toBeUndefined();
+    await h.fire('agent_end', reply('Which database should I use?'));
+    await settle();
+    expect(h.hint()).toBe('? ctrl+. to answer');
+  });
+
+  it('aborts a pending classifier call on new input and shutdown', async () => {
+    const h = harness(0.9);
+    await h.fire('session_start');
+    await h.fire('agent_end', reply('Which database should I use?'));
+    await settle();
+    const signals = () => h.classify.mock.calls.map((call) => (call as unknown[])[2] as { signal?: AbortSignal });
+    expect(signals()[0]?.signal?.aborted).toBe(false);
+    await h.fire('input', { source: 'interactive', text: 'postgres' });
+    expect(signals()[0]?.signal?.aborted).toBe(true);
+    await h.fire('agent_end', reply('Which one?'));
+    await settle();
+    await h.fire('session_shutdown');
+    expect(signals()[1]?.signal?.aborted).toBe(true);
+  });
+
+  it('skips the hint outside the TUI', async () => {
+    const h = harness(0.9, 'rpc');
+    await h.fire('session_start');
+    await h.fire('agent_end', reply('Which database should I use?'));
+    await settle();
+    expect(h.classify).not.toHaveBeenCalled();
   });
 });

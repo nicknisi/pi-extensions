@@ -78,7 +78,7 @@ Design rules baked in:
 
 - **Hermetic children.** No user extensions, skills, prompt templates, themes, or context files load into a child unless explicitly requested (`extensionPaths`, `skillPaths`, `includeContextFiles`). A configured pi-subagents install never leaks in.
 - **Tool scoping by construction.** A child gets exactly the allowlisted built-ins plus the supervisor tool when requested. No spawn capability exists as a tool, so children cannot spawn children.
-- **Never rejects.** `spawn()` resolves a discriminated union. `schema_invalid` (unparseable/invalid JSON) is deliberately distinct from a schema-valid answer whose _content_ reports failure — engines with retry loops key off that distinction.
+- **Never rejects.** `spawn()` (and `spawnDetached().done`) resolves a discriminated union — setup errors (loader, session, model runtime) settle as `kind: 'crashed'` too, and every early failure is persisted as `failed`. `schema_invalid` (unparseable/invalid JSON) is deliberately distinct from a schema-valid answer whose _content_ reports failure — engines with retry loops key off that distinction.
 - **The supervisor channel is a closure.** `onSupervisorRequest` registers a `<namespace>_contact_supervisor` tool in the child wired straight to the parent handler — no filesystem protocol, no polling.
 - **Ecosystem recursion guard, honored not namespaced.** Spawning is refused when `PI_SUBAGENT_DEPTH` / `PI_SUBAGENT_CHILD` are set (i.e. your extension is itself running inside a pi-subagents child).
 - **Live usage.** `onUsage` receives cumulative input, output, total-token, and optional cost data after each completed assistant response. The current total is also mirrored onto the live `RunRecord`, so registry-backed views can display token burn before the run settles. Observer errors never fail the child.
@@ -192,7 +192,11 @@ Optional classifier calls that degrade instead of failing. `findClassifier` retu
 
 ## Configuration
 
-None. No config files, no options, no environment variables.
+No config files or options. Environment variables read at call time:
+
+- `PI_SUBAGENTS_DIR` — when set, worktrees, child sessions and workflow run dirs (and, by convention, consuming extensions' run artifacts and patch state) live under it. See `subagentsDir()`.
+- `PI_CODING_AGENT_DIR` — the pi agent dir used for default worktree (`subagent-worktrees/`) and workflow run locations; defaults to `~/.pi/agent`.
+- `PI_SUBAGENT_DEPTH` / `PI_SUBAGENT_CHILD` — ecosystem recursion guard: when either is set, `spawn()` refuses (`kind: 'crashed'`) instead of nesting subagents.
 
 ## Install
 
@@ -209,14 +213,12 @@ pi would load the package and find no extension entry point.
 Peer dependencies (all `*`, provided by the pi runtime):
 
 - `@earendil-works/pi-ai` — types.
-- `@earendil-works/pi-coding-agent` — `ExtensionContext` type; the `RenderableNode` shape targets its component tree.
-- `@earendil-works/pi-tui` — `truncateToWidth`, `visibleWidth` (layout), and `Container`, `Input`, `SelectList`, `getKeybindings` (searchable select).
+- `@earendil-works/pi-coding-agent` — `ExtensionContext`/`ModelRegistry` types, and the SDK (`createAgentSession`, `SessionManager`, `ModelRuntime`, …) the subagent runtime loads lazily; the `RenderableNode` shape targets its component tree.
+- `typebox` — `outputSchema` validation in `subagents.ts` (`Value.Check`/`Clean`/`Convert`/`Errors`). At pi-load time the import is aliased to pi's bundled copy.
 
-Runtime npm dependencies:
-
-- `typebox` — `outputSchema` validation in `subagents.ts` (`Value.Check`/`Clean`/`Convert`/`Errors`). At pi-load time the import is aliased to pi's bundled copy; the declared dependency covers non-pi consumers of the published package.
+There are no runtime npm dependencies.
 
 ## Caveats
 
 - `package.json` `files` lists every shipped source plus `dist`; `pnpm pack`/publish produces a working tarball.
-- The package is marked `private: true` and ships TypeScript sources (`exports: { ".": "./index.ts" }`); consumers must run in pi's TS-loading extension environment, not plain Node.
+- The package is published. `exports` points at the compiled `./dist` (`index.js` + `.d.ts`), so plain Node consumers work; the `.ts` sources ship alongside for reference.

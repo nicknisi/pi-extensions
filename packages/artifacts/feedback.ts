@@ -3,7 +3,16 @@
  * so `smoke.mjs` can drive it directly against `dist/`.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -331,7 +340,15 @@ export async function shareBaked(
   slug: string,
   title: string,
   method: 'copy' | 'gist' | 'image' | 'pdf',
-  opts?: { public?: boolean; bake?: boolean; baseUrl?: string; width?: number; height?: number },
+  opts?: {
+    public?: boolean;
+    bake?: boolean;
+    baseUrl?: string;
+    width?: number;
+    height?: number;
+    /** Cancels the headless browser / gh child process. */
+    signal?: AbortSignal | undefined;
+  },
 ): Promise<ShareResult> {
   if (method === 'image' || method === 'pdf') {
     if (!opts?.baseUrl) throw new Error('image/pdf shares need baseUrl (the server content origin)');
@@ -342,12 +359,12 @@ export async function shareBaked(
     const url = `${opts.baseUrl}/c/${slug}.html${query}`;
     if (method === 'image') {
       const pngPath = join(artifactDir(), `${slug}.png`);
-      await screenshotUrl(url, pngPath, opts.width ?? 1280, opts.height ?? 800);
+      await screenshotUrl(url, pngPath, opts.width ?? 1280, opts.height ?? 800, opts.signal);
       const copied = await copyImageToClipboard(pngPath);
       return { count, path: pngPath, copied };
     }
     const pdfPath = join(artifactDir(), `${slug}.pdf`);
-    await pdfToFile(url, pdfPath);
+    await pdfToFile(url, pdfPath, opts.signal);
     const copied = await copyFileToClipboard(pdfPath);
     return { count, path: pdfPath, copied };
   }
@@ -359,18 +376,22 @@ export async function shareBaked(
     await copyToClipboard(html);
     return { count, bytes: html.length };
   }
-  // gist — the baked render uploads from a temp file; the artifact stays clean
-  let path = artifactPath(slug);
+  // gist — the baked render uploads from a temp file; the artifact stays clean.
+  // A private mkdtemp dir per share: no symlink pre-creation in a shared /tmp, and
+  // concurrent shares of one slug can't delete each other's file. The basename
+  // stays `<slug>-with-comments.html` because it becomes the gist filename.
+  const tempDir = baked ? mkdtempSync(join(tmpdir(), 'pi-artifacts-')) : null;
   try {
-    if (baked) {
-      path = join(tmpdir(), `${slug}-with-comments.html`);
-      writeFileSync(path, baked.html, 'utf-8');
+    let path = artifactPath(slug);
+    if (baked && tempDir) {
+      path = join(tempDir, `${slug}-with-comments.html`);
+      writeFileSync(path, baked.html, { encoding: 'utf-8', flag: 'wx' });
     }
-    const url = await createGist(path, title, opts?.public ?? false);
+    const url = await createGist(path, title, opts?.public ?? false, opts?.signal);
     await copyToClipboard(url).catch(() => {}); // clipboard is a nicety, never the failure mode
     return { count, url };
   } finally {
-    if (baked) rmSync(path, { force: true });
+    if (tempDir) rmSync(tempDir, { recursive: true, force: true });
   }
 }
 

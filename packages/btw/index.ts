@@ -1,5 +1,5 @@
 /**
- * /btw extension — side-channel chat in a floating window
+ * /btw extension — side-channel chat in an inline window
  *
  * Usage: /btw <question>
  *
@@ -30,9 +30,10 @@
 import { execFile } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AssistantMessage, Message, ThinkingLevel } from '@earendil-works/pi-ai';
-import type { ExtensionAPI, SessionEntry, Theme } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, SessionEntry, SessionProjection, Theme } from '@earendil-works/pi-coding-agent';
 import { convertToLlm, CURRENT_SESSION_VERSION, getMarkdownTheme } from '@earendil-works/pi-coding-agent';
 import { selectSideModel } from '@nicknisi/pi-shared';
 import { loadBtwConfig } from './config.js';
@@ -121,8 +122,45 @@ function formatThreadForPromote(turns: Turn[], model: string): string {
   return `FYI — I had this side conversation with ${model} (via /btw). Factor it into what you're doing where relevant:\n\n${body}`;
 }
 
+/**
+ * Snapshot the context the main agent actually sees and convert it to LLM
+ * messages for the side thread. Uses pi's canonical session projection
+ * (newest compaction only, branch summaries, custom messages, context edits).
+ * Legacy `btw-answer` custom messages are dropped, mirroring the context hook.
+ */
+export function buildSideThread(sessionManager: { buildSessionProjection(): SessionProjection }): Message[] {
+  const agentMessages = sessionManager
+    .buildSessionProjection()
+    .messages.filter((m) => !(m.role === 'custom' && (m as any).customType === CUSTOM_TYPE));
+  return dropUnansweredToolCalls(convertToLlm(agentMessages));
+}
+
+/**
+ * If /btw runs mid-turn, trailing tool calls have no results yet and
+ * Anthropic rejects tool_use blocks without a matching tool_result.
+ * Drop unanswered tool calls (and assistant messages left empty).
+ */
+export function dropUnansweredToolCalls(llmMessages: Message[]): Message[] {
+  const answered = new Set<string>();
+  for (const m of llmMessages) {
+    if (m.role === 'toolResult') answered.add(m.toolCallId);
+  }
+  const out: Message[] = [];
+  for (const m of llmMessages) {
+    if (m.role !== 'assistant') {
+      out.push(m);
+      continue;
+    }
+    const content = m.content.filter((c) => c.type !== 'toolCall' || answered.has(c.id));
+    if (content.length > 0) {
+      out.push(content.length === m.content.length ? m : { ...m, content });
+    }
+  }
+  return out;
+}
+
 /** Side-chat window: streaming markdown thread + follow-up editor. */
-class BtwWindow implements Component, Focusable {
+export class BtwWindow implements Component, Focusable {
   onAsk?: (question: string) => void;
 
   private _focused = false;
@@ -233,6 +271,9 @@ class BtwWindow implements Component, Focusable {
   }
 
   dispose(): void {
+    // pi may dispose the window without done() (reload/session switch):
+    // stop any in-flight request so it doesn't keep spending tokens.
+    this.abort?.abort();
     this.stopSpinner();
   }
 
@@ -409,6 +450,10 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand('btw', {
     description: 'Side-chat window: ask + follow-ups (never touches agent context)',
     handler: async (args, ctx) => {
+      if (ctx.mode !== 'tui') {
+        ctx.ui.notify('/btw requires the interactive TUI', 'error');
+        return;
+      }
       const question = args.trim();
       if (!question) {
         ctx.ui.notify('Usage: /btw <question>', 'error');
@@ -424,40 +469,9 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // Gather the context the main agent actually sees (compaction applied) and convert
-      // to LLM format. `getBranch()` is the raw history and can exceed the model's window
-      // on long sessions; a compaction entry becomes a leading user message carrying its summary.
-      const contextEntries = ctx.sessionManager.buildContextEntries();
-      const agentMessages: Extract<SessionEntry, { type: 'message' }>['message'][] = [];
-      for (const e of contextEntries) {
-        if (e.type === 'message') agentMessages.push(e.message);
-        else if (e.type === 'compaction')
-          agentMessages.push({
-            role: 'user',
-            content: [{ type: 'text', text: `Summary of the conversation so far:\n\n${e.summary}` }],
-            timestamp: Date.now(),
-          });
-      }
-      const llmMessages: Message[] = convertToLlm(agentMessages);
-
-      // If /btw runs mid-turn, trailing tool calls have no results yet and
-      // Anthropic rejects tool_use blocks without a matching tool_result.
-      // Drop unanswered tool calls (and assistant messages left empty).
-      const answered = new Set<string>();
-      for (const m of llmMessages) {
-        if (m.role === 'toolResult') answered.add(m.toolCallId);
-      }
-      const sideThread: Message[] = [];
-      for (const m of llmMessages) {
-        if (m.role !== 'assistant') {
-          sideThread.push(m);
-          continue;
-        }
-        const content = m.content.filter((c) => c.type !== 'toolCall' || answered.has(c.id));
-        if (content.length > 0) {
-          sideThread.push(content.length === m.content.length ? m : { ...m, content });
-        }
-      }
+      // Snapshot the context the main agent actually sees (compaction, branch
+      // summaries, custom messages and context edits applied).
+      const sideThread = buildSideThread(ctx.sessionManager);
 
       // Map thinking level ("off" → undefined, otherwise pass through).
       // A configured `thinking` overrides the session level.
@@ -520,6 +534,9 @@ export default function (pi: ExtensionAPI) {
 
             let final = '';
             for await (const event of stream) {
+              // A cancelled run may still yield buffered events; never let
+              // them leak into a retried question's answer.
+              if (signal?.aborted) return;
               if (event.type === 'text_delta') {
                 win.append(event.delta);
               } else if (event.type === 'done') {
@@ -580,7 +597,7 @@ export default function (pi: ExtensionAPI) {
  * to a NEW session file, leaving the live session untouched. Mirrors what
  * SessionManager.createBranchedSession does, minus the switch-in-place.
  */
-function forkSessionWithThread(
+export function forkSessionWithThread(
   sessionManager: {
     getBranch(): SessionEntry[];
     getCwd(): string;
@@ -655,7 +672,10 @@ function forkSessionWithThread(
     name: `btw: ${firstLine(turns[0]!.question, 50)}`,
   });
 
-  const file = join(sessionManager.getSessionDir(), `${iso.replace(/[:.]/g, '-')}_${header.id}.jsonl`);
+  // In-memory sessions (--no-session) have no session dir; don't drop the
+  // fork into the user's project via a relative path.
+  const dir = sessionManager.getSessionDir() || tmpdir();
+  const file = join(dir, `${iso.replace(/[:.]/g, '-')}_${header.id}.jsonl`);
   writeFileSync(file, [header, ...entries].map((e) => JSON.stringify(e)).join('\n') + '\n');
   return file;
 }
@@ -705,7 +725,10 @@ async function openFork(sessionFile: string, cwd: string): Promise<string> {
         '-e',
         '/bin/zsh',
         '-ilc',
-        `exec pi --session '${sessionFile}'`,
+        // Pass the path as $1 so no characters in it are interpreted by the shell.
+        'exec pi --session "$1"',
+        'btw',
+        sessionFile,
       ]);
       return 'btw fork opened in a new Ghostty window';
     } catch {
@@ -713,7 +736,12 @@ async function openFork(sessionFile: string, cwd: string): Promise<string> {
     }
   }
 
-  const cmd = `pi --session ${sessionFile}`;
+  const cmd = `pi --session ${shellQuote(sessionFile)}`;
   const copied = await copyToClipboard(cmd);
   return copied ? `btw fork ready (command copied): ${cmd}` : `btw fork ready: ${cmd}`;
+}
+
+/** POSIX single-quote a string for display/copy-paste into a shell. */
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }

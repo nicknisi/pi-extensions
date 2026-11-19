@@ -7,8 +7,9 @@
  * closed session waits on disk and is drained when the session resumes.
  *
  * Surface: one `relay` tool (list, list-cwd, send, ask, reply, pending,
- * cancel, status) and a `/relay` command. Renamed from the briefly-published @nicknisi/pi-relay@0.0.0 (itself a drop-in replacement for
- * nicobailon/pi-relay — uninstall it first (duplicate tool name).
+ * cancel, status, claim, watch) and a `/relay` command. Formerly published as
+ * @nicknisi/pi-intercom; it coexists with nicobailon/pi-intercom (no tool-name
+ * conflict).
  */
 
 import { randomUUID } from 'node:crypto';
@@ -33,7 +34,6 @@ import {
   pendingAsks,
   previewBody,
   readAudit,
-  readClaimedLetter,
   readOutgoingAsk,
   recoverInboxClaims,
   requeueClaimedLetter,
@@ -44,6 +44,10 @@ import {
   type Letter,
   type SendReceipt,
 } from './mailbox.js';
+// The validated core reader: a letter with a malformed sender/kind/ts is
+// rejected (and discarded) instead of throwing during delivery and being
+// requeued forever.
+import { readClaimedLetter } from './core.js';
 import { OutboundPolicy, inboundAccepts } from './policy.js';
 import {
   claimAlias,
@@ -198,9 +202,14 @@ export default function relay(pi: ExtensionAPI) {
     deliveredIds.add(id);
     if (deliveredIds.size > DELIVERED_IDS_CAP) deliveredIds.delete(deliveredIds.values().next().value!);
   };
-  // Presence watch: addr → last observed presence. A poller surfaces
-  // transitions as a notification message (no full turn wake).
-  const watched = new Map<string, Presence>();
+  // Presence watch: addr → last observed `${presence}:${status}`. A poller
+  // surfaces transitions (including idle↔working) as a notification message
+  // (no full turn wake).
+  const watched = new Map<string, string>();
+  const watchState = (rec: SessionRecord | null): string => {
+    const presence: Presence = rec ? presenceOf(rec) : 'offline';
+    return presence === 'live' ? `live:${rec!.status}` : presence;
+  };
   let watchPoller: ReturnType<typeof setInterval> | undefined;
 
   function writeSelf(patch: Partial<SessionRecord>): void {
@@ -283,31 +292,18 @@ export default function relay(pi: ExtensionAPI) {
         return false;
       }
     }
-    // steer lands between tool calls mid-run; triggerTurn wakes an idle
-    // session. A busy agent rejects triggerTurn ("Agent is already
-    // processing") — fall back to queueing for the next turn instead of
-    // losing the letter.
+    // pi picks the path itself: while streaming the message is steered in
+    // between tool calls; when idle, triggerTurn starts a run. The only
+    // synchronous failure is a stale/uninitialized runtime (reload or
+    // shutdown), where every option fails alike — the caller requeues the
+    // letter so a future drain retries.
     try {
       pi.sendMessage(message, { triggerTurn: true, deliverAs: 'steer' });
       auditDelivery('deliver');
       return true;
     } catch {
-      try {
-        pi.sendMessage(message, { triggerTurn: true, deliverAs: 'followUp' });
-        auditDelivery('deliver');
-        return true;
-      } catch {
-        try {
-          pi.sendMessage(message, { triggerTurn: false });
-          auditDelivery('deliver');
-          return true;
-        } catch {
-          // session is shutting down or otherwise undeliverable — the caller
-          // requeues the letter so a future drain retries
-          auditDelivery('deliver-failed');
-          return false;
-        }
-      }
+      auditDelivery('deliver-failed');
+      return false;
     }
   }
 
@@ -398,18 +394,24 @@ export default function relay(pi: ExtensionAPI) {
     watchPoller = setInterval(() => {
       if (!self || watched.size === 0) return;
       for (const [addr, prev] of watched) {
-        const rec = readRecord(root, addr);
-        const now: Presence = rec ? presenceOf(rec) : 'offline';
-        if (now === prev) continue;
-        watched.set(addr, now);
-        const label = rec ? `"${rec.name}"` : shortAddr(addr);
-        const state = now === 'live' ? (rec?.status ?? 'idle') : now === 'stalled' ? 'not responding' : 'offline';
-        pi.sendMessage({
-          customType: 'relay:notify',
-          content: `relay watch: ${label} is now ${state}.`,
-          display: true,
-          details: { kind: 'relay-notify', addr, presence: now },
-        });
+        try {
+          const rec = readRecord(root, addr);
+          const current = watchState(rec);
+          if (current === prev) continue;
+          watched.set(addr, current);
+          const now: Presence = rec ? presenceOf(rec) : 'offline';
+          const label = rec ? `"${rec.name}"` : shortAddr(addr);
+          const state = now === 'live' ? (rec?.status ?? 'idle') : now === 'stalled' ? 'not responding' : 'offline';
+          pi.sendMessage({
+            customType: 'relay:notify',
+            content: `relay watch: ${label} is now ${state}.`,
+            display: true,
+            details: { kind: 'relay-notify', addr, presence: now },
+          });
+        } catch {
+          // unreadable record or unsafe root this tick — skip the peer; an
+          // exception escaping a timer callback would crash pi
+        }
       }
     }, 5000);
     watchPoller.unref();
@@ -444,12 +446,16 @@ export default function relay(pi: ExtensionAPI) {
     kind: Letter['kind'],
     body: string,
     replyTo?: string,
+    beforeDeposit?: (letter: Letter) => void,
   ): Promise<{ letter?: Letter; verdict?: string; receipt?: SendReceipt; error?: string }> {
     const presence = presenceOf(target);
     const backlog = presence === 'live' && target.status === 'idle' ? 0 : unreadCount(root, target.addr);
     const verdict = policy.check(body, backlog, target.addr);
     if (!verdict.ok) return { error: verdict.reason };
     const letter = makeLetter(target.addr, kind, body, replyTo);
+    // Runs after the policy gate but before the letter is visible to the
+    // peer, so an ask's reply waiter exists before any reply can arrive.
+    beforeDeposit?.(letter);
     deposit(root, target.addr, letter);
     policy.recordSend(body, target.addr);
     if (presence === 'live') {
@@ -555,7 +561,8 @@ export default function relay(pi: ExtensionAPI) {
   });
 
   pi.on('agent_start', () => writeSelf({ status: 'working' }));
-  pi.on('agent_end', () => writeSelf({ status: 'idle' }));
+  // Idle only once pi has settled: agent_end can be followed by a retry,
+  // compaction retry, or queued follow-up, so it is not a final-idle signal.
   pi.on('agent_settled', () => writeSelf({ status: 'idle' }));
   pi.on('session_info_changed', () => writeSelf({ name: pi.getSessionName() ?? self?.name ?? 'Unnamed session' }));
 
@@ -742,25 +749,43 @@ export default function relay(pi: ExtensionAPI) {
           }
           const { record, error } = resolveTarget(params.to);
           if (!record) return toolResult(error!);
-          const sent = await sendLetter(record, params.action === 'ask' ? 'ask' : 'message', params.message);
-          if (!sent.letter) return toolResult(sent.error!);
           if (params.action === 'send') {
+            const sent = await sendLetter(record, 'message', params.message);
+            if (!sent.letter) return toolResult(sent.error!);
             return toolResult(
               `Sent to "${record.name}" (${shortAddr(record.addr)}) [id ${sent.letter.id.slice(0, 8)}]: ${sent.verdict}.`,
               { messageId: sent.letter.id, target: record.addr, receipt: sent.receipt },
             );
           }
-          // ask: track outgoing + block for the reply
-          trackOutgoingAsk(root, senderAddr, {
-            askId: sent.letter.id,
-            toAddr: record.addr,
-            body: params.message,
-            ts: sent.letter.ts,
-          });
+          // ask: track outgoing + register the reply waiter BEFORE the
+          // deposit, so a peer that answers during the receipt wait (or
+          // before it) is routed to this waiter instead of being injected as
+          // an ordinary message while the tool times out.
+          const message = params.message;
+          let reply: Promise<AskOutcome> | undefined;
+          let askId: string | undefined;
+          let sent: Awaited<ReturnType<typeof sendLetter>>;
+          try {
+            sent = await sendLetter(record, 'ask', message, undefined, (letter) => {
+              trackOutgoingAsk(root, senderAddr, {
+                askId: letter.id,
+                toAddr: record.addr,
+                body: message,
+                ts: letter.ts,
+              });
+              askId = letter.id;
+              reply = waitForReply(letter.id, Math.max(1000, params.timeoutMs ?? 120_000), signal ?? undefined);
+            });
+          } catch (sendError) {
+            if (askId !== undefined) {
+              askWaiters.get(askId)?.({ replied: false, reason: 'send failed' });
+              clearAsk(root, senderAddr, askId);
+            }
+            throw sendError;
+          }
+          if (!sent.letter) return toolResult(sent.error!);
           const outcome: AskOutcome =
-            generation === sessionGeneration
-              ? await waitForReply(sent.letter.id, Math.max(1000, params.timeoutMs ?? 120_000), signal ?? undefined)
-              : { replied: false, reason: 'session shutdown' };
+            generation === sessionGeneration && reply ? await reply : { replied: false, reason: 'session shutdown' };
           clearAsk(root, senderAddr, sent.letter.id); // out- entry
           if (!outcome.replied)
             return toolResult(`Ask ${sent.letter.id.slice(0, 8)} to "${record.name}": ${outcome.reason}.`);
@@ -825,7 +850,7 @@ export default function relay(pi: ExtensionAPI) {
           if (!params.to) return toolResult("watch requires 'to' (a peer name, address prefix, or @alias).");
           const { record, error } = resolveTarget(params.to);
           if (!record) return toolResult(error!);
-          watched.set(record.addr, presenceOf(record));
+          watched.set(record.addr, watchState(record));
           startWatchPoller();
           return toolResult(
             `Watching "${record.name}" (${shortAddr(record.addr)}) for presence transitions. Notifications arrive as relay messages.`,
@@ -927,7 +952,8 @@ export default function relay(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const [sub, ...rest] = (args ?? '').trim().split(/\s+/).filter(Boolean);
       if (sub === 'log') {
-        const limit = Math.max(1, Math.min(500, Number(rest[0] ?? 50)));
+        const parsed = Number.parseInt(rest[0] ?? '', 10);
+        const limit = Number.isFinite(parsed) ? Math.max(1, Math.min(500, parsed)) : 50;
         const entries = self ? readAudit(root, limit) : [];
         const text = self ? formatAudit(entries) : uninitializedText();
         if (!self || !ctx.hasUI) {

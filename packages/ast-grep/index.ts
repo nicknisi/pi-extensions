@@ -71,6 +71,7 @@ function bounded(output: string) {
 
 async function run(
   pi: Pick<ExtensionAPI, 'exec'>,
+  versionChecked: { ok: boolean },
   params: AstSearchInput | AstRewriteInput,
   cwd: string,
   signal: AbortSignal | undefined,
@@ -83,7 +84,13 @@ async function run(
   const path = resolve(cwd, (params.path ?? '.').replace(/^@/, ''));
   const execute = async () => {
     signal?.throwIfAborted();
-    if (rewrite && !(await stat(path)).isFile()) {
+    const info = rewrite
+      ? await stat(path).catch((error: NodeJS.ErrnoException) => {
+          if (error?.code === 'ENOENT') throw new Error(`ast_rewrite: file not found: ${path}`);
+          throw error;
+        })
+      : undefined;
+    if (info && !info.isFile()) {
       throw new Error('ast_rewrite requires a file, not a directory. Rewrite files individually.');
     }
     const args = ['run', `--pattern=${params.pattern}`, '--color=never', '--heading=never'];
@@ -95,12 +102,16 @@ async function run(
     try {
       const options = { cwd, ...(signal ? { signal } : {}), timeout: params.timeout ?? 30000 };
       // Pi's exec can report spawn ENOENT as an empty exit 1, identical to no matches.
-      const version = await pi.exec('ast-grep', ['--version'], options);
-      if (signal?.aborted || version.killed) throw new Error('ast-grep cancelled or timed out during version check.');
-      if (version.code !== 0 || !/^ast-grep \d/m.test(version.stdout)) {
-        throw new Error(
-          `ast-grep executable unavailable or incompatible. Install the ast-grep CLI and expose ast-grep on PATH. ${bounded(version.stderr).text}`,
-        );
+      // Verify the binary once per session; later calls reuse the successful check.
+      if (!versionChecked.ok) {
+        const version = await pi.exec('ast-grep', ['--version'], options);
+        if (signal?.aborted || version.killed) throw new Error('ast-grep cancelled or timed out during version check.');
+        if (version.code !== 0 || !/^ast-grep \d/m.test(version.stdout)) {
+          throw new Error(
+            `ast-grep executable unavailable or incompatible. Install the ast-grep CLI and expose ast-grep on PATH. ${bounded(version.stderr).text}`,
+          );
+        }
+        versionChecked.ok = true;
       }
       signal?.throwIfAborted();
       result = await pi.exec('ast-grep', args, options);
@@ -115,6 +126,10 @@ async function run(
     const caution = apply ? ' Files may already be partially modified. Inspect the diff before retrying.' : '';
     if (signal?.aborted || result.killed) {
       throw new Error(`ast-grep cancelled or timed out.${caution}`);
+    }
+    if (result.code !== 0 && /\bENOENT\b/.test(result.stderr) && /spawn/.test(result.stderr)) {
+      versionChecked.ok = false;
+      throw new Error('ast-grep executable not found. Install the ast-grep CLI and expose ast-grep on PATH.');
     }
     // Exit 1 means no matches only when both streams are empty. Never hide diagnostics.
     const noMatches = !result.stdout.trim() && !result.stderr.trim() && (result.code === 0 || result.code === 1);
@@ -134,6 +149,7 @@ async function run(
 }
 
 export default function (pi: ExtensionAPI) {
+  const versionChecked = { ok: false };
   const limits =
     ' Output is bounded to 500 lines / 30000 bytes with 2000-character lines. Narrow the path or pattern if truncated.';
   pi.registerTool({
@@ -145,7 +161,7 @@ export default function (pi: ExtensionAPI) {
     exposure: 'deferred',
     annotations: { readOnlyHint: true, openWorldHint: false },
     parameters: searchSchema,
-    execute: (_id, params, signal, _update, ctx) => run(pi, params, ctx.cwd, signal),
+    execute: (_id, params, signal, _update, ctx) => run(pi, versionChecked, params, ctx.cwd, signal),
   });
   pi.registerTool({
     name: 'ast_rewrite',
@@ -156,7 +172,7 @@ export default function (pi: ExtensionAPI) {
     exposure: 'deferred',
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     parameters: rewriteSchema,
-    execute: (_id, params, signal, _update, ctx) => run(pi, params, ctx.cwd, signal),
+    execute: (_id, params, signal, _update, ctx) => run(pi, versionChecked, params, ctx.cwd, signal),
   });
   pi.on('session_start', () => declareUnlessSearchable(pi, ['ast_search', 'ast_rewrite']));
 }

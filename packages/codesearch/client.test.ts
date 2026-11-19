@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   bounded,
+  fetchAdvice,
   fetchFile,
   fetchText,
   MAX_BODY_BYTES,
@@ -139,6 +140,37 @@ describe('codefetch', () => {
     expect(() => sliceLines('one', 2)).toThrow('exceeds');
     expect(() => sliceLines('one', 1.5)).toThrow('integers');
     expect(sliceLines('')).toMatchObject({ text: '', totalLines: 0 });
+    expect(sliceLines('', 1, 40)).toMatchObject({ text: '', totalLines: 0 });
+    expect(sliceLines('', 3)).toMatchObject({ text: '', totalLines: 0 });
+    expect(sliceLines('a\n\nb', 2, 2)).toMatchObject({ text: '', totalLines: 3 });
+  });
+  it('caps gh output and reports oversize instead of falling back', async () => {
+    const pi = gh();
+    pi.exec.mockResolvedValue({ code: 1, killed: true, truncated: true, stdout: '', stderr: '' });
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    await expect(fetchFile(pi, { repo: 'a/b', path: 'x' })).rejects.toThrow('exceeds body limit');
+    expect(pi.exec.mock.calls[0]![2].maxBuffer).toBe(MAX_BODY_BYTES + 64 * 1024);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it('includes gh failure details when the public fallback also fails', async () => {
+    const pi = gh();
+    pi.exec.mockResolvedValue({
+      code: 1,
+      killed: false,
+      truncated: false,
+      stdout: '',
+      stderr: 'gh: Not Found (HTTP 404)',
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('missing', { status: 404 })));
+    await expect(fetchFile(pi, { repo: 'a/b', path: 'x' })).rejects.toThrow(/HTTP 404.*exit 1: gh: Not Found/);
+  });
+  it('points truncation advice past the last returned line', () => {
+    const result = bounded('x\n'.repeat(3000), (t) => fetchAdvice(10, t));
+    const returned = result.details.truncation.outputLines;
+    expect(result.content[0]!.text).toContain(`Returned lines 10-${9 + returned}`);
+    expect(result.content[0]!.text).toContain(`startLine=${10 + returned}`);
+    expect(bounded('x'.repeat(60 * 1024), (t) => fetchAdvice(5, t)).content[0]!.text).toContain('Line 5 alone exceeds');
   });
   it('falls back after gh failure and throws on public failure', async () => {
     const pi = gh();

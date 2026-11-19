@@ -39,8 +39,8 @@ return { answered: results.length, results };
 | `pipeline(items, ...stages)` | Folds items through stages: each stage maps over the previous stage's outputs in parallel. An item whose agent failed stays `null` and skips later stages, so finish with `.filter(Boolean)`.                                                                |
 | `phase(name)`                | Logging marker that also drives the footer status (`wf <name> [state] <phase>`). NOT a budget boundary.                                                                                                                                                      |
 | `log(...args)`               | Captured into the result logs.                                                                                                                                                                                                                               |
-| `checkpoint(label?)`         | Human gate: suspends the run on a confirm dialog; rejecting throws and stops the run. Without a UI host it is a logged no-op. Put it before destructive or expensive steps.                                                                                  |
-| `ask(question, options?)`    | Human answer mid-run: a select when `options` are given, a yes/no confirm otherwise; `undefined` when dismissed. Without a UI host it throws — never invent an answer.                                                                                       |
+| `checkpoint(label?)`         | Human gate: suspends the run on a confirm dialog; rejecting throws and stops the run. Without a UI (print/json mode) it is a logged no-op and the run continues. Put it before destructive or expensive steps.                                               |
+| `ask(question, options?)`    | Human answer mid-run: a select when `options` are given, a yes/no confirm otherwise; `undefined` when dismissed. Without a UI (print/json mode) it throws — never invent an answer.                                                                          |
 | `args`                       | The `args` JSON value passed to `run`.                                                                                                                                                                                                                       |
 | `budget`                     | `{ total, spent, remaining }` over the run's token usage. `total` defaults to `Infinity`; `spent` accumulates across `agent()` calls. Read-only.                                                                                                             |
 | `cwd`                        | The session working directory.                                                                                                                                                                                                                               |
@@ -49,7 +49,7 @@ return { answered: results.length, results };
 
 `agent()` awaits the run's pause gate before every spawn: `pause` lets the in-flight step finish, then holds the run before the next one; `resume` releases it. Pause/resume take a workflow id, or apply to every active run without one. Stopping or timing out a run aborts the gate, so a parked run rejects instead of hanging.
 
-The script executes **in the host process with full Node access** — `process`, `require`, and `fs` are all reachable, the same trust boundary as the `bash` tool. Keep the returned value small: summaries, counts, key findings — never raw file dumps.
+The script executes **in the host process with full Node access**, the same trust boundary as the `bash` tool. `require` is not defined in scripts and dynamic `import()` is unavailable; reach Node modules through the `process` global, e.g. `const fs = process.getBuiltinModule('node:fs')`. `fetch` and other true globals work as usual. Keep the returned value small: summaries, counts, key findings — never raw file dumps.
 
 ## Limits
 
@@ -80,7 +80,7 @@ Ultracode only changes how the model structures work; it doesn't change your thi
 
 `run` starts the workflow in the background and returns its id (`wf-xxxxxxxx`) immediately, so the session stays responsive. When the run ends, its result (or error) is delivered as a `workflows:result` message; for model-started runs that message starts a new turn so the model can act on it. Pass `background: false` when a caller needs the value inside the same tool call (for example a codemode script). Without a UI (print mode, which exits when the turn ends) runs default to the foreground. There is no wall-clock cap unless you pass `timeoutMs`. Background runs stop when the session ends, and relaunch when it reopens (see below).
 
-Every run writes its script, `run.json` (label, args, status), and `journal.jsonl` to `~/.pi/agent/workflow-runs/<id>/` (or `$PI_SUBAGENTS_DIR/workflow-runs/`); run dirs older than 7 days are swept. The journal records each settled agent in start order with a hash of everything that determines its work (prompt, model, tools, system prompt, schema, …).
+Every run writes its script, `run.json` (label, args, working directory, status), and `journal.jsonl` to `~/.pi/agent/workflow-runs/<id>/` (or `$PI_SUBAGENTS_DIR/workflow-runs/`); run dirs older than 7 days are swept. The journal records each settled agent in start order with a hash of everything that determines its work (prompt, model, tools, system prompt, schema, …).
 
 `run` with `relaunch: '<id>'` (or `/wf relaunch <id>`) re-runs a stopped or failed workflow with the same script and args. Agents replay in start order: each completed agent whose inputs match returns its saved result without running; the first agent that differs, failed, or never finished — and every agent after it — runs again. Pass `script` along with `relaunch` to relaunch an edited version. Keep scripts deterministic (no `Date.now()` or `Math.random()` in prompts; pass timestamps through `args`) so a relaunch starts the same agents in the same order.
 
@@ -172,10 +172,10 @@ The `examples/` directory ships standalone, copy-and-adapt workflow scripts — 
 ## Caveats
 
 - The script runs in the host process with full Node access — the same trust boundary as the `bash` tool. Your model, your session.
-- `checkpoint`/`ask` need an interactive UI host. In a headless/RPC host `checkpoint` degrades to a logged no-op and `ask` throws — scripts that require an answer fail loudly instead of inventing one.
+- `checkpoint`/`ask` need a UI host (the terminal UI or an RPC client, which gets the dialogs through the RPC UI protocol). In print/json mode (no UI) `checkpoint` degrades to a logged no-op — the run continues past it — and `ask` throws, so scripts that require an answer fail loudly instead of inventing one.
 - Pause/resume are best-effort for tool-initiated runs: slash commands may queue behind an in-flight turn, so a `pause` issued mid-turn engages at the next `agent()` boundary after it's processed. For a guaranteed human gate, put `checkpoint`/`ask` in the script itself.
 - `checkpoint`/`ask` dialogs in a background run can appear while you're typing.
-- Relaunch replays results, not side effects: files a completed agent changed stay changed, and a replayed agent doesn't run again. Relaunch works for runs in `~/.pi/agent/workflow-runs/`, including runs from an earlier pi process.
+- Relaunch replays results, not side effects: files a completed agent changed stay changed, and a replayed agent doesn't run again. Relaunch works for runs in `~/.pi/agent/workflow-runs/`, including runs from an earlier pi process, and runs in the directory the original run used (recorded in `run.json`), not the relaunching session's; if that directory is gone the relaunch is refused.
 - Project-local workflows (`.pi/workflows/`) load only in trusted projects; untrusted projects are limited to global workflows so a cloned repo cannot silently inject orchestration scripts.
 - `agent()` cannot spawn children of its own (the ecosystem recursion guard refuses nested orchestration). For dependent multi-stage work where stages spawn, use the `@nicknisi/pi-shared` `runWorkflow` engine directly.
 - `stop` cancels only runs spawned by this host process; persisted runs from other hosts show in `status` but are not cancellable here.

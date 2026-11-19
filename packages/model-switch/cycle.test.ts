@@ -44,6 +44,26 @@ describe('parseModelReference', () => {
 });
 
 describe('resolveAvailableModels', () => {
+  it('resolves auth concurrently and keeps config order when lookups finish out of order', async () => {
+    const slow = model('p', 'slow');
+    const fast = model('p', 'fast');
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const result = await resolveAvailableModels(['p/slow', 'p/fast'], {
+      find: (_provider, id) => (id === 'slow' ? slow : id === 'fast' ? fast : undefined),
+      async getApiKeyAndHeaders(item) {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, item.id === 'slow' ? 20 : 1));
+        inFlight--;
+        return { ok: true as const };
+      },
+    });
+
+    expect(maxInFlight).toBe(2);
+    expect(result).toEqual([slow, fast]);
+  });
+
   it('preserves configured order while skipping invalid, missing, and unauthenticated models', async () => {
     const grok = model('cloudflare-ai-gateway', 'grok-4.5');
     const kimi = model('fireworks', 'accounts/fireworks/models/kimi-k3');

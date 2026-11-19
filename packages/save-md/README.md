@@ -19,9 +19,9 @@ No tools, keybindings, widgets, overlays, event hooks, or custom message/entry t
 Behavior:
 
 1. Waits for the agent to be idle (`ctx.waitForIdle()`), so invoking it while a response is streaming waits for the response to finish.
-2. Walks the current session branch backwards (`ctx.sessionManager.getBranch()`) to find the latest assistant message.
+2. Walks the current session branch backwards (`ctx.sessionManager.getBranch()`) to find the latest assistant message that has text content. Assistant messages with no text (aborted or errored turns, tool-call-only turns) are skipped, so an earlier answer on the branch is saved instead.
 3. Extracts only `text` content blocks from that message, joining them with blank lines. Non-text blocks (tool calls, thinking, images) are dropped.
-4. Appends `.md` if the name doesn't already end in it, resolves the path relative to `ctx.cwd`, and writes the file.
+4. Appends `.md` if the name doesn't already end in it, resolves the path relative to `ctx.cwd`, and writes the file. Absolute paths and `../` segments are honored as given, so the target can be outside the working directory.
 5. Ensures the file ends with a trailing newline.
 
 Examples:
@@ -33,12 +33,13 @@ Examples:
 
 Failure modes, all reported via `ctx.ui.notify`:
 
-| Condition                                   | Level   | Message                                              |
-| ------------------------------------------- | ------- | ---------------------------------------------------- |
-| No assistant message in the current branch  | warning | `No assistant response to save`                      |
-| Empty `<name>` argument                     | warning | `Usage: /save-md name`                               |
-| Latest assistant message has no text blocks | warning | `The latest assistant response has no Markdown text` |
-| Target file already exists                  | error   | `File already exists: <path>`                        |
+| Condition                                   | Level   | Message                                                  |
+| ------------------------------------------- | ------- | -------------------------------------------------------- |
+| No assistant message in the current branch  | warning | `No assistant response to save`                          |
+| Empty `<name>` argument                     | warning | `Usage: /save-md name`                                   |
+| No assistant message on the branch has text | warning | `No assistant response on this branch has Markdown text` |
+| Target file already exists                  | error   | `File already exists: <path>`                            |
+| Any other write error (missing dir, EACCES) | error   | `Failed to save <path>: <error message>`                 |
 
 ## Configuration
 
@@ -55,10 +56,10 @@ Runtime dependencies: Node builtins `node:fs/promises` (`writeFile`) and `node:p
 
 ## Caveats
 
-- **Only text blocks are saved.** Tool calls, tool results, thinking blocks, and any other non-`text` content in the assistant message are silently omitted. If the last assistant turn was purely tool calls with no final text, the command reports there is nothing to save.
+- **Only text blocks are saved.** Tool calls, tool results, thinking blocks, and any other non-`text` content in the assistant message are silently omitted. If the last assistant turn was purely tool calls with no final text, the command falls back to the most recent earlier assistant message with text; if none has text, it reports there is nothing to save.
 - **Current branch only.** `getBranch()` returns the active branch of the session tree; messages on other branches are not considered.
-- **No overwrite.** The file is written with flag `wx` (exclusive create). Re-running `/save-md` with the same name fails with an `EEXIST` error rather than overwriting. Delete the file or pick a new name.
-- **No directory creation.** Parent directories of the target path must already exist; otherwise `writeFile` throws (the error propagates rather than being notified).
+- **No overwrite.** The file is written with flag `wx` (exclusive create). Re-running `/save-md` with the same name reports `File already exists` rather than overwriting. Delete the file or pick a new name.
+- **No directory creation.** Parent directories of the target path must already exist; otherwise the write fails and is reported as `Failed to save <path>: …`.
 - **Pi internals.** Depends on the session entry shape (`entry.type === "message"`, `entry.message.role`) and on `ctx.sessionManager.getBranch()` / `ctx.ui.notify` APIs, any of which could change across pi versions. The content-block filter is written defensively (structural checks, no casts) to tolerate shape drift in message content.
 
 ## Install

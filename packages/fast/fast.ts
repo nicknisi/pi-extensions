@@ -142,12 +142,6 @@ export function isCoolingDown(state: FastState, now = Date.now()): boolean {
 }
 
 /**
- * Start a standard-speed cooldown after a Fast-mode request is rate limited or
- * over capacity. Provider SDK errors read like `429 {"type":"error",...}`; the
- * retry-after header is not exposed on failed requests, so the cooldown is fixed.
- * Returns the cooldown end, or undefined when the error is something else.
- */
-/**
  * Record a model whose plan or workspace refuses Fast mode, e.g. Codex's
  * "Fast mode isn't available for the selected model in your workspace".
  * Returns true when the error was that refusal.
@@ -162,6 +156,12 @@ export function isFastUnavailable(state: FastState, modelKey: string): boolean {
   return state.unavailable?.has(modelKey) ?? false;
 }
 
+/**
+ * Start a standard-speed cooldown after a Fast-mode request is rate limited or
+ * over capacity. Provider SDK errors read like `429 {"type":"error",...}`; the
+ * retry-after header is not exposed on failed requests, so the cooldown is fixed.
+ * Returns the cooldown end, or undefined when the error is something else.
+ */
 export function noteFastError(state: FastState, errorMessage: string, now = Date.now()): number | undefined {
   if (!/^(429|529)\b|rate_limit_error|overloaded_error/i.test(errorMessage.trim())) return undefined;
   state.cooldownUntil = now + DEFAULT_COOLDOWN_MS;

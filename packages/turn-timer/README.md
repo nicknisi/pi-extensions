@@ -5,8 +5,8 @@ Shows how long a complete run took — from the moment you send a message until 
 ## What it adds
 
 - **UI:** a custom transcript entry renderer that draws a dim text row of the form `· 12.3s` (or `· 1m 23s` for ≥ 60s) after each completed turn.
-- **Events hooked:** `agent_start` (records the start timestamp), `agent_settled` (computes elapsed time and appends the entry). `agent_settled` fires only once the agent is idle and won't continue automatically (no retry/compaction/follow-up remaining), so the timer covers the whole run.
-- **Custom entry type:** `turn-duration`, with data shape `{ seconds: number }`.
+- **Events hooked:** `agent_start` (records the start timestamp on the first low-level run; later `agent_start`s from retries, compaction retries, or queued follow-ups in the same run are ignored), `ui_prompt_start` / `ui_prompt_end` (measure time spent waiting on `ctx.ui` prompts, which is subtracted), `agent_settled` (computes elapsed time and appends the entry). `agent_settled` fires only once the agent is idle and won't continue automatically (no retry/compaction/follow-up remaining), so the timer covers the whole run.
+- **Custom entry type:** `turn-duration`, with data shape `{ seconds: number; aborted?: boolean }` (`aborted: true` only for cancelled runs).
 
 No slash commands, tools, keybindings, or overlays. No configuration.
 
@@ -14,7 +14,7 @@ No slash commands, tools, keybindings, or overlays. No configuration.
 
 - The entry is a custom transcript entry that does **not** participate in LLM context, so it never pollutes the conversation.
 - `/copy` reads only assistant message text, so it never picks up the timer rows.
-- Timing starts from `Date.now()` on `agent_start`. Elapsed time is computed with `Date.now()` at `agent_settled`.
+- Timing starts from `Date.now()` on the first `agent_start` of a run. Elapsed time is computed with `Date.now()` at `agent_settled`.
 - If `agent_settled` fires without a prior `agent_start` (e.g. extension loaded mid-run), the event is ignored.
 - Duration formatting: `< 60s` → `Ns.s` (one decimal, e.g. `0.8s`); `≥ 60s` → `Mm Ss` (e.g. `1m 23s`).
 

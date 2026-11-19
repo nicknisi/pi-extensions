@@ -6,13 +6,15 @@ import { basename, join } from 'node:path';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 
 const BIN = join(homedir(), '.local/bin/sidepulse');
+// Longest pi waits on shutdown for queued reports (each may take up to the 3s execFile timeout).
+export const SHUTDOWN_WAIT_MS = 500;
 
 export default function (pi: ExtensionAPI) {
   let queue: Promise<void> = Promise.resolve();
   let base = 'idle'; // state to return to after a prompt closes
 
   function report(ctx: ExtensionContext, state: string, extra: string[] = []) {
-    if (!ctx.hasUI) return; // skip `pi -p` one-shots so they don't leave stale sessions
+    if (!ctx.hasUI) return; // skip `pi -p`/json one-shots so they don't leave stale sessions (TUI and RPC still report)
     const sm = ctx.sessionManager;
     const args = [
       'report',
@@ -53,5 +55,15 @@ export default function (pi: ExtensionAPI) {
   pi.on('ui_prompt_end', (_e, ctx) => {
     report(ctx, base);
   });
-  pi.on('session_shutdown', (_e, ctx) => report(ctx, 'clear'));
+  pi.on('session_shutdown', (_e, ctx) => {
+    const pending = report(ctx, 'clear');
+    if (!pending) return;
+    // Give `clear` a moment to land, but never hold up quit/reload/switch on a hung CLI or daemon.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const wait = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, SHUTDOWN_WAIT_MS);
+      timer.unref?.();
+    });
+    return Promise.race([pending, wait]).finally(() => clearTimeout(timer));
+  });
 }

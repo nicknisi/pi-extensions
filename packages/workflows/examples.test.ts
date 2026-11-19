@@ -1,10 +1,10 @@
 /**
  * Smoke test for the example workflow files: each example file COMPILES under
- * the package's script compiler (`compileScript` — a stub dry-run, no real
- * spawn) and its `meta` export has a non-empty `name` + `description`.
+ * the package's script compiler (`compileScript`) and its `meta` export has a
+ * non-empty `name` + `description`.
  *
- * No real spawns: compileScript reads `meta` via a stub dry-run where
- * `agent`/`parallel`/`pipeline` are no-ops (see engine.ts).
+ * Nothing runs: compileScript reads `meta` by evaluating only its initializer
+ * (see readStaticMeta in engine.ts).
  */
 
 import * as fs from 'node:fs';

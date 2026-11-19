@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { childExtensions } from '@nicknisi/pi-shared';
 import fastExtension from './index.js';
 
@@ -145,5 +145,34 @@ describe('fast mode in subagent children', () => {
 
     parent.emit('session_shutdown', {}, ctx);
     expect(childExtensions().has('fast')).toBe(false);
+  });
+});
+
+describe('cooldown footer', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('clears "fast (cooldown)" when the cooldown ends', async () => {
+    vi.useFakeTimers();
+    const statuses: (string | undefined)[] = [];
+    const uiCtx = {
+      ...ctx,
+      hasUI: true,
+      ui: { notify() {}, setStatus: (_id: string, text?: string) => statuses.push(text) },
+    };
+    const pi = fakePi();
+    fastExtension(pi.api);
+    pi.emit('session_start', {}, uiCtx);
+    await pi.commands.get('fast')!.handler('', uiCtx);
+    pi.emit('before_provider_request', { payload: { model: model.id } }, uiCtx);
+    pi.emit(
+      'message_end',
+      { message: { role: 'assistant', stopReason: 'error', errorMessage: '429 {"type":"rate_limit_error"}' } },
+      uiCtx,
+    );
+    expect(statuses.at(-1)).toBe('fast (cooldown)');
+
+    vi.advanceTimersByTime(60_000);
+    expect(statuses.at(-1)).toBe('fast');
+    pi.emit('session_shutdown', {}, uiCtx);
   });
 });

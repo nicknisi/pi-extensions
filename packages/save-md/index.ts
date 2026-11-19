@@ -28,15 +28,22 @@ export default function saveMarkdownExtension(pi: ExtensionAPI) {
       await ctx.waitForIdle();
 
       const branch = ctx.sessionManager.getBranch();
-      let assistantMessage: AssistantMessage | undefined;
+      let foundAssistant = false;
+      let markdown = '';
+      // Walk back to the most recent assistant message that has text, so a trailing
+      // aborted/errored/tool-call-only turn doesn't hide an earlier answer.
       for (let index = branch.length - 1; index >= 0; index--) {
         const entry = branch[index];
         if (entry?.type === 'message' && entry.message.role === 'assistant') {
-          assistantMessage = entry.message;
-          break;
+          foundAssistant = true;
+          const text = textContent((entry.message satisfies AssistantMessage).content);
+          if (text.trim()) {
+            markdown = text;
+            break;
+          }
         }
       }
-      if (!assistantMessage) {
+      if (!foundAssistant) {
         ctx.ui.notify('No assistant response to save', 'warning');
         return;
       }
@@ -47,9 +54,8 @@ export default function saveMarkdownExtension(pi: ExtensionAPI) {
         return;
       }
 
-      const markdown = textContent(assistantMessage.content);
-      if (!markdown.trim()) {
-        ctx.ui.notify('The latest assistant response has no Markdown text', 'warning');
+      if (!markdown) {
+        ctx.ui.notify('No assistant response on this branch has Markdown text', 'warning');
         return;
       }
 
@@ -66,7 +72,9 @@ export default function saveMarkdownExtension(pi: ExtensionAPI) {
           ctx.ui.notify(`File already exists: ${path}`, 'error');
           return;
         }
-        throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(`Failed to save ${path}: ${message}`, 'error');
+        return;
       }
 
       ctx.ui.notify(`Saved Markdown to ${path}`, 'info');

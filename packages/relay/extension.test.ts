@@ -4,7 +4,18 @@ import * as path from 'node:path';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { afterEach, expect, it, vi } from 'vitest';
 import relay from './index.js';
-import { claimInbox, deposit, pendingAsks, readClaimedLetter, trackIncomingAsk, type Letter } from './mailbox.js';
+import {
+  ackClaimedLetter,
+  appendAudit,
+  claimInbox,
+  deposit,
+  pendingAsks,
+  readClaimedLetter,
+  recoverInboxClaims,
+  trackIncomingAsk,
+  unreadCount,
+  type Letter,
+} from './mailbox.js';
 import { deriveAddr, writeRecord, type SessionRecord } from './registry.js';
 
 vi.mock('@earendil-works/pi-coding-agent', () => ({
@@ -20,6 +31,7 @@ type Execute = (
   ctx: ExtensionContext,
 ) => Promise<Result>;
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
+type CommandHandler = (args: string, ctx: unknown) => Promise<void>;
 const fixtures: string[] = [];
 const shutdowns: Array<() => void> = [];
 const originalRoot = process.env.PI_RELAY_DIR;
@@ -56,6 +68,8 @@ function start() {
   let parameters: unknown;
   let branch: unknown[] = [];
   const sends: SentMessage[] = [];
+  const entries: Array<{ customType: string; data: unknown }> = [];
+  const commands = new Map<string, CommandHandler>();
   const ctx = {
     cwd: '/work',
     sessionManager: { getSessionId: () => 'self', getCwd: () => '/work', getBranch: () => branch },
@@ -69,7 +83,12 @@ function start() {
       execute = tool.execute;
       parameters = tool.parameters;
     },
-    registerCommand: () => {},
+    registerCommand: (name: string, command: { handler: CommandHandler }) => {
+      commands.set(name, command.handler);
+    },
+    appendEntry: (customType: string, data: unknown) => {
+      entries.push({ customType, data });
+    },
     registerMessageRenderer: () => {},
     registerEntryRenderer: () => {},
     sendMessage: (message: Record<string, unknown>, options?: Record<string, unknown>) => {
@@ -90,6 +109,8 @@ function start() {
     },
     emit,
     sends,
+    entries,
+    command: (name: string, args: string) => commands.get(name)!(args, { hasUI: true }),
     parameters,
   };
 }
@@ -244,4 +265,106 @@ it('does not register a late ask waiter when shutdown happens during the deliver
   host.emit('session_shutdown');
   expect((await waiting).content[0]!.text).toContain('session shutdown');
   expect(Date.now() - started).toBeLessThan(4500);
+});
+
+it('discards a claimed letter with a malformed sender instead of requeueing it forever', async () => {
+  const root = fixture();
+  const self = deriveAddr('/work', 'self');
+  const ts = Date.now();
+  const inbox = path.join(root, `${self}.inbox`);
+  fs.mkdirSync(inbox, { recursive: true, mode: 0o700 });
+  // No `from`: the unvalidated reader accepted this, then delivery threw and requeued it every ~5s.
+  fs.writeFileSync(
+    path.join(inbox, `${ts}-poison.json`),
+    JSON.stringify({ id: 'poison', ts, kind: 'message', body: 'x' }),
+  );
+  const host = start();
+  await new Promise((resolve) => setTimeout(resolve, 1800));
+  expect(unreadCount(root, self)).toBe(0);
+  expect(recoverInboxClaims(root, self).flatMap((claim) => claim.fileTokens)).toEqual([]);
+  expect(host.sends.filter((s) => s.message.customType === 'relay:delivery')).toEqual([]);
+});
+
+it('routes a reply that arrives before the ask receipt settles to the waiting ask', async () => {
+  const root = fixture();
+  const p = peer();
+  p.offline = false;
+  const host = start();
+  writeRecord(root, p);
+  const self = deriveAddr('/work', 'self');
+  let answered = false;
+  // A scripted peer that replies first and only acks the ask afterwards.
+  const consumer = setInterval(() => {
+    if (answered) return;
+    const claim = claimInbox(root, p.addr);
+    if (!claim) return;
+    const ask = readClaimedLetter(root, p.addr, claim.claimToken, claim.fileTokens[0]!)!;
+    answered = true;
+    deposit(root, self, {
+      id: 'early-reply',
+      kind: 'reply',
+      replyTo: ask.id,
+      body: 'pong',
+      ts: Date.now(),
+      from: { addr: p.addr, name: p.name, cwd: p.cwd },
+    });
+    setTimeout(() => ackClaimedLetter(root, p.addr, claim.claimToken, claim.fileTokens[0]!), 800);
+  }, 50);
+  try {
+    const started = Date.now();
+    const result = await host.run({ action: 'ask', to: p.sessionId, message: 'ping', timeoutMs: 10_000 });
+    expect(result.content[0]!.text).toContain('replied:\n\npong');
+    expect(Date.now() - started).toBeLessThan(5000);
+  } finally {
+    clearInterval(consumer);
+  }
+}, 15_000);
+
+it('watch notifies idle↔working changes and survives an unreadable root', () => {
+  const root = fixture();
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  try {
+    const p = peer();
+    p.offline = false;
+    const host = start();
+    writeRecord(root, p);
+    void host.run({ action: 'watch', to: p.sessionId });
+    writeRecord(root, { ...p, status: 'working', lastSeenAt: Date.now() });
+    vi.advanceTimersByTime(5000);
+    const notes = host.sends.filter((s) => s.message.customType === 'relay:notify');
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.message.content).toContain('is now working');
+    expect(notes[0]!.options).toBeUndefined();
+
+    // A root that becomes a symlink makes readRecord throw; the timer must not.
+    const parked = `${root}-parked`;
+    fixtures.push(parked);
+    fs.renameSync(root, parked);
+    fs.symlinkSync(parked, root, 'dir');
+    expect(() => vi.advanceTimersByTime(5000)).not.toThrow();
+    host.emit('session_shutdown');
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('/relay log falls back to 50 entries for a non-numeric count', async () => {
+  const root = fixture();
+  const host = start();
+  const addr = deriveAddr('/work', 'self');
+  for (let i = 0; i < 60; i++) {
+    appendAudit(root, {
+      ts: Date.now(),
+      event: 'deposit',
+      kind: 'message',
+      from: addr,
+      to: addr,
+      messageId: `m${i}`,
+      preview: '',
+    });
+  }
+  await host.command('relay', 'log abc');
+  await host.command('relay', 'log 5');
+  const counts = host.entries.map((e) => (e.data as { entries: unknown[] }).entries.length);
+  expect(counts).toEqual([50, 5]);
 });
