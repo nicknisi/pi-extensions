@@ -28,6 +28,7 @@ import type {
   KeybindingHints,
   Theme,
 } from '@earendil-works/pi-coding-agent';
+import * as piSdk from '@earendil-works/pi-coding-agent';
 import { getAgentDir, getSelectListTheme } from '@earendil-works/pi-coding-agent';
 import {
   Key,
@@ -43,12 +44,12 @@ import {
   type TUI,
 } from '@earendil-works/pi-tui';
 import {
+  bindPiSdk,
   createSubagentRuntime,
   subagentsDir,
   readRunArtifacts,
   sweepRunArtifactsOnce,
   sanitizeTerminalLabel,
-  SearchableSelectList,
   parseAmpDispatch,
   parseUnifiedDiff,
   type PatchHunk,
@@ -63,6 +64,7 @@ import {
   THINKING_LEVELS,
   type ThinkingLevel,
 } from '@nicknisi/pi-shared';
+import { SearchableSelectList } from './searchable-select-list.js';
 import { Type } from 'typebox';
 import { backgroundNotice, MAX_TASK_OUTPUT_CHARS } from './background.js';
 import { scopeFleetRuns, type FleetScope } from './fleet.js';
@@ -1423,6 +1425,8 @@ async function dispatchInline(
 }
 
 export default function subagents(pi: ExtensionAPI, options: SubagentsOptions = {}) {
+  // shared loads natively and can't see pi's module aliases; hand it this pi.
+  bindPiSdk(piSdk);
   // Children share the parent session's model registry and default model.
   let parentCtx: ExtensionContext | undefined;
   const runtime = createSubagentRuntime({

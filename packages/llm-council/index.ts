@@ -13,15 +13,18 @@
 
 import * as path from 'node:path';
 import type { ExtensionAPI, ExtensionContext, KeybindingHints, Theme } from '@earendil-works/pi-coding-agent';
+import * as piSdk from '@earendil-works/pi-coding-agent';
 import {
   BorderedLoader,
   buildSessionContext,
   convertToLlm,
+  getAgentDir,
   getMarkdownTheme,
   serializeConversation,
 } from '@earendil-works/pi-coding-agent';
 import { Container, Markdown, Text } from '@earendil-works/pi-tui';
 import {
+  bindPiSdk,
   createSubagentRuntime,
   resolveContainedAgentResource,
   type SpawnUsage,
@@ -300,7 +303,7 @@ function resolveResourceNames(kind: 'extensions' | 'skills', names: string[] | n
   if (!names?.length) return [];
   const out: string[] = [];
   for (const name of names) {
-    const resolved = resolveContainedAgentResource(kind, name, leaf);
+    const resolved = resolveContainedAgentResource(getAgentDir(), kind, name, leaf);
     if (resolved === null) {
       console.error(
         `[llm-council] ignoring ${kind} ${JSON.stringify(name)}: names must be bare (no path separators or "..")`,
@@ -472,6 +475,8 @@ async function runCouncil(
 // ── Tool registration ────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+  // shared loads natively and can't see pi's module aliases; hand it this pi.
+  bindPiSdk(piSdk);
   // Members may sit on runtime-registered providers; children need the parent's registry.
   let parentCtx: ExtensionContext | undefined;
   const subagents = createSubagentRuntime({ namespace: 'llm-council', parent: () => parentCtx });

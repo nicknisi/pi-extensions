@@ -29,25 +29,54 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { subagentsDir } from './subagents-dir.js';
 import { addWorktree, captureHandoff, findRepoRoot, removeWorktree } from './worktree.js';
-import {
-  type AgentSession,
-  type AgentSessionEvent,
-  createAgentSession,
-  DefaultResourceLoader,
-  defineTool,
-  type ExtensionContext,
-  type ExtensionFactory,
-  getAgentDir,
-  type ModelRegistry,
+import type * as PiSdkModule from '@earendil-works/pi-coding-agent';
+import type {
+  AgentSession,
+  AgentSessionEvent,
+  ExtensionContext,
+  ExtensionFactory,
+  ModelRegistry,
   ModelRuntime,
-  resolveCliModel,
   SessionManager,
-  SettingsManager,
 } from '@earendil-works/pi-coding-agent';
 import { Type, type TSchema } from 'typebox';
 import { Value } from 'typebox/value';
 
 // ── Public types ───────────────────────────────────────────────────────────
+
+/** The parts of pi's SDK the subagent runtime calls. */
+export type PiSdk = Pick<
+  typeof PiSdkModule,
+  | 'createAgentSession'
+  | 'DefaultResourceLoader'
+  | 'defineTool'
+  | 'getAgentDir'
+  | 'ModelRuntime'
+  | 'resolveCliModel'
+  | 'SessionManager'
+  | 'SettingsManager'
+>;
+
+let boundSdk: PiSdk | undefined;
+
+/**
+ * Hand the subagent runtime the running pi's SDK. pi loads this package with a
+ * native import, which bypasses its module aliases, so importing pi here would
+ * load a second copy of pi from disk (about 0.4s at startup, and its globals,
+ * like keybindings, are not the running pi's). Extensions pass their own
+ * import, which is the running pi. Unbound callers import pi on first use.
+ */
+export function bindPiSdk(sdk: PiSdk): void {
+  boundSdk = sdk;
+}
+
+async function piSdk(): Promise<PiSdk> {
+  if (boundSdk) return boundSdk;
+  const imported = await import('@earendil-works/pi-coding-agent');
+  // A bindPiSdk() that landed during the import wins.
+  boundSdk ??= imported;
+  return boundSdk;
+}
 
 export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
@@ -473,13 +502,14 @@ function validateOutput(schema: TSchema, raw: unknown): { ok: true; data: unknow
  * to a child's loader.
  */
 export function resolveContainedAgentResource(
+  agentDir: string,
   kind: 'extensions' | 'skills',
   name: string,
   leaf: string,
 ): string | null {
   if (typeof name !== 'string' || name.length === 0) return null;
   if (name.includes('/') || name.includes('\\') || name === '..' || name === '.') return null;
-  const baseDir = path.join(getAgentDir(), kind);
+  const baseDir = path.join(agentDir, kind);
   const resolved = path.resolve(baseDir, name, leaf);
   if (!resolved.startsWith(path.resolve(baseDir) + path.sep)) return null;
   return resolved;
@@ -679,7 +709,7 @@ export async function parentModelRuntime(registry: ModelRegistry): Promise<Model
     warnedReplay = true;
     console.warn('[subagents] ModelRegistry runtime not reachable; replaying parent providers into a fresh runtime');
   }
-  const child = await ModelRuntime.create();
+  const child = await (await piSdk()).ModelRuntime.create();
   for (const id of registry.getRegisteredProviderIds()) {
     const native = registry.getRegisteredNativeProvider(id);
     const config = registry.getRegisteredProviderConfig(id);
@@ -716,7 +746,7 @@ export function createSubagentRuntime(options: {
   let modelRuntimePromise: Promise<ModelRuntime> | undefined;
 
   function modelRuntime(): Promise<ModelRuntime> {
-    modelRuntimePromise ??= ModelRuntime.create();
+    modelRuntimePromise ??= piSdk().then((sdk) => sdk.ModelRuntime.create());
     return modelRuntimePromise;
   }
 
@@ -878,6 +908,18 @@ export function createSubagentRuntime(options: {
     record: RunRecord,
     resumed: boolean,
   ): Promise<SpawnResult> {
+    // Before any worktree exists, so a failed import leaves nothing to clean up.
+    let sdk: PiSdk;
+    try {
+      sdk = await piSdk();
+    } catch (err) {
+      const result = markFailed(
+        record,
+        fail(runId, 'crashed', `Cannot load pi: ${err instanceof Error ? err.message : String(err)}`, startedAt),
+      );
+      persist(record);
+      return result;
+    }
     let cwd = opts.cwd ?? process.cwd();
     const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
@@ -937,7 +979,7 @@ export function createSubagentRuntime(options: {
       const handler = opts.onSupervisorRequest;
       supervisorToolName = `${toolNamespace}_contact_supervisor`;
       customTools.push(
-        defineTool({
+        sdk.defineTool({
           name: supervisorToolName,
           label: 'Contact Supervisor',
           description:
@@ -969,19 +1011,19 @@ export function createSubagentRuntime(options: {
     const resumeFile =
       resumed && record.sessionFile && fs.existsSync(record.sessionFile) ? record.sessionFile : undefined;
     let sessionManager: SessionManager;
-    let session: Awaited<ReturnType<typeof createAgentSession>>['session'];
+    let session: Awaited<ReturnType<PiSdk['createAgentSession']>>['session'];
     try {
       sessionManager = resumeFile
-        ? SessionManager.open(resumeFile)
+        ? sdk.SessionManager.open(resumeFile)
         : opts.parentSession !== undefined
-          ? SessionManager.create(cwd, subagentsDir('sessions'), { parentSession: opts.parentSession })
-          : SessionManager.inMemory(cwd);
+          ? sdk.SessionManager.create(cwd, subagentsDir('sessions'), { parentSession: opts.parentSession })
+          : sdk.SessionManager.inMemory(cwd);
       const runtime = parent ? await parentModelRuntime(parent.modelRegistry) : await modelRuntime();
 
-      let model: ReturnType<typeof resolveCliModel>['model'];
+      let model: ReturnType<PiSdk['resolveCliModel']>['model'];
       let thinkingLevel = opts.thinkingLevel;
       if (opts.model !== undefined) {
-        const resolved = resolveCliModel({ cliModel: opts.model, modelRuntime: runtime });
+        const resolved = sdk.resolveCliModel({ cliModel: opts.model, modelRuntime: runtime });
         if (resolved.error || !resolved.model) {
           const error = resolved.error ?? `Unknown model: ${opts.model}`;
           cleanupFailedSetup(error);
@@ -995,10 +1037,10 @@ export function createSubagentRuntime(options: {
         if (record.resume) record.resume.model = `${model.provider}/${model.id}`;
       }
 
-      const loader = new DefaultResourceLoader({
+      const loader = new sdk.DefaultResourceLoader({
         cwd,
-        agentDir: getAgentDir(),
-        settingsManager: SettingsManager.inMemory(),
+        agentDir: sdk.getAgentDir(),
+        settingsManager: sdk.SettingsManager.inMemory(),
         noExtensions: true,
         noSkills: true,
         noPromptTemplates: true,
@@ -1015,9 +1057,9 @@ export function createSubagentRuntime(options: {
       });
       await loader.reload();
 
-      ({ session } = await createAgentSession({
+      ({ session } = await sdk.createAgentSession({
         cwd,
-        agentDir: getAgentDir(),
+        agentDir: sdk.getAgentDir(),
         modelRuntime: runtime,
         ...(model !== undefined ? { model } : {}),
         ...(thinkingLevel !== undefined ? { thinkingLevel: thinkingLevel as never } : {}),
@@ -1025,7 +1067,7 @@ export function createSubagentRuntime(options: {
         customTools,
         resourceLoader: loader,
         sessionManager,
-        settingsManager: SettingsManager.inMemory(),
+        settingsManager: sdk.SettingsManager.inMemory(),
       }));
     } catch (err) {
       cleanupFailedSetup(err instanceof Error ? err.message : String(err));

@@ -21,7 +21,6 @@
     "workflow.ts",
     "tools.ts",
     "tui-utils.ts",
-    "searchable-select-list.ts",
     "classifier.ts",
     "side-model.ts"
   ],

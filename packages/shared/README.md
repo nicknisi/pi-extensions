@@ -2,11 +2,11 @@
 
 Shared helper library for the extensions in this monorepo. It is not a pi extension itself — it exports no default extension entry, adds no commands, tools, keybindings, widgets, or events, and installing it into pi directly does nothing. Other packages depend on it via `"@nicknisi/pi-shared": "workspace:*"` and import from it like any library.
 
-It exists to centralize things that several extensions were duplicating: a set of TUI utilities (gradient text, an ANSI-stripping render probe, two-column layout, escape-sequence sanitization, render dispatch) plus a composable searchable select component, and an in-process subagent runtime for spawning focused child agent sessions.
+It exists to centralize things that several extensions were duplicating: a set of TUI utilities (gradient text, an ANSI-stripping render probe, escape-sequence sanitization, render dispatch) and an in-process subagent runtime for spawning focused child agent sessions.
 
 ## Exports
 
-`index.ts` re-exports everything from `tui-utils.ts`, `searchable-select-list.ts`, `subagents.ts`, `subagents-dir.ts` (`PI_SUBAGENTS_DIR` paths), `workflow.ts` (`runWorkflow`), `patches.ts` (`parseUnifiedDiff` for worktree patch handoffs), and `tools.ts` (`declareUnlessSearchable`).
+`index.ts` re-exports everything from `tui-utils.ts`, `subagents.ts`, `subagents-dir.ts` (`PI_SUBAGENTS_DIR` paths), `workflow.ts` (`runWorkflow`), `patches.ts` (`parseUnifiedDiff` for worktree patch handoffs), and `tools.ts` (`declareUnlessSearchable`).
 
 ### Optional side models (`side-model.ts`)
 
@@ -23,7 +23,6 @@ There is no cache or sticky fallback. Selection does not make requests or retry 
 
 ```ts
 import {
-  columns,
   formatDirectory,
   gradientText,
   sanitizeTerminalLabel,
@@ -38,34 +37,12 @@ Self-contained patterns, adapted from a pi dashboard extension:
 | `gradientText(text, phase, palette?)` | Per-character truecolor gradient. `phase` shifts the gradient (use `rowIndex * k` to stagger multi-line art). Spaces pass through uncolored.                                                |
 | `sampleGradient(position, palette?)`  | Sample a wrapping gradient at `position` (0..1, wraps modulo 1); adjacent palette stops are linearly interpolated.                                                                          |
 | `DEFAULT_PALETTE`, `RESET`            | Default blue-leaning 6-stop RGB palette; ANSI reset code.                                                                                                                                   |
-| `columns(left, right, width)`         | Two-column line layout. Pads the gap when both sides fit; otherwise shrinks left to ~45% and right to the remainder with a minimum 1-space gap, truncating via pi-tui's `truncateToWidth`.  |
 | `sanitizeTerminalLabel(text)`         | Strip OSC, CSI, other escape sequences, and C0/C1 control chars from user-controllable strings before rendering (prevents escape injection and layout breakage).                            |
 | `formatDirectory(cwd)`                | Collapse `$HOME` to `~` for display, then sanitize.                                                                                                                                         |
 | `renderedText(node, width = 200)`     | Render a node to a throwaway 200-wide buffer and strip ANSI — introspect a component whose API only exposes `render(width)`. Returns `""` if `render` throws.                               |
 | `createRenderDispatcher()`            | Reassignable render thunk so event sources can trigger redraws without knowing which surface is bound. `bind(tui)` points `requestRender()` at `tui.requestRender()`; `unbind()` clears it. |
 
 Shared structural types: `RenderableNode` (`children?`, `invalidate()`, `render(width)`), `RenderDispatcher`. These are subsets of pi's own `RenderableNode` and are structurally compatible with `@earendil-works/pi-coding-agent` components.
-
-### Searchable select (`searchable-select-list.ts`)
-
-```ts
-import { SearchableSelectList } from '@nicknisi/pi-shared';
-```
-
-A pi-tui `Component` composing an `Input` above a `SelectList`. pi-tui removed `SelectList.searchable`; this is the manual filtering pattern pi's own model/theme selectors use. `handleInput` routes the `tui.select.up` / `tui.select.down` / `tui.select.confirm` / `tui.select.cancel` keybindings to the list and everything else to the input, whose value drives `selectList.setFilter()`.
-
-```ts
-const list = new SearchableSelectList(items, maxVisible, theme);
-list.onSelect = (item) => {
-  /* ... */
-};
-list.onCancel = () => {
-  /* ... */
-};
-// mount into an overlay/dialog; render(width) and handleInput(keyData) are the Component contract
-```
-
-`selectList` is exposed for direct list manipulation. Use `setItems(items)` to refresh dynamic rows while preserving the current filter and selected value.
 
 ### Subagents (`subagents.ts`)
 
@@ -119,7 +96,9 @@ Design rules baked in:
 - **Parent model registry.** Pass `parent: () => ctx` (the latest `ExtensionContext`, read at each spawn) to `createSubagentRuntime` and children share the parent session's model runtime, so providers registered at runtime (`pi.registerProvider`) carry over with their auth and headers. A spawn with no `model` then defaults to the parent's current model; an explicit `model` resolves against the same registry. pi has no public accessor for a registry's runtime, so `parentModelRuntime(registry)` reads `ModelRegistry`'s private `runtime` field (checked on pi-coding-agent 0.84, 0.87 and 1.1) and, if it's gone, replays the parent's runtime-registered providers into a fresh runtime (losing runtime `--api-key` keys and host credential stores). If `parent` is configured but returns nothing or throws (a stale context), the spawn fails closed with kind `crashed` instead of falling back to the user's default provider. Without `parent`, models resolve from a fresh `ModelRuntime.create()` as before.
 - **`PI_SUBAGENTS_DIR`.** `subagentsDir(leaf)` returns `<$PI_SUBAGENTS_DIR>/<leaf>` when the env var is set, else `undefined` (keep your default). The runtime uses it for worktrees (`worktrees`), run sessions (`sessions`) and workflow run dirs (`workflow-runs`); extensions use it for `runs` (their `artifactsDir`) and `patches`. Read at call time.
 
-Also exported: `resolveContainedAgentResource(kind, name, leaf)` — containment-checked resolution of a bare name under the agent dir (`~/.pi/agent/extensions/<name>/<leaf>` etc.) for untrusted config input; returns `null` for anything with path separators or `..`. And `sweepRunArtifacts(rootDir, { now?, retentionMs? })` for direct GC control (returns `{ deleted, reaped }`).
+Also exported: `resolveContainedAgentResource(agentDir, kind, name, leaf)` — containment-checked resolution of a bare name under `agentDir` (`~/.pi/agent/extensions/<name>/<leaf>` etc.) for untrusted config input; returns `null` for anything with path separators or `..`. And `sweepRunArtifacts(rootDir, { now?, retentionMs? })` for direct GC control (returns `{ deleted, reaped }`).
+
+**Bind the running pi.** pi loads this package with a native import, which can't see pi's module aliases, so the package never imports pi at runtime (doing so loaded a second copy of pi from disk: about 0.4s and 100MB per session, with its own keybindings and version). Extensions that use the runtime call `bindPiSdk(piSdk)` with `import * as piSdk from '@earendil-works/pi-coding-agent'`, which is the running pi. Unbound callers (tests, non-pi consumers) import pi lazily on first spawn.
 
 Non-goal: crash isolation — children share the parent's event loop and memory (a pathological child can hurt the host session). Orchestration lives in `workflow.ts` (below).
 
@@ -239,6 +218,5 @@ Runtime npm dependencies:
 
 ## Caveats
 
-- `SearchableSelectList` hardcodes the `tui.select.*` keybinding IDs from pi-tui. If those IDs are renamed, navigation silently stops routing.
 - `package.json` `files` lists every shipped source plus `dist`; `pnpm pack`/publish produces a working tarball.
 - The package is marked `private: true` and ships TypeScript sources (`exports: { ".": "./index.ts" }`); consumers must run in pi's TS-loading extension environment, not plain Node.
