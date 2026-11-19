@@ -1,5 +1,12 @@
 # @nicknisi/pi-ast-grep
 
+## 0.3.8
+
+### Patch Changes
+
+- Updated dependencies [760fe48]
+  - @nicknisi/pi-shared@0.11.0
+
 ## 0.3.7
 
 ### Patch Changes
