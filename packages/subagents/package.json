@@ -20,6 +20,7 @@
     "background.ts",
     "fleet.ts",
     "profiles.ts",
+    "searchable-select-list.ts",
     "CHANGELOG.md"
   ],
   "type": "module",

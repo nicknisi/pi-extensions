@@ -29,9 +29,11 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import * as piSdk from '@earendil-works/pi-coding-agent';
 import { CONFIG_DIR_NAME, getAgentDir } from '@earendil-works/pi-coding-agent';
 import {
   ARTIFACT_RETENTION_MS,
+  bindPiSdk,
   createSubagentRuntime,
   subagentsDir,
   readRunArtifacts,
@@ -392,6 +394,8 @@ function resolveRunRequest(
 }
 
 export default function workflows(pi: ExtensionAPI): void {
+  // shared loads natively and can't see pi's module aliases; hand it this pi.
+  bindPiSdk(piSdk);
   const cancellables: Cancellables = new Map();
   const runs: WorkflowRuns = new Map();
   // Children share the parent session's model registry and default model.

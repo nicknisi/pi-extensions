@@ -2,21 +2,19 @@
  * Reusable TUI utilities — stolen from a Pi dashboard extension and
  * generalized just enough to drop into other TUI surfaces.
  *
- * Five patterns, each self-contained:
+ * Self-contained patterns:
  *   1. gradientText()          — per-character truecolor gradient text
  *   2. renderedText()          — render a child to a throwaway buffer + strip ANSI
- *   3. columns()               — two-column layout that gracefully overflows
  *   4. sanitizeTerminalLabel() — strip OSC/CSI/control escapes from labels
  *   6. createRenderDispatcher()— reassignable render thunk for event-driven redraws
  *
- * Pi types are kept honestly; `visibleWidth` / `truncateToWidth` come from
- * @earendil-works/pi-tui, and renderedText() expects a RenderableNode shape
- * compatible with @earendil-works/pi-coding-agent.
+ * No runtime pi imports: pi loads this package natively, so one would load a
+ * second copy of pi. renderedText() expects a RenderableNode shape compatible
+ * with @earendil-works/pi-coding-agent.
  */
 
 import { homedir } from 'node:os';
 import { relative } from 'node:path';
-import { truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 
 // ─── shared renderable shape (subset of Pi's RenderableNode) ──────────────
 
@@ -88,27 +86,6 @@ export function renderedText(node: RenderableNode, width = 200): string {
   } catch {
     return '';
   }
-}
-
-// ─── 3. two-column layout ─────────────────────────────────────────────────
-
-/**
- * Place `left` and `right` on one line of `width`. If they fit naturally,
- * pad the gap; if they don't, shrink left to ~45% and right to the
- * remainder, keeping at least a 1-space gap, and truncate both.
- */
-export function columns(left: string, right: string, width: number): string {
-  if (!right) return truncateToWidth(left, width);
-
-  const naturalGap = width - visibleWidth(left) - visibleWidth(right);
-  if (naturalGap >= 1) return `${left}${' '.repeat(naturalGap)}${right}`;
-
-  const leftWidth = Math.max(1, Math.floor(width * 0.45));
-  const rightWidth = Math.max(1, width - leftWidth - 1);
-  const fittedLeft = truncateToWidth(left, leftWidth);
-  const fittedRight = truncateToWidth(right, rightWidth);
-  const gap = Math.max(1, width - visibleWidth(fittedLeft) - visibleWidth(fittedRight));
-  return truncateToWidth(`${fittedLeft}${' '.repeat(gap)}${fittedRight}`, width);
 }
 
 // ─── 4. terminal-label sanitization ───────────────────────────────────────
