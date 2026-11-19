@@ -6,7 +6,8 @@ Transfer context from the current session to a new, focused session. Instead of 
 
 - Slash command: `/handoff <goal for new thread>`
 - UI: in the TUI, a `BorderedLoader` overlay while the prompt generates (abortable); in RPC mode, an info notification instead. Then a full-screen editor overlay (`Edit handoff prompt`) for reviewing/editing the result
-- No tools, keybindings, widgets, events, or custom entry types
+- After every compaction (automatic or `/compact`): one hidden `handoff:carried-inputs` message with your own words from the summarized part of the session, verbatim (see **Your words survive compaction** below)
+- No tools, keybindings or widgets
 
 ## Usage
 
@@ -29,6 +30,21 @@ Flow:
 6. Opens the result in the editor overlay; on confirm, calls `ctx.newSession({ parentSession, withSession })` and sets the edited prompt as the new session's editor draft from the `withSession` callback (the old `ctx` is stale after the switch). You submit it yourself.
 
 Aborting the loader (TUI only) or closing the editor without confirming cancels with a notification; no new session is created.
+
+## Your words survive compaction
+
+A compaction replaces the older conversation with a summary written by the model. In an audit of 17 real compactions from long sessions with 1M-token windows, the summaries kept 81% of the user's instructions exactly, softened 15% (a lost qualifier, "best" became "simplest") and dropped 4%. The dropped ones were approvals given through `ask_user_question` and rules inside a skill pasted as the first message, and in 7 of 17 the summary's goal and next steps contradicted its own latest turn. Some summaries also listed rules the user never gave.
+
+So after each compaction this extension posts one hidden message (`customType: "handoff:carried-inputs"`, `display: false`) holding, verbatim:
+
+- your **first message** of the session (up to 6,000 characters, so a pasted skill fits), and
+- your **newest messages and `ask_user_question` answers** from the summarized span, filled newest-first (each up to 2,000 characters) until about 16,000 characters in total, then shown in their original order with their entry IDs. If some were left out, it says how many and names the session file to search.
+
+It opens with a short note for the model: the summary can drop, soften or invent rules, so your words win where they disagree, a later message overrides an earlier one, and these are history rather than new requests (check the live state before acting on one).
+
+Pi's summary itself is unchanged, and nothing replaces Pi's compaction, so this works alongside any other extension that watches compaction. The message is posted from `session_compact`: during a run Pi delivers it before the next model call, and after an idle `/compact` it's stored without starting a turn.
+
+Caveats: it carries text only (images are skipped) and only answers from `ask_user_question`. If an earlier carried message is still inside the recent span Pi keeps, the context can briefly hold two copies; with large windows and the usual `keepRecentTokens` that rarely happens.
 
 ## Configuration
 

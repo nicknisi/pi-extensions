@@ -17,6 +17,7 @@ import { open } from 'node:fs/promises';
 import type { Message } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ExtensionCommandContext, SessionEntry } from '@earendil-works/pi-coding-agent';
 import { BorderedLoader, convertToLlm, serializeConversation } from '@earendil-works/pi-coding-agent';
+import { CARRIED_INPUTS_TYPE, carriedInputs } from './carry.js';
 
 const SYSTEM_PROMPT = `You are a context transfer assistant. Given a conversation history and the user's goal for a new thread, generate a focused prompt that:
 
@@ -215,6 +216,17 @@ const toError = (err: unknown): GenerateResult => ({
 });
 
 export default function (pi: ExtensionAPI) {
+  // After any compaction, post the user's own words from the summarized span. Pi delivers it before the
+  // next model call (a steer during a run; stored without starting a turn when idle).
+  pi.on('session_compact', (event, ctx) => {
+    const content = carriedInputs(
+      ctx.sessionManager.getBranch(),
+      event.compactionEntry.firstKeptEntryId,
+      ctx.sessionManager.getSessionFile(),
+    );
+    if (content) pi.sendMessage({ customType: CARRIED_INPUTS_TYPE, content, display: false });
+  });
+
   pi.registerCommand('handoff', {
     description: 'Transfer context to a new focused session',
     handler: async (args, ctx) => {
