@@ -108,6 +108,18 @@ it('never renames a name the user set', async () => {
   expect(h.current()).toBe('login work');
 });
 
+it('retries on the next settle once a classifier becomes available', async () => {
+  const opts = { classifier: false };
+  const h = await harness(opts);
+  await h.prompt('Fix the flaky login test');
+  await h.prompt('Now add dark mode to settings');
+  await h.prompt('Make the dark mode toggle persist');
+  expect(h.classify).not.toHaveBeenCalled();
+  opts.classifier = true; // e.g. credentials added mid-session
+  await h.prompt('Add a keyboard shortcut for dark mode');
+  expect(h.classify).toHaveBeenCalledTimes(1);
+});
+
 it('does nothing without a classifier', async () => {
   const h = await harness({ classifier: false });
   await h.prompt('Fix the flaky login test');

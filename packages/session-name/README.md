@@ -97,7 +97,7 @@ Every name, from either mode or `/sn`, has control and bidi characters replaced 
 ## How auto-renaming works
 
 1. Every name this extension sets is recorded with a `session-name-auto` custom entry. A session is eligible for renaming only while its current name matches the latest such entry, so a name set with `/sn`, `/name`, or `--name` (or a cleared name) is never renamed, including after `/reload` and resume. Sessions named before this feature have no entry and are left alone.
-2. Each user prompt in a named session counts toward `renameEvery`. When the run settles (`agent_settled`, skipped if aborted) and the count is reached, the count resets and a check runs in the background.
+2. Each user prompt in a named session counts toward `renameEvery`. When the run settles (`agent_settled`, skipped if aborted) and the count is reached, a check runs in the background. The count resets only once the classifier gives a verdict, so if no classifier is available yet (or the call fails), the next settle tries again.
 3. The check sends the classifier the current name, the last three task-stating user prompts, and the start of the last assistant reply, and asks whether the work moved on to a different task. Related subtasks, follow-ups, fixes and reviews of the same work count as the same task.
 4. At or above `renameThreshold`, a new name is generated the same way as the first one: an LLM title from the recent prompts in `llm` mode, else the first line of the latest prompt. If the name changed in the meantime, or the new name equals the old one, nothing happens.
 5. The rename shows `Session renamed: …` when `notifyOnAutoName` is on. Shutdown cancels a pending check.

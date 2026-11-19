@@ -121,7 +121,9 @@ function loadConfig(): SessionNameConfig {
       merged.renameEvery = DEFAULT_CONFIG.renameEvery;
     if (typeof merged.renameThreshold !== 'number' || !(merged.renameThreshold > 0 && merged.renameThreshold <= 1))
       merged.renameThreshold = DEFAULT_CONFIG.renameThreshold;
-    if (!Array.isArray(merged.renameModels)) merged.renameModels = DEFAULT_CONFIG.renameModels;
+    if (!Array.isArray(merged.renameModels) || !merged.renameModels.every((m) => typeof m === 'string'))
+      merged.renameModels = DEFAULT_CONFIG.renameModels;
+    if (typeof merged.autoRename !== 'boolean') merged.autoRename = DEFAULT_CONFIG.autoRename;
     return merged;
   } catch {
     return { ...DEFAULT_CONFIG };
@@ -416,7 +418,6 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
     if (!config.autoRename || config.autoName === 'off' || shutDown) return;
     const name = pi.getSessionName();
     if (!name || name !== lastAutoName(ctx.sessionManager.getEntries())) return;
-    promptsSinceCheck = 0;
     // Not awaited: nothing should wait on the rename.
     maybeRename(ctx, name).catch(() => {
       // Renaming is best-effort.
@@ -447,7 +448,9 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
         },
         controller.signal,
       );
-      if (probability === undefined || probability < config.renameThreshold || controller.signal.aborted) return;
+      if (probability === undefined) return; // no verdict: keep the count so the next settle retries
+      promptsSinceCheck = 0;
+      if (probability < config.renameThreshold || controller.signal.aborted) return;
 
       let next: string | null = null;
       if (config.autoName === 'llm') {
