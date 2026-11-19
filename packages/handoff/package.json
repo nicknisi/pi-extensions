@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-handoff",
-  "version": "0.1.13",
+  "version": "0.2.0",
   "description": "Hand off context to a new linked session with a generated, editable prompt",
   "keywords": [
     "pi",

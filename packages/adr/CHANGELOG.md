@@ -1,5 +1,11 @@
 # @nicknisi/pi-adr
 
+## 0.3.3
+
+### Patch Changes
+
+- 6bfdb8e: The ADR hook no longer throws on every prompt when `docs/decisions` is a file or cannot be read. In that case it now skips injecting the section.
+
 ## 0.3.2
 
 ### Patch Changes

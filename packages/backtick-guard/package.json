@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-backtick-guard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Refuse bash calls whose backtick command substitutions would run, and hint around the bash 3.2 heredoc bug",
   "keywords": [
     "pi",

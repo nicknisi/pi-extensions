@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-pin-last-prompt",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Sticky header pinning the owning user prompt while scrolling the transcript",
   "keywords": [
     "pi",

@@ -1,5 +1,11 @@
 # @nicknisi/pi-save-md
 
+## 0.1.4
+
+### Patch Changes
+
+- 6bfdb8e: `/save-md` now reports write failures (such as a missing parent directory) as a notification instead of throwing, and falls back to the most recent assistant message that has text when the latest turn has none. The package description and README now match actual behavior.
+
 ## 0.1.3
 
 ### Patch Changes

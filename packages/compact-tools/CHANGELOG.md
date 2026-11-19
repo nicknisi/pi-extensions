@@ -1,5 +1,13 @@
 # @nicknisi/pi-compact-tools
 
+## 0.3.3
+
+### Patch Changes
+
+- 6bfdb8e: Collapsed previews now skip pi's `... (N earlier lines)` truncation hint so long bash output shows real output, collapsed rows respect `outputPad` like expanded rows, and collapsed lines are cached per width with large results scanned only up to 64 KB.
+- Updated dependencies [6bfdb8e]
+  - @nicknisi/pi-shared@0.11.1
+
 ## 0.3.2
 
 ### Patch Changes

@@ -1,5 +1,13 @@
 # @nicknisi/pi-llm-council
 
+## 0.5.3
+
+### Patch Changes
+
+- 6bfdb8e: Project-local council config is now ignored in untrusted projects, failed councils are reported as tool errors (with a ✗ header and a "not run" synthesizer row), and malformed config files no longer crash the tool. The header spinner now stops when its tool call ends even if the component is discarded, and the README is updated to match current behavior.
+- Updated dependencies [6bfdb8e]
+  - @nicknisi/pi-shared@0.11.1
+
 ## 0.5.2
 
 ### Patch Changes
