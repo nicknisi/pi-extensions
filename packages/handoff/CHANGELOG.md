@@ -1,5 +1,15 @@
 # @nicknisi/pi-handoff
 
+## 0.2.0
+
+### Minor Changes
+
+- 8ecf046: handoff: after every compaction, post your own words from the summarized span verbatim (your first message, plus your newest messages and `ask_user_question` answers within a budget) as a hidden message, so rules and approvals the summary dropped or softened still reach the model. Pi's summary is unchanged.
+
+### Patch Changes
+
+- 6bfdb8e: `/handoff` now works in RPC mode instead of crashing, includes compaction/branch summaries and custom messages in its input, truncates an oversized newest message instead of sending no conversation, and walks parent sessions with node:fs (cycle-safe, depth-capped, works on Windows). README and package description now match the actual behavior.
+
 ## 0.1.13
 
 ### Patch Changes

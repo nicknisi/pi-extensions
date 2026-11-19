@@ -1,5 +1,13 @@
 # @nicknisi/pi-heads-up
 
+## 0.3.5
+
+### Patch Changes
+
+- 6bfdb8e: Panel rewrites that fail now show a warning, a note is cleared when you move to another branch, and `/heads-up check` and `/heads-up show` no longer run outside the TUI. While heads-up is off, long turns no longer re-read the store file every 10 seconds.
+- Updated dependencies [6bfdb8e]
+  - @nicknisi/pi-shared@0.11.1
+
 ## 0.3.4
 
 ### Patch Changes

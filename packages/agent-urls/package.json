@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-agent-urls",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "agent:// URL tools for listing and reading subagent run records (status, usage, output, errors) persisted by the shared runtime",
   "keywords": [
     "pi",

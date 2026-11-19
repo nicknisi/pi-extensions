@@ -1,5 +1,13 @@
 # @nicknisi/pi-recap
 
+## 0.1.13
+
+### Patch Changes
+
+- 6bfdb8e: Recap now reports provider errors and empty summaries as warnings instead of silently doing nothing, aborts in-flight recap requests on session shutdown or when a new turn starts, applies low reasoning effort on every provider, and shows the full recap when the transcript is expanded.
+- Updated dependencies [6bfdb8e]
+  - @nicknisi/pi-shared@0.11.1
+
 ## 0.1.12
 
 ### Patch Changes

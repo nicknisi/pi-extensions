@@ -1,5 +1,11 @@
 # @nicknisi/pi-model-switch
 
+## 0.3.2
+
+### Patch Changes
+
+- 6bfdb8e: The model picker now warns instead of silently doing nothing in RPC mode, resolves model credentials concurrently so it opens faster, supports PageUp/PageDown, and no longer resets the highlight on keys that don't change the search. README now accurately describes the cross-section substring search.
+
 ## 0.3.1
 
 ### Patch Changes

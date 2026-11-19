@@ -1,5 +1,13 @@
 # @nicknisi/pi-fast
 
+## 0.4.3
+
+### Patch Changes
+
+- 6bfdb8e: The `fast (cooldown)` footer now clears when the cooldown ends.
+- Updated dependencies [6bfdb8e]
+  - @nicknisi/pi-shared@0.11.1
+
 ## 0.4.2
 
 ### Patch Changes

@@ -1,5 +1,13 @@
 # @nicknisi/pi-ast-grep
 
+## 0.3.9
+
+### Patch Changes
+
+- 6bfdb8e: Check `ast-grep --version` only once per session, and report a clear error when `ast_rewrite` is given a nonexistent file.
+- Updated dependencies [6bfdb8e]
+  - @nicknisi/pi-shared@0.11.1
+
 ## 0.3.8
 
 ### Patch Changes

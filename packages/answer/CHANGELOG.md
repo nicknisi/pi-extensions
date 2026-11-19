@@ -1,5 +1,13 @@
 # @nicknisi/pi-answer
 
+## 0.3.7
+
+### Patch Changes
+
+- 6bfdb8e: `/answer` now reports extraction request failures instead of silently falling back, no longer crashes in RPC mode, tolerates malformed model output, and its regex fallback no longer splits questions on dotted words or matches `?` in code and URLs. The answer hint retries classifier lookup after a later login and cancels pending classifier calls on new input or shutdown.
+- Updated dependencies [6bfdb8e]
+  - @nicknisi/pi-shared@0.11.1
+
 ## 0.3.6
 
 ### Patch Changes

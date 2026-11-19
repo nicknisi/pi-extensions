@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-btw",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "/btw — side-channel LLM chat in an inline window, never touching main agent context",
   "keywords": [
     "pi",

@@ -1,5 +1,11 @@
 # @nicknisi/pi-backtick-guard
 
+## 0.1.1
+
+### Patch Changes
+
+- 6bfdb8e: The bash 3.2 heredoc hint now also appears for `$(cat<<'EOF' ...)` written without a space before `<<`.
+
 ## 0.1.0
 
 ### Minor Changes

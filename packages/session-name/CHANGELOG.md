@@ -1,5 +1,17 @@
 # @nicknisi/pi-session-name
 
+## 0.4.0
+
+### Minor Changes
+
+- 2c1a2a2: Auto-rename: when a decision model such as TypeSafe's Jev is available, every few user prompts (`renameEvery`, default 3) session-name checks whether the work has moved to a different task and renames the session when it has. Only names the extension set itself are renamed; names from `/sn`, `/name` or `--name` are never touched. Turn it off with `autoRename: false`.
+
+### Patch Changes
+
+- 6bfdb8e: Auto-naming now uses a skill invocation's arguments (or the skill name) instead of the expanded skill body, terminal titles insert names literally (no `$&`/placeholder expansion), and `/sn clear` stays in effect after a reload or resume. `/sn` with a name that is only control characters now reports an error instead of silently clearing the name.
+- Updated dependencies [6bfdb8e]
+  - @nicknisi/pi-shared@0.11.1
+
 ## 0.3.3
 
 ### Patch Changes

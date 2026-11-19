@@ -1,5 +1,13 @@
 # @nicknisi/pi-codesearch
 
+## 0.3.9
+
+### Patch Changes
+
+- 6bfdb8e: `codefetch` now caps `gh` output at the body limit, reports oversized files instead of silently falling back, and includes gh's error when the public fallback also fails. Empty files no longer error for explicit line ranges, blank-line slices are no longer mislabeled as empty files, and truncation notices point to the next line to fetch.
+- Updated dependencies [6bfdb8e]
+  - @nicknisi/pi-shared@0.11.1
+
 ## 0.3.8
 
 ### Patch Changes

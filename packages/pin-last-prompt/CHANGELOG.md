@@ -1,5 +1,11 @@
 # @nicknisi/pi-pin-last-prompt
 
+## 0.1.4
+
+### Patch Changes
+
+- 6bfdb8e: Fix a race where the pinned prompt bar could linger on screen after the widget was disposed, and document the npm install command and Nerd Font requirement.
+
 ## 0.1.3
 
 ### Patch Changes
