@@ -1,5 +1,11 @@
 # @nicknisi/pi-subagents
 
+## 0.8.3
+
+### Patch Changes
+
+- d751983: Support pi 1.6.0, where component `render()` returns a cached `readonly string[]`.
+
 ## 0.8.2
 
 ### Patch Changes

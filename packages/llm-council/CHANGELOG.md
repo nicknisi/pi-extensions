@@ -1,5 +1,11 @@
 # @nicknisi/pi-llm-council
 
+## 0.5.4
+
+### Patch Changes
+
+- d751983: Support pi 1.6.0, where component `render()` returns a cached `readonly string[]`.
+
 ## 0.5.3
 
 ### Patch Changes
