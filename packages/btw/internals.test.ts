@@ -84,6 +84,23 @@ it('forks with a valid parentId chain, labels dropped and header fields set', ()
   expect(entries.at(-1).name).toBe('btw: why?');
 });
 
+it('passes each turn index to makeAssistant so forked answers keep their own model', () => {
+  const indexes: number[] = [];
+  const file = forkSessionWithThread(
+    { getBranch: () => [], getCwd: () => '/proj', getSessionDir: () => '', getSessionFile: () => undefined },
+    [
+      { question: 'q1', answer: 'a1' },
+      { question: 'q2', answer: 'a2' },
+    ],
+    (text, i) => {
+      indexes.push(i);
+      return makeAssistant(text);
+    },
+  );
+  rmSync(file, { force: true });
+  expect(indexes).toEqual([0, 1]);
+});
+
 it('forks in-memory sessions into the temp dir, not cwd', () => {
   const file = forkSessionWithThread(
     { getBranch: () => [], getCwd: () => '/proj', getSessionDir: () => '', getSessionFile: () => undefined },

@@ -487,6 +487,8 @@ export default function (pi: ExtensionAPI) {
 
       // Switches to the session model if the configured one fails mid-thread.
       let active = model;
+      // The model that produced each completed turn, so a fork labels earlier answers correctly.
+      const answeredBy: (typeof model)[] = [];
       const modelName = `${model.provider}/${model.id}`;
 
       const makeUser = (text: string): Message => ({
@@ -494,12 +496,12 @@ export default function (pi: ExtensionAPI) {
         content: [{ type: 'text', text }],
         timestamp: Date.now(),
       });
-      const makeAssistant = (text: string): Message => ({
+      const makeAssistant = (text: string, m: typeof model = active): Message => ({
         role: 'assistant',
         content: [{ type: 'text', text }],
-        api: active.api,
-        provider: active.provider,
-        model: active.id,
+        api: m.api,
+        provider: m.provider,
+        model: m.id,
         usage: {
           input: 0,
           output: 0,
@@ -576,6 +578,7 @@ export default function (pi: ExtensionAPI) {
               return;
             }
             sideThread.push(makeUser(q), makeAssistant(final));
+            answeredBy.push(active);
             win.completeTurn(final);
           } catch (err) {
             if (signal?.aborted) return;
@@ -593,7 +596,9 @@ export default function (pi: ExtensionAPI) {
       // Fork BEFORE persisting the card so the snapshot doesn't include it.
       if (result.action === 'fork') {
         try {
-          const file = forkSessionWithThread(ctx.sessionManager, result.turns, makeAssistant);
+          const file = forkSessionWithThread(ctx.sessionManager, result.turns, (text, i) =>
+            makeAssistant(text, answeredBy[i] ?? active),
+          );
           ctx.ui.notify(await openFork(file, ctx.sessionManager.getCwd()), 'info');
         } catch (err) {
           ctx.ui.notify(`fork failed: ${err instanceof Error ? err.message : String(err)}`, 'error');
@@ -627,7 +632,7 @@ export function forkSessionWithThread(
     getSessionFile(): string | undefined;
   },
   turns: Turn[],
-  makeAssistant: (text: string) => Message,
+  makeAssistant: (text: string, turnIndex: number) => Message,
 ): string {
   const branch = sessionManager.getBranch();
   const usedIds = new Set(branch.map((e) => e.id));
@@ -660,7 +665,7 @@ export function forkSessionWithThread(
     parentSession: sessionManager.getSessionFile(),
   };
 
-  for (const turn of turns) {
+  for (const [turnIndex, turn] of turns.entries()) {
     const userId = genId();
     entries.push({
       type: 'message',
@@ -680,7 +685,7 @@ export function forkSessionWithThread(
       id: assistantId,
       parentId,
       timestamp: iso,
-      message: makeAssistant(turn.answer),
+      message: makeAssistant(turn.answer, turnIndex),
     });
     parentId = assistantId;
   }
