@@ -101,8 +101,8 @@ export class SectionPicker implements Component {
     this.renderTabBar();
   }
 
-  render(width: number): readonly string[] {
-    return this.container.render(width);
+  render(width: number): string[] {
+    return [...this.container.render(width)];
   }
 
   invalidate(): void {
