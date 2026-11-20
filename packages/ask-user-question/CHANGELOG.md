@@ -1,5 +1,11 @@
 # @nicknisi/pi-ask-user-question
 
+## 0.1.2
+
+### Patch Changes
+
+- d751983: Support pi 1.6.0, where component `render()` returns a cached `readonly string[]`.
+
 ## 0.1.1
 
 ### Patch Changes

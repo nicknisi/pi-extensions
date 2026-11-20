@@ -1,5 +1,11 @@
 # @nicknisi/pi-model-switch
 
+## 0.3.3
+
+### Patch Changes
+
+- d751983: Support pi 1.6.0, where component `render()` returns a cached `readonly string[]`.
+
 ## 0.3.2
 
 ### Patch Changes
