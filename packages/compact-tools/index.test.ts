@@ -73,7 +73,10 @@ const result = {
 const plain = (component: ToolExecutionComponent, width = 80) =>
   component.render(width).map((line) => stripVTControlCharacters(line).trimEnd());
 const click = (component: ToolExecutionComponent, type = 'click', button = 'left', y = 1) =>
-  (component as unknown as { handleMouse(event: { type: string; button: string; y: number }): unknown }).handleMouse({
+  (
+    component as unknown as { handleMouse(event: { type: string; button: string; y: number; width: number }): unknown }
+  ).handleMouse({
+    width: 80,
     type,
     button,
     y,

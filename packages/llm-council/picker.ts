@@ -257,7 +257,7 @@ export class CouncilPicker implements Component, Focusable {
     this.heading.setText(this.theme.fg('accent', this.theme.bold('Council settings')));
     this.errorText.setText(this.theme.fg('error', this.error));
     this.help.setText(this.theme.fg('dim', 'Save changes the lineup only · /council asks a question and runs it'));
-    return this.container.render(width);
+    return [...this.container.render(width)];
   }
   handleInput(data: string): void {
     this.settings.handleInput(data);

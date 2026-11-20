@@ -102,7 +102,7 @@ export class SectionPicker implements Component {
   }
 
   render(width: number): string[] {
-    return this.container.render(width);
+    return [...this.container.render(width)];
   }
 
   invalidate(): void {
