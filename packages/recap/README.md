@@ -48,7 +48,7 @@ Config file: `~/.pi/agent/configs/recap.json` (created on first `/recap-idle` wr
 | `idleMinutes` | number                             | `3`                         | Minutes of inactivity before an auto-recap fires. Set via `/recap-idle`.                                     |
 | `model`       | `{ provider: string; id: string }` | session model (`ctx.model`) | Optional override. If omitted or unavailable with working credentials, recap uses the current session model. |
 
-Selection uses `selectSideModel` from `@nicknisi/pi-shared` and the provider's available chat models; lookup failures also fall back to the current session model. Model IDs may contain slashes. Each recap re-evaluates selection; request failures are not retried on another model. For idle contexts without `ctx.model`, recap remembers the latest model only within this extension/session, including `model_select` changes while idle. Shutdown clears it; no model from another session is reused. With neither model available, recap warns and skips generation.
+Selection uses `selectSideModel` from `@nicknisi/pi-shared` and the provider's available chat models; lookup failures also fall back to the current session model. Model IDs may contain slashes. Each recap re-evaluates selection. If the selected model is found but the request fails (e.g. a deprecated model returning 410, an outage, or quota), it retries once on the current session model via `withSessionFallback`. For idle contexts without `ctx.model`, recap remembers the latest model only within this extension/session, including `model_select` changes while idle. Shutdown clears it; no model from another session is reused. With neither model available, recap warns and skips generation.
 
 No environment variables are read.
 

@@ -35,7 +35,7 @@ import { join } from 'node:path';
 import type { AssistantMessage, Message, ThinkingLevel } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, SessionEntry, SessionProjection, Theme } from '@earendil-works/pi-coding-agent';
 import { convertToLlm, CURRENT_SESSION_VERSION, getMarkdownTheme } from '@earendil-works/pi-coding-agent';
-import { selectSideModel } from '@nicknisi/pi-shared';
+import { selectSideModel, withSessionFallback } from '@nicknisi/pi-shared';
 import { loadBtwConfig } from './config.js';
 import {
   Box,
@@ -485,8 +485,9 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const modelId = model.id;
-      const modelName = `${model.provider}/${modelId}`;
+      // Switches to the session model if the configured one fails mid-thread.
+      let active = model;
+      const modelName = `${model.provider}/${model.id}`;
 
       const makeUser = (text: string): Message => ({
         role: 'user',
@@ -496,9 +497,9 @@ export default function (pi: ExtensionAPI) {
       const makeAssistant = (text: string): Message => ({
         role: 'assistant',
         content: [{ type: 'text', text }],
-        api: model.api,
-        provider: model.provider,
-        model: modelId,
+        api: active.api,
+        provider: active.provider,
+        model: active.id,
         usage: {
           input: 0,
           output: 0,
@@ -521,34 +522,55 @@ export default function (pi: ExtensionAPI) {
           const signal = win.signal;
           const requestMessages = [...sideThread, makeUser(q)];
           try {
-            const stream = ctx.modelRegistry.streamSimple(
-              model,
-              { systemPrompt: SYSTEM_PROMPT, messages: requestMessages },
-              // Spread conditionally: these are optional in SimpleStreamOptions,
-              // and exactOptionalPropertyTypes rejects an explicit undefined.
-              {
-                ...(reasoning !== undefined && { reasoning }),
-                ...(signal !== undefined && { signal }),
-              },
-            );
-
-            let final = '';
-            for await (const event of stream) {
-              // A cancelled run may still yield buffered events; never let
-              // them leak into a retried question's answer.
-              if (signal?.aborted) return;
-              if (event.type === 'text_delta') {
-                win.append(event.delta);
-              } else if (event.type === 'done') {
-                final = extractText(event.message.content);
-              } else if (event.type === 'error') {
-                if (event.reason !== 'aborted' && !signal?.aborted) {
-                  win.fail(event.error.errorMessage ?? 'Request failed');
+            // Throws (to trigger the session-model retry) only before any text streamed,
+            // so a fallback never duplicates partial output.
+            const streamOn = async (m: typeof model): Promise<string | undefined> => {
+              let streamed = false;
+              try {
+                const stream = ctx.modelRegistry.streamSimple(
+                  m,
+                  { systemPrompt: SYSTEM_PROMPT, messages: requestMessages },
+                  // Spread conditionally: these are optional in SimpleStreamOptions,
+                  // and exactOptionalPropertyTypes rejects an explicit undefined.
+                  {
+                    ...(reasoning !== undefined && { reasoning }),
+                    ...(signal !== undefined && { signal }),
+                  },
+                );
+                let final = '';
+                for await (const event of stream) {
+                  // A cancelled run may still yield buffered events; never let
+                  // them leak into a retried question's answer.
+                  if (signal?.aborted) return undefined;
+                  if (event.type === 'text_delta') {
+                    streamed = true;
+                    win.append(event.delta);
+                  } else if (event.type === 'done') {
+                    final = extractText(event.message.content);
+                  } else if (event.type === 'error') {
+                    if (event.reason === 'aborted' || signal?.aborted) return undefined;
+                    throw new Error(event.error.errorMessage ?? 'Request failed');
+                  }
                 }
-                return;
+                active = m;
+                return final;
+              } catch (err) {
+                if (streamed && !signal?.aborted) {
+                  win.fail(err instanceof Error ? err.message : String(err));
+                  return undefined;
+                }
+                throw err;
               }
-            }
-            if (signal?.aborted) return;
+            };
+            const final = await withSessionFallback(ctx, active, streamOn, {
+              ...(signal !== undefined && { signal }),
+              onFallback: (error, fallback) =>
+                ctx.ui.notify(
+                  `btw: ${active.provider}/${active.id} failed (${error instanceof Error ? error.message : String(error)}); using ${fallback.provider}/${fallback.id}`,
+                  'warning',
+                ),
+            });
+            if (final === undefined || signal?.aborted) return;
             if (!final) {
               win.fail('Empty response');
               return;
@@ -580,11 +602,11 @@ export default function (pi: ExtensionAPI) {
 
       // Persist for scrollback as a custom ENTRY: rendered in the transcript,
       // never part of LLM context, never triggers or steers an agent turn.
-      pi.appendEntry<BtwEntryData>(CUSTOM_TYPE, { model: modelName, turns: result.turns });
+      pi.appendEntry<BtwEntryData>(CUSTOM_TYPE, { model: `${active.provider}/${active.id}`, turns: result.turns });
 
       if (result.action === 'promote') {
         pi.sendUserMessage(
-          formatThreadForPromote(result.turns, modelName),
+          formatThreadForPromote(result.turns, `${active.provider}/${active.id}`),
           ctx.isIdle() ? undefined : { deliverAs: 'steer' },
         );
       }

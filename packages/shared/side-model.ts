@@ -32,3 +32,29 @@ export async function selectSideModel(
   }
   return signal?.aborted ? undefined : ctx.model;
 }
+
+type SideModel = NonNullable<ExtensionContext['model']>;
+
+/**
+ * Run a side request on `model`; if it fails (throws), retry once on the current session model.
+ * Catches configured models that resolve but fail at request time (deprecated/410, outage, quota),
+ * which `selectSideModel` cannot detect. `run` must throw on provider errors, including
+ * `stopReason: 'error'` replies. Aborts and failures of the session model itself propagate.
+ */
+export async function withSessionFallback<T>(
+  ctx: Pick<ExtensionContext, 'model'>,
+  model: SideModel,
+  run: (model: SideModel) => Promise<T>,
+  options: { signal?: AbortSignal; onFallback?: (error: unknown, fallback: SideModel) => void } = {},
+): Promise<T> {
+  try {
+    return await run(model);
+  } catch (error) {
+    const fallback = ctx.model;
+    if (options.signal?.aborted || !fallback || (fallback.provider === model.provider && fallback.id === model.id)) {
+      throw error;
+    }
+    options.onFallback?.(error, fallback);
+    return run(fallback);
+  }
+}

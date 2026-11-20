@@ -1,6 +1,6 @@
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { describe, expect, it, vi } from 'vitest';
-import { selectSideModel } from './side-model.js';
+import { selectSideModel, withSessionFallback } from './side-model.js';
 
 describe('selectSideModel', () => {
   const current = { provider: 'session', id: 'current' };
@@ -91,5 +91,33 @@ describe('selectSideModel', () => {
     expect(await selectSideModel(ctx, [], controller.signal)).toBeUndefined();
     expect(await selectSideModel(ctx, ['remote/org/model'], controller.signal)).toBeUndefined();
     expect(getAvailableOfType).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('withSessionFallback', () => {
+  const current = { provider: 'session', id: 'current' } as NonNullable<ExtensionContext['model']>;
+  const preferred = { provider: 'remote', id: 'org/deprecated' } as NonNullable<ExtensionContext['model']>;
+
+  it('retries a failed side request once on the session model and reports why', async () => {
+    const onFallback = vi.fn();
+    const run = vi.fn(async (m: typeof current) => {
+      if (m === preferred) throw new Error('410 deprecated');
+      return 'ok';
+    });
+    expect(await withSessionFallback({ model: current }, preferred, run, { onFallback })).toBe('ok');
+    expect(run.mock.calls.map((c) => c[0])).toEqual([preferred, current]);
+    expect(onFallback).toHaveBeenCalledWith(expect.objectContaining({ message: '410 deprecated' }), current);
+  });
+
+  it('propagates when already on the session model, with no session model, or after abort', async () => {
+    const run = vi.fn().mockRejectedValue(new Error('boom'));
+    await expect(withSessionFallback({ model: current }, { ...current }, run)).rejects.toThrow('boom');
+    await expect(withSessionFallback({ model: undefined }, preferred, run)).rejects.toThrow('boom');
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      withSessionFallback({ model: current }, preferred, run, { signal: controller.signal }),
+    ).rejects.toThrow('boom');
+    expect(run).toHaveBeenCalledTimes(3);
   });
 });

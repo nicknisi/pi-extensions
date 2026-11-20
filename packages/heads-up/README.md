@@ -172,7 +172,7 @@ Insights are custom entries, not model messages: their text never enters the mai
 | `gateThreshold`   | `0.5`                 | With `gateEnforce`, checks scoring below this skip the side request (0–1)                                 |
 | `gateEnforce`     | `false`               | `false` scores and logs only (shadow); `true` skips low-scoring checks                                    |
 
-Invalid values fall back to the defaults. An unknown or unavailable `model` (including an unconfigured provider or a failed credential lookup) falls back to the current session model, with one warning per extension load. This applies to checks and panel rewrites. Model selection uses `selectSideModel` from `@nicknisi/pi-shared`, the same credential-aware fallback used by btw, session-name, recap, and answer.
+Invalid values fall back to the defaults. An unknown or unavailable `model` (including an unconfigured provider or a failed credential lookup) falls back to the current session model, with one warning per extension load. This applies to checks and panel rewrites. If the selected model is found but the request fails (e.g. a deprecated model returning 410, an outage, or quota), it retries once on the current session model via `withSessionFallback`. The first such failure is reported as a warning. Model selection uses `selectSideModel` from `@nicknisi/pi-shared`, the same credential-aware fallback used by btw, session-name, recap, and answer.
 
 ## State
 

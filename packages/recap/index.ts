@@ -1,4 +1,4 @@
-import { selectSideModel } from '@nicknisi/pi-shared';
+import { selectSideModel, withSessionFallback } from '@nicknisi/pi-shared';
 import { uuidv7 } from '@earendil-works/pi-ai';
 import {
   buildSessionContext,
@@ -129,16 +129,13 @@ export default function (pi: ExtensionAPI) {
       cfg.model && typeof cfg.model.provider === 'string' && typeof cfg.model.id === 'string'
         ? [`${cfg.model.provider}/${cfg.model.id}`]
         : [];
-    const model = await selectSideModel(
-      {
-        get model() {
-          return ctx.model ?? lastModel;
-        },
-        modelRegistry: ctx.modelRegistry,
+    const session = {
+      get model() {
+        return ctx.model ?? lastModel;
       },
-      preferences,
-      signal,
-    );
+      modelRegistry: ctx.modelRegistry,
+    };
+    const model = await selectSideModel(session, preferences, signal);
     if (signal.aborted) return null;
     if (!model) {
       ctx.ui.notify('recap: no model available', 'warning');
@@ -150,6 +147,16 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify('recap: nothing to summarize yet', 'info');
       return null;
     }
+    const prompt = summaryPrompt(conversation);
+    return withSessionFallback(session, model, (m) => request(ctx, m, prompt, signal), { signal });
+  }
+
+  async function request(
+    ctx: ExtensionContext,
+    model: NonNullable<ExtensionContext['model']>,
+    prompt: string,
+    signal: AbortSignal,
+  ): Promise<string> {
     // streamSimple takes provider-neutral options, so `reasoning` applies to every API.
     const response = await ctx.modelRegistry
       .streamSimple(
@@ -158,7 +165,7 @@ export default function (pi: ExtensionAPI) {
           messages: [
             {
               role: 'user',
-              content: [{ type: 'text', text: summaryPrompt(conversation) }],
+              content: [{ type: 'text', text: prompt }],
               timestamp: Date.now(),
             },
           ],

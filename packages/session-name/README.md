@@ -81,7 +81,7 @@ Example (`session-name.example.json`):
 
 No environment variables are read.
 
-LLM selection uses `selectSideModel` from `@nicknisi/pi-shared`, checking the preferred provider's available chat models. Missing credentials or a failed lookup falls back to the current session model, freshly selected for each naming attempt. IDs may contain slashes. With no model, naming uses the heuristic. Actual request failures also keep the existing heuristic fallback, not a retry on another model. Shutdown cancels selection and prevents pending auth/title results from naming a replaced session; OAuth auth remains supported.
+LLM selection uses `selectSideModel` from `@nicknisi/pi-shared`, checking the preferred provider's available chat models. Missing credentials or a failed lookup falls back to the current session model, freshly selected for each naming attempt. IDs may contain slashes. With no model, naming uses the heuristic. If the selected model is found but the request fails (e.g. a deprecated model returning 410, an outage, or quota), it retries once on the current session model via `withSessionFallback`. If that also fails, naming uses the heuristic, and a warning is shown once. Shutdown cancels selection and prevents pending auth/title results from naming a replaced session; OAuth auth remains supported.
 
 ## How auto-naming works
 
