@@ -1,6 +1,12 @@
 import type { UserMessage } from '@earendil-works/pi-ai';
 import { BorderedLoader, Theme, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { type Classifier, classifyBool, findClassifier, selectSideModel } from '@nicknisi/pi-shared';
+import {
+  type Classifier,
+  classifyBool,
+  findClassifier,
+  selectSideModel,
+  withSessionFallback,
+} from '@nicknisi/pi-shared';
 import { loadAnswerConfig, parseModelPreference, type ModelPreference } from './config.js';
 import {
   type Component,
@@ -582,19 +588,34 @@ export default function (pi: ExtensionAPI) {
           timestamp: Date.now(),
         };
 
-        const response = await ctx.modelRegistry.complete(
-          extractionModel,
-          { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-          { signal: loader.signal },
-        );
+        let response;
+        try {
+          response = await withSessionFallback(
+            ctx,
+            extractionModel,
+            async (m) => {
+              const response = await ctx.modelRegistry.complete(
+                m,
+                { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
+                { signal: loader.signal },
+              );
+              // complete() reports provider failures (auth, rate limit, network) in the message instead of throwing.
+              if (response.stopReason === 'error')
+                throw new Error(response.errorMessage ?? 'Question extraction failed');
+              return response;
+            },
+            { signal: loader.signal },
+          );
+        } catch (error) {
+          if (loader.signal.aborted) return { type: 'cancelled' } as ExtractionOutcome;
+          return {
+            type: 'error',
+            message: error instanceof Error ? error.message : String(error),
+          } as ExtractionOutcome;
+        }
 
         if (response.stopReason === 'aborted') {
           return { type: 'cancelled' } as ExtractionOutcome;
-        }
-
-        // complete() reports provider failures (auth, rate limit, network) in the message instead of throwing.
-        if (response.stopReason === 'error') {
-          return { type: 'error', message: response.errorMessage ?? 'Question extraction failed' } as ExtractionOutcome;
         }
 
         const responseText = getTextParts(response.content).join('\n').trim();

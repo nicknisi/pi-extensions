@@ -72,14 +72,15 @@ it('keeps heuristic naming when no current or available preferred model exists',
   expect(h.setSessionName).toHaveBeenCalled();
 });
 
-it('does not retry a failed title request on the session model', async () => {
+it('retries a failed title request once on the session model', async () => {
   const h = await harness('usable');
-  h.complete.mockRejectedValueOnce(new Error('request failed'));
+  h.complete.mockRejectedValueOnce(new Error('410: Model has been deprecated'));
   h.fire('before_agent_start');
   await settle();
-  expect(h.complete).toHaveBeenCalledTimes(1);
-  expect(h.complete).toHaveBeenCalledWith(h.preferred, expect.any(Object), expect.any(Object));
-  expect(h.setSessionName).toHaveBeenCalled(); // Existing heuristic fallback.
+  expect(h.complete).toHaveBeenCalledTimes(2);
+  expect(h.complete).toHaveBeenNthCalledWith(1, h.preferred, expect.any(Object), expect.any(Object));
+  expect(h.complete).toHaveBeenNthCalledWith(2, h.current, expect.any(Object), expect.any(Object));
+  expect(h.setSessionName).toHaveBeenCalledWith('Generated title');
 });
 
 it.each(['selection', 'auth'])('shutdown cancels pending %s before completion', async (stage) => {

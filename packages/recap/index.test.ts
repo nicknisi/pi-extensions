@@ -132,6 +132,30 @@ describe('recap extension', () => {
     else expect(h.complete).not.toHaveBeenCalled();
   });
 
+  it('falls back to the session model when the configured model fails at request time', async () => {
+    mkdirSync(join(agentDir, 'configs'));
+    writeFileSync(
+      join(agentDir, 'configs/recap.json'),
+      JSON.stringify({ model: { provider: 'optional', id: 'org/deprecated' } }),
+    );
+    const h = harness();
+    const preferred = { ...h.model, provider: 'optional', id: 'org/deprecated' };
+    vi.mocked(h.ctx.modelRegistry.getAvailableOfType).mockResolvedValue([preferred]);
+    h.complete.mockImplementation(async (m) =>
+      m === preferred
+        ? ({
+            stopReason: 'error',
+            errorMessage: '410: Model has been deprecated',
+            content: [],
+          } as unknown as AssistantMessage)
+        : ({ stopReason: 'stop', content: [{ type: 'text', text: 'Fallback recap' }] } as AssistantMessage),
+    );
+    await h.commands.get('recap')!('', h.ctx);
+    expect(h.complete.mock.calls.map((c) => c[0])).toEqual([preferred, h.model]);
+    expect(h.appendEntry).toHaveBeenCalledWith('recap', expect.objectContaining({ summary: 'Fallback recap' }));
+    expect(h.notify).not.toHaveBeenCalledWith(expect.stringContaining('deprecated'), 'warning');
+  });
+
   it('tracks idle model changes but never carries a model across shutdown or extension instances', async () => {
     const h = harness();
     h.complete.mockResolvedValue({ content: [] } as unknown as AssistantMessage);

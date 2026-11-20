@@ -55,6 +55,7 @@ import {
   DEFAULT_CLASSIFIERS,
   findClassifier,
   selectSideModel,
+  withSessionFallback,
 } from '@nicknisi/pi-shared';
 import {
   getAgentDir,
@@ -482,8 +483,6 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
     try {
       const model = await resolveTitleModel(ctx, controller.signal);
       if (!model || controller.signal.aborted) return null;
-      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-      if (!auth.ok || controller.signal.aborted) return null;
 
       const systemPrompt = `You generate concise session titles for a coding agent. Given the user's prompt, reply with ONLY a short title of at most ${config.llmMaxWords} words. No quotes, no trailing punctuation, no explanation.`;
       const body = `${label}:\n${truncate(userText, 1000)}`;
@@ -493,12 +492,34 @@ export default function sessionNameExtension(pi: ExtensionAPI): void {
         timestamp: Date.now(),
       };
 
-      const response = await ctx.modelRegistry.complete(
+      const response = await withSessionFallback(
+        ctx,
         model,
-        { systemPrompt, messages: [userMessage] },
-        { signal: controller.signal },
+        async (m) => {
+          const auth = await ctx.modelRegistry.getApiKeyAndHeaders(m);
+          if (controller.signal.aborted) throw new Error('aborted');
+          if (!auth.ok) throw new Error(auth.error);
+          const response = await ctx.modelRegistry.complete(
+            m,
+            { systemPrompt, messages: [userMessage] },
+            { signal: controller.signal },
+          );
+          if (response.stopReason === 'error') throw new Error(response.errorMessage ?? 'request failed');
+          return response;
+        },
+        {
+          signal: controller.signal,
+          onFallback: (error) => {
+            if (warnedBadModel || !ctx.hasUI) return;
+            warnedBadModel = true;
+            ctx.ui.notify(
+              `session-name: model "${model.provider}/${model.id}" failed (${error instanceof Error ? error.message : String(error)}); using session model`,
+              'warning',
+            );
+          },
+        },
       );
-      if (response.stopReason === 'error' || response.stopReason === 'aborted') return null;
+      if (controller.signal.aborted || response.stopReason === 'aborted') return null;
       const raw = response.content
         .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
         .map((c) => c.text)

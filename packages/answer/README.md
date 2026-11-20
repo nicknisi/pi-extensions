@@ -74,7 +74,7 @@ Optional global config: `~/.pi/agent/configs/answer.json`. Changes take effect o
 
 `hintModels` is an ordered list of classifier `provider/model-id` strings for the [answer hint](#answer-hint); the first with working credentials wins. It defaults to Jev on every provider pi lists it under. `[]` turns the hint off. An invalid list warns and keeps the default. See [`answer.example.json`](./answer.example.json).
 
-If no preferred extraction model is available, extraction falls back to the **current session model** (`ctx.model`). Selection is re-evaluated each time, with no cached/sticky fallback. `/answer` also works without a session model when a preferred model is usable. If neither is available it reports an error. Request failures are not retried on another model. Authentication comes from Pi's normal model runtime; classifier hint selection is unchanged. Older supported hosts without `getAvailableOfType()` check each preference with `find()` plus `getApiKeyAndHeaders()`.
+If no preferred extraction model is available, extraction falls back to the **current session model** (`ctx.model`). Selection is re-evaluated each time, with no cached/sticky fallback. `/answer` also works without a session model when a preferred model is usable. If neither is available it reports an error. If the selected model is found but the request fails (e.g. a deprecated model returning 410, an outage, or quota), it retries once on the current session model via `withSessionFallback`. Authentication comes from Pi's normal model runtime; classifier hint selection is unchanged. Older supported hosts without `getAvailableOfType()` check each preference with `find()` plus `getApiKeyAndHeaders()`.
 
 ## Dependencies
 

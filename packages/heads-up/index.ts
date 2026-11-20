@@ -27,7 +27,13 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from '@earendil-works/pi-tui';
-import { type Classifier, classifyBool, findClassifier, selectSideModel } from '@nicknisi/pi-shared';
+import {
+  type Classifier,
+  classifyBool,
+  findClassifier,
+  selectSideModel,
+  withSessionFallback,
+} from '@nicknisi/pi-shared';
 import {
   type Kind,
   loadConfig,
@@ -308,13 +314,31 @@ export default function headsUp(pi: ExtensionAPI) {
     const model = await resolveModel(ctx, signal);
     if (signal.aborted) return null;
     if (!model) throw new Error('no model available');
-    const reply = await ctx.modelRegistry.complete(
+    const reply = await withSessionFallback(
+      ctx,
       model,
-      { systemPrompt, messages: [{ role: 'user', content: [{ type: 'text', text }], timestamp: Date.now() }] },
-      { cacheRetention: 'none', sessionId: uuidv7(), signal },
+      async (m) => {
+        const reply = await ctx.modelRegistry.complete(
+          m,
+          { systemPrompt, messages: [{ role: 'user', content: [{ type: 'text', text }], timestamp: Date.now() }] },
+          { cacheRetention: 'none', sessionId: uuidv7(), signal },
+        );
+        if (reply.stopReason === 'error') throw new Error(reply.errorMessage ?? 'request failed');
+        return reply;
+      },
+      {
+        signal,
+        onFallback: (error) => {
+          if (warnedModel) return;
+          warnedModel = true;
+          ctx.ui.notify(
+            `heads-up: model ${model.provider}/${model.id} failed (${error instanceof Error ? error.message : String(error)}); using the session model`,
+            'warning',
+          );
+        },
+      },
     );
     if (reply.stopReason === 'aborted') return null;
-    if (reply.stopReason === 'error') throw new Error(reply.errorMessage ?? 'request failed');
     const replyText = reply.content
       .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
       .map((c) => c.text)
