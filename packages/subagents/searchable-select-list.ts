@@ -80,7 +80,7 @@ export class SearchableSelectList implements Component {
     this.rebuild(selectedValue);
   }
 
-  render(width: number): string[] {
+  render(width: number): readonly string[] {
     return this.container.render(width);
   }
 
