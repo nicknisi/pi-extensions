@@ -1,5 +1,13 @@
 # @nicknisi/pi-recap
 
+## 0.1.14
+
+### Patch Changes
+
+- 3f237a6: Retry on the session model when a configured side model fails at request time (for example a deprecated model returning 410). Adds `withSessionFallback` to `@nicknisi/pi-shared`; recap, heads-up, session-name, answer, and btw now use it instead of surfacing the error.
+- Updated dependencies [3f237a6]
+  - @nicknisi/pi-shared@0.12.0
+
 ## 0.1.13
 
 ### Patch Changes

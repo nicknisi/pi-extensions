@@ -1,6 +1,6 @@
 {
   "name": "@nicknisi/pi-answer",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "Extract questions from the last assistant reply into an interactive Q&A form and send the answers back",
   "keywords": [
     "pi",
