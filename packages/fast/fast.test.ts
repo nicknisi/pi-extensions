@@ -9,6 +9,7 @@ import {
   isFastEnabled,
   noteFastError,
   noteFastUnavailable,
+  retryAfterMs,
   withFastCost,
   type FastState,
 } from './fast.js';
@@ -189,6 +190,30 @@ describe('rate-limit cooldown', () => {
       model: astra.id,
       service_tier: 'priority',
     });
+  });
+
+  it('lasts as long as the failed response asks when it says', () => {
+    const current = state();
+    expect(noteFastError(current, '429 {"type":"rate_limit_error"}', 1_000, 7_000)).toBe(8_000);
+  });
+
+  it('keeps a longer cooldown that is already running', () => {
+    const current = state({ cooldownUntil: 31_000 });
+    expect(noteFastError(current, '429 {"type":"rate_limit_error"}', 1_000, 5_000)).toBe(31_000);
+  });
+
+  it.each([
+    [{ 'retry-after': '12' }, 12_000],
+    [{ 'retry-after': '1.5' }, 1_500],
+    [{ 'retry-after-ms': '250', 'retry-after': '12' }, 250],
+    [{ 'retry-after': new Date(1_000 + 30_000).toUTCString() }, 30_000],
+    [{ 'retry-after-ms': '1e309', 'retry-after': '5' }, 5_000],
+    [{ 'retry-after': '1e309' }, undefined],
+    [{ 'retry-after': '0' }, undefined],
+    [{ 'retry-after': 'soon' }, undefined],
+    [{}, undefined],
+  ])('reads %o as a %s ms wait', (headers, expected) => {
+    expect(retryAfterMs(headers, 1_000)).toBe(expected);
   });
 
   it('ignores other errors', () => {

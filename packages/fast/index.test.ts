@@ -237,3 +237,124 @@ describe('cooldown footer', () => {
     pi.emit('session_shutdown', {}, uiCtx);
   });
 });
+
+describe('retry-after cooldown', () => {
+  const rateLimited = {
+    message: { role: 'assistant', stopReason: 'error', errorMessage: '429 {"type":"rate_limit_error"}' },
+  };
+
+  async function fastSession() {
+    const pi = fakePi();
+    fastExtension(pi.api);
+    pi.emit('session_start', {}, ctx);
+    await pi.commands.get('fast')!.handler('', ctx);
+    const request = () => pi.emit('before_provider_request', { payload: { model: model.id } }, ctx);
+    return { pi, request };
+  }
+
+  afterEach(() => vi.useRealTimers());
+
+  it("sets the cooldown from a failed Fast request's retry-after header", async () => {
+    vi.useFakeTimers();
+    const { pi, request } = await fastSession();
+    expect(request()).toMatchObject({ speed: 'fast' });
+    pi.emit(
+      'after_provider_response',
+      { type: 'after_provider_response', status: 429, headers: { 'retry-after': '5' } },
+      ctx,
+    );
+    pi.emit('message_end', rateLimited, ctx);
+
+    vi.advanceTimersByTime(4_999);
+    expect(request()).toBeUndefined();
+    vi.advanceTimersByTime(1);
+    expect(request()).toMatchObject({ speed: 'fast' });
+    pi.emit('session_shutdown', {}, ctx);
+  });
+
+  it('falls back to the fixed cooldown when no failed response is reported (WebSocket, mid-stream, pi < 1.6.1)', async () => {
+    vi.useFakeTimers();
+    const { pi, request } = await fastSession();
+    request();
+    pi.emit('message_end', rateLimited, ctx);
+
+    vi.advanceTimersByTime(59_999);
+    expect(request()).toBeUndefined();
+    vi.advanceTimersByTime(1);
+    expect(request()).toMatchObject({ speed: 'fast' });
+    pi.emit('session_shutdown', {}, ctx);
+  });
+
+  it("sends pi's automatic retry at standard speed even after a shorter retry-after", async () => {
+    vi.useFakeTimers();
+    const { pi, request } = await fastSession();
+    request();
+    pi.emit(
+      'after_provider_response',
+      { type: 'after_provider_response', status: 429, headers: { 'retry-after-ms': '250' } },
+      ctx,
+    );
+    pi.emit('message_end', rateLimited, ctx);
+
+    vi.advanceTimersByTime(2_000); // pi's first automatic retry
+    expect(request()).toBeUndefined();
+    expect(request()).toMatchObject({ speed: 'fast' });
+    pi.emit('session_shutdown', {}, ctx);
+  });
+
+  it('keeps the standard-speed retry when a subagent child sends a request first', async () => {
+    vi.useFakeTimers();
+    const { pi, request } = await fastSession();
+    const child = fakePi();
+    await childExtensions().get('fast')!(child.api);
+    request();
+    pi.emit(
+      'after_provider_response',
+      { type: 'after_provider_response', status: 429, headers: { 'retry-after-ms': '250' } },
+      ctx,
+    );
+    pi.emit('message_end', rateLimited, ctx);
+
+    vi.advanceTimersByTime(1_000);
+    expect(child.emit('before_provider_request', { payload: { model: model.id } }, ctx)).toMatchObject({
+      speed: 'fast',
+    });
+    expect(request()).toBeUndefined(); // the parent's retry
+    pi.emit('session_shutdown', {}, ctx);
+  });
+
+  it('forgets a retry-after once a later attempt of the same request succeeds', async () => {
+    vi.useFakeTimers();
+    const { pi, request } = await fastSession();
+    request();
+    pi.emit(
+      'after_provider_response',
+      { type: 'after_provider_response', status: 429, headers: { 'retry-after': '5' } },
+      ctx,
+    );
+    pi.emit('after_provider_response', { type: 'after_provider_response', status: 200, headers: {} }, ctx);
+    pi.emit('message_end', rateLimited, ctx); // overloaded mid-stream: no response to read
+
+    vi.advanceTimersByTime(59_999);
+    request(); // the standard-speed retry
+    expect(request()).toBeUndefined();
+    pi.emit('session_shutdown', {}, ctx);
+  });
+
+  it("does not carry one request's retry-after over to the next", async () => {
+    vi.useFakeTimers();
+    const { pi, request } = await fastSession();
+    request();
+    pi.emit(
+      'after_provider_response',
+      { type: 'after_provider_response', status: 429, headers: { 'retry-after': '5' } },
+      ctx,
+    );
+    request(); // a new request before the first one's message_end
+    pi.emit('message_end', rateLimited, ctx);
+
+    vi.advanceTimersByTime(5_000);
+    expect(request()).toBeUndefined();
+    pi.emit('session_shutdown', {}, ctx);
+  });
+});

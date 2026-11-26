@@ -157,14 +157,37 @@ export function isFastUnavailable(state: FastState, modelKey: string): boolean {
 }
 
 /**
+ * How long a rate-limited response asks the client to wait, from `retry-after-ms`
+ * or `retry-after` (seconds or an HTTP date), read the same way pi-ai's retry does.
+ * Undefined when neither header gives a positive delay.
+ */
+export function retryAfterMs(headers: Record<string, string>, now = Date.now()): number | undefined {
+  const ms = Number.parseFloat(headers['retry-after-ms'] ?? '');
+  if (Number.isFinite(ms) && ms > 0) return ms;
+  const value = headers['retry-after'];
+  if (!value) return undefined;
+  const seconds = Number.parseFloat(value);
+  const delay = Number.isNaN(seconds) ? Date.parse(value) - now : seconds * 1000;
+  return Number.isFinite(delay) && delay > 0 ? delay : undefined;
+}
+
+/**
  * Start a standard-speed cooldown after a Fast-mode request is rate limited or
- * over capacity. Provider SDK errors read like `429 {"type":"error",...}`; the
- * retry-after header is not exposed on failed requests, so the cooldown is fixed.
+ * over capacity. Provider SDK errors read like `429 {"type":"error",...}`. The
+ * cooldown lasts `waitMs` (the failed response's retry-after) when known, else a
+ * fixed minute: pi before 1.6.1, WebSocket transports and errors inside a started
+ * stream report no failed response. A longer cooldown already running (e.g. from a
+ * subagent child) is kept.
  * Returns the cooldown end, or undefined when the error is something else.
  */
-export function noteFastError(state: FastState, errorMessage: string, now = Date.now()): number | undefined {
+export function noteFastError(
+  state: FastState,
+  errorMessage: string,
+  now = Date.now(),
+  waitMs: number = DEFAULT_COOLDOWN_MS,
+): number | undefined {
   if (!/^(429|529)\b|rate_limit_error|overloaded_error/i.test(errorMessage.trim())) return undefined;
-  state.cooldownUntil = now + DEFAULT_COOLDOWN_MS;
+  state.cooldownUntil = Math.max(state.cooldownUntil ?? 0, now + waitMs);
   return state.cooldownUntil;
 }
 
