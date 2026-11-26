@@ -106,12 +106,17 @@ function attachRequestHooks(
   let lastFast: FastProvider | undefined;
   // retry-after of that request's last 429/529; pi 1.6.1+ reports failed responses here.
   let retryAfter: number | undefined;
+  // This session's next request is pi's automatic retry of a rate-limited one: send it at
+  // standard speed even if a short retry-after has passed. Per hook, so a child can't use it up.
+  let retryStandard = false;
   target.on('before_provider_request', (event, ctx) => {
     retryAfter = undefined;
+    const standard = retryStandard;
+    retryStandard = false;
     const state = stateFor(ctx);
     if (!state || !ctx.model) return;
     const eligibility = getFastEligibility(ctx.model, usingOAuth(ctx));
-    const nextPayload = injectFastPayload(event.payload, ctx.model, eligibility, state);
+    const nextPayload = standard ? undefined : injectFastPayload(event.payload, ctx.model, eligibility, state);
     lastFast = nextPayload !== undefined ? eligibility.provider : undefined;
     hooks.afterRequest?.(ctx);
     return nextPayload;
@@ -135,7 +140,10 @@ function attachRequestHooks(
         return;
       }
       const until = noteFastError(state, message.errorMessage ?? '', Date.now(), waitMs);
-      if (until !== undefined) hooks.onCooldown?.(until, ctx);
+      if (until !== undefined) {
+        retryStandard = true;
+        hooks.onCooldown?.(until, ctx);
+      }
       return;
     }
     // pi-ai prices Anthropic replies at the standard rate. Codex is left alone: it

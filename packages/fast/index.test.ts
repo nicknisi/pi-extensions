@@ -302,6 +302,27 @@ describe('retry-after cooldown', () => {
     pi.emit('session_shutdown', {}, ctx);
   });
 
+  it('keeps the standard-speed retry when a subagent child sends a request first', async () => {
+    vi.useFakeTimers();
+    const { pi, request } = await fastSession();
+    const child = fakePi();
+    await childExtensions().get('fast')!(child.api);
+    request();
+    pi.emit(
+      'after_provider_response',
+      { type: 'after_provider_response', status: 429, headers: { 'retry-after-ms': '250' } },
+      ctx,
+    );
+    pi.emit('message_end', rateLimited, ctx);
+
+    vi.advanceTimersByTime(1_000);
+    expect(child.emit('before_provider_request', { payload: { model: model.id } }, ctx)).toMatchObject({
+      speed: 'fast',
+    });
+    expect(request()).toBeUndefined(); // the parent's retry
+    pi.emit('session_shutdown', {}, ctx);
+  });
+
   it('forgets a retry-after once a later attempt of the same request succeeds', async () => {
     vi.useFakeTimers();
     const { pi, request } = await fastSession();
