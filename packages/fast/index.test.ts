@@ -285,6 +285,41 @@ describe('retry-after cooldown', () => {
     pi.emit('session_shutdown', {}, ctx);
   });
 
+  it("sends pi's automatic retry at standard speed even after a shorter retry-after", async () => {
+    vi.useFakeTimers();
+    const { pi, request } = await fastSession();
+    request();
+    pi.emit(
+      'after_provider_response',
+      { type: 'after_provider_response', status: 429, headers: { 'retry-after-ms': '250' } },
+      ctx,
+    );
+    pi.emit('message_end', rateLimited, ctx);
+
+    vi.advanceTimersByTime(2_000); // pi's first automatic retry
+    expect(request()).toBeUndefined();
+    expect(request()).toMatchObject({ speed: 'fast' });
+    pi.emit('session_shutdown', {}, ctx);
+  });
+
+  it('forgets a retry-after once a later attempt of the same request succeeds', async () => {
+    vi.useFakeTimers();
+    const { pi, request } = await fastSession();
+    request();
+    pi.emit(
+      'after_provider_response',
+      { type: 'after_provider_response', status: 429, headers: { 'retry-after': '5' } },
+      ctx,
+    );
+    pi.emit('after_provider_response', { type: 'after_provider_response', status: 200, headers: {} }, ctx);
+    pi.emit('message_end', rateLimited, ctx); // overloaded mid-stream: no response to read
+
+    vi.advanceTimersByTime(59_999);
+    request(); // the standard-speed retry
+    expect(request()).toBeUndefined();
+    pi.emit('session_shutdown', {}, ctx);
+  });
+
   it("does not carry one request's retry-after over to the next", async () => {
     vi.useFakeTimers();
     const { pi, request } = await fastSession();

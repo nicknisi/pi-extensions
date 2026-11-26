@@ -50,6 +50,8 @@ export interface FastState {
   lastInjectedModel?: string;
   /** Epoch ms until which requests run at standard speed after a Fast-mode rate limit. */
   cooldownUntil?: number;
+  /** The next request (pi's automatic retry) runs at standard speed even if a short retry-after has passed. */
+  retryStandard?: boolean;
   /** provider/model keys whose account or workspace refused Fast mode this session. */
   unavailable?: Set<string>;
 }
@@ -163,12 +165,12 @@ export function isFastUnavailable(state: FastState, modelKey: string): boolean {
  */
 export function retryAfterMs(headers: Record<string, string>, now = Date.now()): number | undefined {
   const ms = Number.parseFloat(headers['retry-after-ms'] ?? '');
-  if (ms > 0) return ms;
+  if (Number.isFinite(ms) && ms > 0) return ms;
   const value = headers['retry-after'];
   if (!value) return undefined;
   const seconds = Number.parseFloat(value);
   const delay = Number.isNaN(seconds) ? Date.parse(value) - now : seconds * 1000;
-  return delay > 0 ? delay : undefined;
+  return Number.isFinite(delay) && delay > 0 ? delay : undefined;
 }
 
 /**
@@ -176,7 +178,8 @@ export function retryAfterMs(headers: Record<string, string>, now = Date.now()):
  * over capacity. Provider SDK errors read like `429 {"type":"error",...}`. The
  * cooldown lasts `waitMs` (the failed response's retry-after) when known, else a
  * fixed minute: pi before 1.6.1, WebSocket transports and errors inside a started
- * stream report no failed response.
+ * stream report no failed response. A longer cooldown already running (e.g. from a
+ * subagent child) is kept, and the next request goes at standard speed either way.
  * Returns the cooldown end, or undefined when the error is something else.
  */
 export function noteFastError(
@@ -186,7 +189,8 @@ export function noteFastError(
   waitMs: number = DEFAULT_COOLDOWN_MS,
 ): number | undefined {
   if (!/^(429|529)\b|rate_limit_error|overloaded_error/i.test(errorMessage.trim())) return undefined;
-  state.cooldownUntil = now + waitMs;
+  state.cooldownUntil = Math.max(state.cooldownUntil ?? 0, now + waitMs);
+  state.retryStandard = true;
   return state.cooldownUntil;
 }
 
@@ -216,8 +220,12 @@ export function injectFastPayload(
   now = Date.now(),
 ): PayloadRecord | undefined {
   if (!isFastEnabled(state) || !eligibility.eligible || !eligibility.provider) return undefined;
-  if (isCoolingDown(state, now) || isFastUnavailable(state, eligibility.modelKey)) return undefined;
+  if (isFastUnavailable(state, eligibility.modelKey)) return undefined;
   if (!isPayloadRecord(payload) || payload.model !== model.id) return undefined;
+  if (state.retryStandard || isCoolingDown(state, now)) {
+    state.retryStandard = false;
+    return undefined;
+  }
 
   if (eligibility.provider === 'anthropic') {
     if ('speed' in payload) return undefined;

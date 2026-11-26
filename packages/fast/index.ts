@@ -117,7 +117,8 @@ function attachRequestHooks(
     return nextPayload;
   });
   target.on('after_provider_response', (event) => {
-    if (lastFast && (event.status === 429 || event.status === 529)) retryAfter = retryAfterMs(event.headers);
+    // Every response replaces it: a 429 followed by a successful retry leaves nothing behind.
+    retryAfter = lastFast && (event.status === 429 || event.status === 529) ? retryAfterMs(event.headers) : undefined;
   });
   target.on('message_end', (event, ctx) => {
     const state = stateFor(ctx);
@@ -164,7 +165,8 @@ export default function fastExtension(pi: ExtensionAPI) {
         updateStatus(ctx, current);
         if (isCoolingDown(current)) scheduleCooldownEnd(current, ctx);
       },
-      Math.max(0, current.cooldownUntil - Date.now()),
+      // setTimeout fires at once past 2^31-1 ms, which would re-arm in a tight loop.
+      Math.min(Math.max(0, current.cooldownUntil - Date.now()), 2 ** 31 - 1),
     );
     cooldownTimer.unref?.();
   }
