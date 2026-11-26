@@ -9,6 +9,7 @@ import {
   isFastEnabled,
   noteFastError,
   noteFastUnavailable,
+  retryAfterMs,
   withFastCost,
   type FastState,
 } from './fast.js';
@@ -189,6 +190,23 @@ describe('rate-limit cooldown', () => {
       model: astra.id,
       service_tier: 'priority',
     });
+  });
+
+  it('lasts as long as the failed response asks when it says', () => {
+    const current = state();
+    expect(noteFastError(current, '429 {"type":"rate_limit_error"}', 1_000, 7_000)).toBe(8_000);
+  });
+
+  it.each([
+    [{ 'retry-after': '12' }, 12_000],
+    [{ 'retry-after': '1.5' }, 1_500],
+    [{ 'retry-after-ms': '250', 'retry-after': '12' }, 250],
+    [{ 'retry-after': new Date(1_000 + 30_000).toUTCString() }, 30_000],
+    [{ 'retry-after': '0' }, undefined],
+    [{ 'retry-after': 'soon' }, undefined],
+    [{}, undefined],
+  ])('reads %o as a %s ms wait', (headers, expected) => {
+    expect(retryAfterMs(headers, 1_000)).toBe(expected);
   });
 
   it('ignores other errors', () => {

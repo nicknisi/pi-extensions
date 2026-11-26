@@ -12,6 +12,7 @@ import {
   noteFastError,
   noteFastUnavailable,
   OPENAI_FAST_SERVICE_TIER,
+  retryAfterMs,
   withFastCost,
   type FastProvider,
   type FastState,
@@ -103,7 +104,10 @@ function attachRequestHooks(
 ): void {
   // Provider of the last request sent at Fast speed; cleared once its reply is handled.
   let lastFast: FastProvider | undefined;
+  // retry-after of that request's last 429/529; pi 1.6.1+ reports failed responses here.
+  let retryAfter: number | undefined;
   target.on('before_provider_request', (event, ctx) => {
+    retryAfter = undefined;
     const state = stateFor(ctx);
     if (!state || !ctx.model) return;
     const eligibility = getFastEligibility(ctx.model, usingOAuth(ctx));
@@ -112,19 +116,24 @@ function attachRequestHooks(
     hooks.afterRequest?.(ctx);
     return nextPayload;
   });
+  target.on('after_provider_response', (event) => {
+    if (lastFast && (event.status === 429 || event.status === 529)) retryAfter = retryAfterMs(event.headers);
+  });
   target.on('message_end', (event, ctx) => {
     const state = stateFor(ctx);
     const message = event.message;
     if (!state || !lastFast || message.role !== 'assistant') return;
     const provider = lastFast;
+    const waitMs = retryAfter;
     lastFast = undefined;
+    retryAfter = undefined;
     if (message.stopReason === 'error') {
       const modelKey = `${message.provider}/${message.model}`;
       if (noteFastUnavailable(state, message.errorMessage ?? '', modelKey)) {
         hooks.onUnavailable?.(modelKey, ctx);
         return;
       }
-      const until = noteFastError(state, message.errorMessage ?? '');
+      const until = noteFastError(state, message.errorMessage ?? '', Date.now(), waitMs);
       if (until !== undefined) hooks.onCooldown?.(until, ctx);
       return;
     }

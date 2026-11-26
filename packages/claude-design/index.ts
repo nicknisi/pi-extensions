@@ -31,6 +31,8 @@ export default function claudeDesignExtension(pi: ExtensionAPI) {
       const pasted = await ctx.ui.input(
         'Approve Claude Design access in the browser, then paste the CODE#STATE value:',
         'CODE#STATE',
+        // A login, not a question: terminals with program status (OSC 7501, pi 1.6.1+) show it as one.
+        { blockedKind: 'auth' },
       );
       if (!pasted?.trim()) {
         ctx.ui.notify('Login cancelled', 'warning');
