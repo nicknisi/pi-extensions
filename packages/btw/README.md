@@ -61,6 +61,8 @@ Writes the current branch plus the btw thread (as real user/assistant messages) 
 2. **New Ghostty window** (macOS) — via `open -na Ghostty --args --working-directory=<cwd> -e /bin/zsh -ilc 'exec pi --session "$1"' btw <file>`; the path is passed as a positional argument so it is never parsed by the shell. Runs through a login+interactive zsh because GUI apps launched by `open` only inherit launchd's minimal `PATH`, which typically lacks `pi`.
 3. **Clipboard + printed command** — `pi --session '<file>'` (shell-quoted) copied via `pbcopy` (macOS only) and shown in a notification.
 
+None of these surfaces inherit pi's environment, so when pi runs with a non-default agent dir (`PI_CODING_AGENT_DIR`, or pi 1.7.0's `--agent-dir`, which sets it), the fork gets it back as `PI_CODING_AGENT_DIR`: tmux `split-window -e` (tmux 3.0+), a `PI_CODING_AGENT_DIR="$2"` prefix in the Ghostty zsh command, and a `PI_CODING_AGENT_DIR='<dir>'` prefix on the printed command. Without it, the fork would open with the default `~/.pi/agent` settings and auth. The env var is used instead of `--agent-dir` because pi before 1.7.0 rejects that flag.
+
 Fork happens _before_ the transcript card is persisted, so the forked session does not contain the card entry.
 
 ## How it works
