@@ -31,10 +31,10 @@ import { execFile } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { AssistantMessage, Message, ThinkingLevel } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, SessionEntry, SessionProjection, Theme } from '@earendil-works/pi-coding-agent';
-import { convertToLlm, CURRENT_SESSION_VERSION, getMarkdownTheme } from '@earendil-works/pi-coding-agent';
+import { convertToLlm, CURRENT_SESSION_VERSION, getAgentDir, getMarkdownTheme } from '@earendil-works/pi-coding-agent';
 import { selectSideModel, withSessionFallback } from '@nicknisi/pi-shared';
 import { loadBtwConfig } from './config.js';
 import {
@@ -732,14 +732,21 @@ function copyToClipboard(text: string): Promise<boolean> {
  *      (GUI apps launched by `open` only get launchd's minimal PATH)
  *   3. clipboard + printed command
  * Returns the notification message.
+ *
+ * None of these inherit pi's environment, so a non-default agent dir (`PI_CODING_AGENT_DIR`,
+ * or `--agent-dir`, which sets it) is passed on as the env var: older pi rejects `--agent-dir`.
  */
-async function openFork(sessionFile: string, cwd: string): Promise<string> {
+export async function openFork(sessionFile: string, cwd: string): Promise<string> {
+  // Absolute: the fork runs from another directory, and a relative override stays relative in getAgentDir().
+  const agentDir = process.env.PI_CODING_AGENT_DIR ? resolve(getAgentDir()) : undefined;
+  const agentDirEnv = agentDir ? `PI_CODING_AGENT_DIR=${agentDir}` : undefined;
   if (process.env.TMUX) {
     const override = process.env.PI_BTW_SPLIT;
     const direction =
       override === 'h' || override === 'v' ? `-${override}` : (process.stdout.columns ?? 0) >= 160 ? '-h' : '-v';
     try {
-      await run('tmux', ['split-window', direction, '-c', cwd, 'pi', '--session', sessionFile]);
+      const env = agentDirEnv ? ['-e', agentDirEnv] : [];
+      await run('tmux', ['split-window', direction, '-c', cwd, ...env, 'pi', '--session', sessionFile]);
       return 'btw fork opened in a tmux split';
     } catch {
       // fall through to Ghostty/clipboard
@@ -756,10 +763,11 @@ async function openFork(sessionFile: string, cwd: string): Promise<string> {
         '-e',
         '/bin/zsh',
         '-ilc',
-        // Pass the path as $1 so no characters in it are interpreted by the shell.
-        'exec pi --session "$1"',
+        // Pass the paths as $1/$2 so no characters in them are interpreted by the shell.
+        `${agentDir ? 'PI_CODING_AGENT_DIR="$2" ' : ''}exec pi --session "$1"`,
         'btw',
         sessionFile,
+        ...(agentDir ? [agentDir] : []),
       ]);
       return 'btw fork opened in a new Ghostty window';
     } catch {
@@ -767,7 +775,7 @@ async function openFork(sessionFile: string, cwd: string): Promise<string> {
     }
   }
 
-  const cmd = `pi --session ${shellQuote(sessionFile)}`;
+  const cmd = `${agentDir ? `PI_CODING_AGENT_DIR=${shellQuote(agentDir)} ` : ''}pi --session ${shellQuote(sessionFile)}`;
   const copied = await copyToClipboard(cmd);
   return copied ? `btw fork ready (command copied): ${cmd}` : `btw fork ready: ${cmd}`;
 }
