@@ -31,7 +31,7 @@ import { execFile } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { AssistantMessage, Message, ThinkingLevel } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, SessionEntry, SessionProjection, Theme } from '@earendil-works/pi-coding-agent';
 import { convertToLlm, CURRENT_SESSION_VERSION, getAgentDir, getMarkdownTheme } from '@earendil-works/pi-coding-agent';
@@ -737,7 +737,8 @@ function copyToClipboard(text: string): Promise<boolean> {
  * or `--agent-dir`, which sets it) is passed on as the env var: older pi rejects `--agent-dir`.
  */
 export async function openFork(sessionFile: string, cwd: string): Promise<string> {
-  const agentDir = process.env.PI_CODING_AGENT_DIR ? getAgentDir() : undefined;
+  // Absolute: the fork runs from another directory, and a relative override stays relative in getAgentDir().
+  const agentDir = process.env.PI_CODING_AGENT_DIR ? resolve(getAgentDir()) : undefined;
   const agentDirEnv = agentDir ? `PI_CODING_AGENT_DIR=${agentDir}` : undefined;
   if (process.env.TMUX) {
     const override = process.env.PI_BTW_SPLIT;

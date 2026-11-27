@@ -61,6 +61,14 @@ it('puts a non-default agent dir in the printed command', async () => {
   );
 });
 
+it('resolves a relative agent dir against where pi runs', async () => {
+  vi.stubEnv('PI_CODING_AGENT_DIR', './profile');
+
+  expect(await openFork('/s/fork.jsonl', '/repo')).toBe(
+    `btw fork ready: PI_CODING_AGENT_DIR='${process.cwd()}/profile' pi --session '/s/fork.jsonl'`,
+  );
+});
+
 it('leaves the commands unchanged with the default agent dir', async () => {
   vi.stubEnv('TMUX', '/tmp/tmux-1/default,1,0');
   succeed = (cmd) => cmd === 'tmux';
